@@ -1,6 +1,6 @@
 import asyncio
 import itertools
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -21,7 +21,7 @@ class FakePlatform:
             "parent_id": parent_id,
             "likes": set(),
             "reposts": set(),
-            "created_at": datetime.now().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
         self.posts[post["id"]] = post
         if parent_id is not None:
@@ -75,8 +75,10 @@ class FakePlatform:
     async def get_post(self, post_id: int) -> dict:
         return self._get(post_id)
 
-    async def feed_latest(self, n: int = 10) -> list:
-        return sorted(self.posts.values(), key=lambda p: p["id"], reverse=True)[:n]
+    async def feed_latest(self, n: int = 10, before: Optional[int] = None) -> list:
+        """Newest first; pass `before` (a post id) to page further back in time."""
+        posts = [p for p in self.posts.values() if before is None or p["id"] < before]
+        return sorted(posts, key=lambda p: p["id"], reverse=True)[:n]
 
     async def feed_home(self, username: str, n: int = 10) -> list:
         followed = self.following.get(username, set())
@@ -111,7 +113,7 @@ class FakePlatform:
             "kind": kind,
             "actor": actor,
             "post_id": post_id,
-            "created_at": datetime.now().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         })
 
 
