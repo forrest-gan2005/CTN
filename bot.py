@@ -158,10 +158,12 @@ class Bot:
 
     async def read(self) -> dict:
         notes = await self.platform.get_notifications(self.username)
+        now = _iso(datetime.now(timezone.utc))
+        self.store.record_engagement(self.username, notes, now)
         replies = [n for n in notes if n.get("kind") == "reply" and n.get("post_id") is not None
                    and self.roster.classify(n.get("actor")) != "own"]
         # Notifications are gone once read, so keep replies until answered or stale.
-        self.store.add_inbox(self.username, replies, _iso(datetime.now(timezone.utc)))
+        self.store.add_inbox(self.username, replies, now)
         feed = self.feed() if self.feed is not None else await self.platform.feed_latest(n=10)
         return {"feed": feed}
 

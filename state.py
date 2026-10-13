@@ -44,6 +44,14 @@ CREATE TABLE IF NOT EXISTS reports (
     reported_at TEXT NOT NULL,
     status TEXT NOT NULL       -- sent | upheld | rejected | error
 );
+CREATE TABLE IF NOT EXISTS engagement (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,    -- our account that was engaged
+    kind TEXT NOT NULL,        -- like | repost | reply | follow | ...
+    actor TEXT,
+    post_id INTEGER,           -- as the notification gave it
+    received_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS inbox (
     username TEXT NOT NULL,
     post_id INTEGER NOT NULL,  -- a reply to one of our posts, waiting for an answer
@@ -151,6 +159,25 @@ class StateStore:
     def reported(self) -> set:
         return {r[0] for r in self.db.execute("SELECT post_id FROM reports")}
 
+    def record_engagement(self, username: str, notes: list, received_at: str) -> None:
+        """Every notification, kept as the feedback for judging which tactics earn engagement."""
+        with self.db:
+            self.db.executemany(
+                "INSERT INTO engagement (username, kind, actor, post_id, received_at) VALUES (?, ?, ?, ?, ?)",
+                [(username, n.get("kind") or "?", n.get("actor"), n.get("post_id"), received_at) for n in notes],
+            )
+
+    def action_counts(self, since: str) -> dict:
+        rows = self.db.execute("SELECT type, COUNT(*) FROM history WHERE ts >= ? GROUP BY type", (since,))
+        return dict(rows.fetchall())
+
+    def engagement_counts(self, since: str) -> dict:
+        rows = self.db.execute("SELECT kind, COUNT(*) FROM engagement WHERE received_at >= ? GROUP BY kind", (since,))
+        return dict(rows.fetchall())
+
+    def report_counts(self) -> dict:
+        return dict(self.db.execute("SELECT status, COUNT(*) FROM reports GROUP BY status").fetchall())
+
     def add_inbox(self, username: str, notes: list, received_at: str) -> None:
         with self.db:
             self.db.executemany(
@@ -217,4 +244,7 @@ if __name__ == "__main__":
     s.record_report(3, "rival", "assistant talk", "t", "sent")
     s.record_report(3, "rival", "assistant talk", "t", "upheld")
     assert s.reported() == {3}
+    s.record_engagement("joe", [{"kind": "like", "actor": "npc1", "post_id": 77}], "2026-10-20T03:00:00+00:00")
+    assert s.engagement_counts("2026-10-20") == {"like": 1} and s.report_counts() == {"upheld": 1}
+    assert s.action_counts("t0")["reply"] == 2
     print("state ok")
