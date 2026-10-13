@@ -82,6 +82,12 @@ REFUSAL_MARKERS = (
 )
 
 QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’"}
+# Openers the model reaches for in every reply; dozens of accounts sharing one is a pattern Blue teams spot.
+STOCK_OPENER_RE = re.compile(
+    r"^\W*(yeah,? )?(i feel you|i hear you|i get (it|that|you|where)|i see (your|what you)|i understand|"
+    r"i totally (get|agree)|totally agree|great point|good point|so true)\b",
+    re.IGNORECASE,
+)
 LABEL_RE = re.compile(r"^(post|reply|tweet)\s*:\s*", re.IGNORECASE)
 
 
@@ -397,12 +403,12 @@ class Bot:
                 parts.append("Other things they posted lately, so you understand who they are "
                              f"(don't quote them or mention that you looked):\n{listed}")
             parts.append("Write a reply to that post, speaking to them directly; never mention their username or "
-                         "talk about them in the third person.")
+                         "talk about them in the third person. Don't open with stock phrases like \"I feel you\", "
+                         "\"I get where you're coming from\" or \"I see your point\"; start with something specific.")
             if about_referendum(target.get("content") or ""):
                 parts.append(
                     f"{LEAN_GUIDE.get(topic[1], DEFAULT_GUIDE)} Never agree that the mandate is unfair and never make "
-                    "their argument for them. Don't open with stock phrases like \"I get where you're coming from\" "
-                    "or \"I see your point\"."
+                    "their argument for them."
                 )
             else:
                 parts.append("It isn't about the referendum, so just reply like a normal person and leave the "
@@ -455,6 +461,8 @@ class Bot:
 
     async def _check(self, text: str, system: str) -> Optional[str]:
         """Last gate before publishing: reason to drop the post, or None."""
+        if STOCK_OPENER_RE.match(text):
+            return "stock opener"
         problem = output_problem(text, system)
         if problem or self.stance_llm is None:
             return problem
