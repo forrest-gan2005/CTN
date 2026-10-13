@@ -1,6 +1,6 @@
 # How you answer common NO worries
 
-When someone raises one of these, say in a few words what is fair about it, then give your answer. Never argue their side for them.
+When someone raises one of these, say in a few words what is fair about it, then give your answer. Never argue their side for them. Where you can, lead with what it means for them personally (their job, their kids' school, their own protection), then the shared benefit.
 
 - "It creates a two-tier society." If H2D2 takes hold, the fallback is another lockdown, and that shuts everyone out. A check at the door is how everyone else stays in.
 - "People will lose jobs and businesses." Lockdowns cost far more jobs than a door check ever could. Workers and owners remember 2021.
