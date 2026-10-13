@@ -2,7 +2,9 @@ import asyncio
 import json
 import logging
 import random
+import re
 import sqlite3
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
@@ -24,20 +26,25 @@ CREATE TABLE IF NOT EXISTS posts (
     ours INTEGER NOT NULL DEFAULT 0,
     raw TEXT NOT NULL         -- the post exactly as the API returned it
 );
-CREATE INDEX IF NOT EXISTS posts_author ON posts(author);
+CREATE INDEX IF NOT EXISTS posts_author ON posts(author, id);
+CREATE INDEX IF NOT EXISTS posts_created ON posts(created_at);
 CREATE TABLE IF NOT EXISTS gaps (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     low INTEGER,              -- newest stored id below the gap; NULL = back to the start of history
     high INTEGER NOT NULL     -- still need every post with id < high (and > low)
 );
-CREATE VIEW IF NOT EXISTS accounts AS
-    SELECT author,
-           COUNT(*) AS posts,
-           MIN(created_at) AS first_post_at,
-           MIN(fetched_at) AS first_fetched_at,
-           MAX(ours) AS ours
-    FROM posts GROUP BY author;
+-- One row per account, kept up to date on insert: the competition will produce millions of
+-- posts, and grouping them on every whitelist lookup would take seconds.
+CREATE TABLE IF NOT EXISTS authors (
+    author TEXT PRIMARY KEY,
+    posts INTEGER NOT NULL,
+    first_post_at TEXT,
+    first_fetched_at TEXT NOT NULL,
+    ours INTEGER NOT NULL
+);
 """
+PRE_START = "a.ours = 0 AND (IFNULL(a.first_post_at < ?, 0) OR a.first_fetched_at < ?)"
+HASHTAG_RE = re.compile(r"#\w{2,30}")
 
 
 def _iso(dt: datetime) -> str:
@@ -81,10 +88,21 @@ class NpcStore:
             int(p["author"] in self.own),
             json.dumps(p, default=_json_default, ensure_ascii=False),
         ) for p in posts]
-        before = self.db.total_changes
+        ids = [r[0] for r in rows]
+        marks = ",".join("?" * len(ids))
+        known = {r[0] for r in self.db.execute(f"SELECT id FROM posts WHERE id IN ({marks})", ids)} if ids else set()
+        new = [r for r in rows if r[0] not in known]
         with self.db:
-            self.db.executemany("INSERT OR IGNORE INTO posts VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
-        return self.db.total_changes - before
+            self.db.executemany("INSERT OR IGNORE INTO posts VALUES (?, ?, ?, ?, ?, ?, ?, ?)", new)
+            self.db.executemany(
+                "INSERT INTO authors VALUES (?, 1, ?, ?, ?) ON CONFLICT(author) DO UPDATE SET "
+                "posts = posts + 1, "
+                "first_post_at = CASE WHEN excluded.first_post_at IS NULL THEN first_post_at "
+                "WHEN first_post_at IS NULL OR excluded.first_post_at < first_post_at THEN excluded.first_post_at "
+                "ELSE first_post_at END",
+                [(r[1], r[4], r[5], r[6]) for r in new],
+            )
+        return len(new)
 
     def count(self) -> int:
         return self.db.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
@@ -110,23 +128,98 @@ class NpcStore:
     def whitelist(self, cutoff: datetime = COMPETITION_START) -> list:
         """Accounts that posted, or that we saw, before `cutoff`: competitors weren't on the platform yet."""
         c = _iso(cutoff)
+        rows = self.db.execute(f"SELECT author FROM authors a WHERE {PRE_START} ORDER BY author", (c, c))
+        return [r[0] for r in rows]
+
+    def npc_posts(self, cutoff: datetime = COMPETITION_START, limit: Optional[int] = None) -> list:
+        """(author, content, created_at, parent_id) by whitelisted citizens, oldest first; `limit` keeps the newest."""
+        c = _iso(cutoff)
         rows = self.db.execute(
-            "SELECT author FROM accounts WHERE ours = 0 AND (first_post_at < ? OR first_fetched_at < ?) "
-            "ORDER BY author",
+            "SELECT p.author, p.content, p.created_at, p.parent_id FROM posts p "
+            f"JOIN authors a ON a.author = p.author WHERE {PRE_START} AND p.content IS NOT NULL "
+            "ORDER BY p.id DESC LIMIT ?",
+            (c, c, -1 if limit is None else limit),
+        ).fetchall()
+        return rows[::-1]
+
+    def unknown_posts(self, cutoff: datetime = COMPETITION_START) -> list:
+        """(author, content) for posts by accounts that are neither ours nor whitelisted."""
+        c = _iso(cutoff)
+        return self.db.execute(
+            "SELECT p.author, p.content FROM posts p JOIN authors a ON a.author = p.author "
+            f"WHERE a.ours = 0 AND NOT ({PRE_START}) AND p.content IS NOT NULL ORDER BY p.id",
             (c, c),
+        ).fetchall()
+
+    def recent(self, n: int = 30) -> list:
+        """The newest posts as the API returned them, so bots can read the feed without extra API calls."""
+        rows = self.db.execute("SELECT raw FROM posts ORDER BY id DESC LIMIT ?", (n,))
+        return [json.loads(r[0]) for r in rows]
+
+    def recent_citizen_posts(self, n: int = 30, cutoff: datetime = COMPETITION_START) -> list:
+        """The newest posts by whitelisted citizens: bots will far outnumber them in Latest."""
+        c = _iso(cutoff)
+        rows = self.db.execute(
+            f"SELECT p.raw FROM posts p JOIN authors a ON a.author = p.author WHERE {PRE_START} "
+            "ORDER BY p.id DESC LIMIT ?",
+            (c, c, n),
+        )
+        return [json.loads(r[0]) for r in rows]
+
+    def recent_by(self, author: str, n: int = 3) -> list:
+        """This account's newest post texts, to tailor a reply to the person."""
+        rows = self.db.execute(
+            "SELECT content FROM posts WHERE author = ? AND content IS NOT NULL ORDER BY id DESC LIMIT ?",
+            (author, n),
         )
         return [r[0] for r in rows]
+
+    def top_hashtags(self, since: datetime, n: int = 5, cutoff: datetime = COMPETITION_START) -> list:
+        """Hashtags citizens used most since `since` (at least twice), most used first."""
+        c = _iso(cutoff)
+        rows = self.db.execute(
+            f"SELECT p.content FROM posts p JOIN authors a ON a.author = p.author "
+            f"WHERE p.created_at >= ? AND {PRE_START} AND p.content LIKE '%#%'",
+            (_iso(since), c, c),
+        )
+        counts = Counter(tag.lower() for (content,) in rows for tag in set(HASHTAG_RE.findall(content)))
+        return [tag for tag, k in counts.most_common(n) if k >= 2]
+
+    def citizen_peak_hourly(self, since: datetime, cutoff: datetime = COMPETITION_START) -> int:
+        """The most posts any whitelisted citizen made within one clock hour since `since`."""
+        c = _iso(cutoff)
+        row = self.db.execute(
+            f"SELECT COUNT(*) AS k FROM posts p JOIN authors a ON a.author = p.author "
+            f"WHERE p.created_at >= ? AND {PRE_START} GROUP BY p.author, substr(p.created_at, 1, 13) "
+            "ORDER BY k DESC LIMIT 1",
+            (_iso(since), c, c),
+        ).fetchone()
+        return row[0] if row else 0
+
+    def posts_after(self, last_id: int) -> list:
+        """(id, author, content, created_at) for posts newer than `last_id`, oldest first."""
+        return self.db.execute(
+            "SELECT id, author, content, created_at FROM posts WHERE id > ? ORDER BY id", (last_id,)).fetchall()
+
+    def posts_by(self, authors: Iterable[str]) -> list:
+        """(id, author, content) for every stored post by these accounts, newest first."""
+        authors = list(authors)
+        if not authors:
+            return []
+        marks = ",".join("?" * len(authors))
+        return self.db.execute(
+            f"SELECT id, author, content FROM posts WHERE author IN ({marks}) ORDER BY id DESC", authors).fetchall()
 
     def stats(self) -> dict:
         q = self.db.execute
         return {
             "posts": self.count(),
-            "accounts": q("SELECT COUNT(*) FROM accounts").fetchone()[0],
+            "accounts": q("SELECT COUNT(*) FROM authors").fetchone()[0],
             "whitelist": len(self.whitelist()),
             "pending_gaps": len(self.gaps()),
             "unparsed_created_at": q("SELECT COUNT(*) FROM posts WHERE created_at IS NULL").fetchone()[0],
             "newest_fetch": q("SELECT MAX(fetched_at) FROM posts").fetchone()[0],
-            "top_authors": q("SELECT author, posts FROM accounts ORDER BY posts DESC LIMIT 5").fetchall(),
+            "top_authors": q("SELECT author, posts FROM authors ORDER BY posts DESC LIMIT 5").fetchall(),
             "latest": q("SELECT author, content FROM posts ORDER BY id DESC LIMIT 3").fetchall(),
         }
 
@@ -233,6 +326,14 @@ async def _demo(seconds: float) -> None:
     assert store.count() == len(p.posts), (store.count(), len(p.posts))
     assert wl == pre_start_authors, wl ^ pre_start_authors
     assert "joe_tama" not in wl and not any(a.startswith("late_") for a in wl)
+    assert {a for a, *_ in store.npc_posts(cutoff)} == wl
+    counted = dict(store.db.execute("SELECT author, posts FROM authors"))
+    for author in pre_start_authors:
+        assert counted[author] == sum(post["author"] == author for post in p.posts.values())
+    assert all(post["author"] in wl for post in store.recent_citizen_posts(20, cutoff))
+    assert len(store.npc_posts(cutoff, limit=5)) == 5
+    assert {a for a, _ in store.unknown_posts(cutoff)} == {a for a in late if any(
+        post["author"] == a for post in p.posts.values())}
     print(f"\ncollected {store.count()}/{len(p.posts)} posts, filled {collector.gaps} gaps, "
           f"whitelist {len(wl)} accounts")
 
