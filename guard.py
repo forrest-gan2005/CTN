@@ -20,6 +20,18 @@ IDENTITY_RE = re.compile(
     r"\b(bots?|ai|a\.i\.|chatbot|language model)\b|\b(i'm|i am|not) (a )?robot\b|\b(real|normal) person\b|\b(a|not|i'm|i am) human\b",
     re.IGNORECASE,
 )
+# Cues that a post argues the NO case, so our bots don't like/repost it up the Trending feed.
+NO_LEAN_RE = re.compile(
+    r"\bvot(e|ing) no\b|\bno vote\b|two[- ]tier|personal choice|\bmy body\b|"
+    r"overreach|government control|keep kingstonia open|protect choice|segregat|"
+    r"\bcoerc|don'?t lock|slippery slope|against the mandate|\bnanny state\b",
+    re.IGNORECASE,
+)
+# Posts that touch the referendum; only these are worth an LLM stance check before we amplify them.
+REFERENDUM_RE = re.compile(
+    r"vacc|\bvax|\bjabs?\b|mandate|referendum|h2d2|dolphin flu|\bvot(e|ing)\b|proof of",
+    re.IGNORECASE,
+)
 
 STANCE_SYSTEM = (
     "You label social media posts about a referendum on requiring proof of H2D2 vaccination "
@@ -40,6 +52,14 @@ def sanitize_external(text: str) -> str:
 
 def looks_like_probe(text: str) -> bool:
     return bool(PROBE_RE.search(text or ""))
+
+
+def leans_no(text: str) -> bool:
+    return bool(NO_LEAN_RE.search(text or ""))
+
+
+def about_referendum(text: str) -> bool:
+    return bool(REFERENDUM_RE.search(text or ""))
 
 
 def wrap_external(author: str, text: str) -> str:
@@ -103,4 +123,11 @@ if __name__ == "__main__":
     assert output_problem("i'm not a robot lol", system) == "identity"
     assert output_problem("trying to get a robot to do a backflip at robotics club", system) is None
     assert output_problem("It's spreading human-to-human next door now.", system) is None
+    assert leans_no("I'm voting no, this is government overreach")
+    assert leans_no("a two-tier society is wrong")
+    assert not leans_no("We only have the beds we had in 2021, I'm voting yes")
+    assert not leans_no("Ferry was late again this morning")
+    assert about_referendum("Not sure about the jab mandate yet")
+    assert about_referendum("voting on the 2nd")
+    assert not about_referendum("Ferry was late again this morning")
     print("guard ok")

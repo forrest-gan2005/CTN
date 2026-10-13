@@ -16,6 +16,7 @@ class OllamaLLM:
     ) -> None:
         self.base_url = (base_url or os.environ.get("OLLAMA_URL") or "http://localhost:11434").rstrip("/")
         self.model = model or os.environ.get("OLLAMA_MODEL") or "llama3.1:8b"
+        self.name = f"ollama:{self.model}"  # recorded with every post, to compare models later
         self.max_concurrent = max_concurrent
         self.timeout = timeout
         # Created lazily: on Python 3.9 they bind to the event loop that exists when constructed.
@@ -61,6 +62,7 @@ class FakeLLM:
     ]
 
     def __init__(self, min_delay: float = 0.5, max_delay: float = 2.0) -> None:
+        self.name = "fake"
         self.min_delay = min_delay
         self.max_delay = max_delay
         self.calls = 0

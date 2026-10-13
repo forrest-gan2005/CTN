@@ -1,14 +1,24 @@
 import asyncio
 import itertools
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+REPORT_SUSPENSION = timedelta(hours=6)
+
+
+class ReportingSuspended(Exception):
+    """The team reported a genuine citizen's post and can't report anything for six hours."""
 
 
 class FakePlatform:
-    def __init__(self) -> None:
+    def __init__(self, competitors=()) -> None:
         self.posts = {}          # post_id -> post dict
         self.following = {}      # username -> set of usernames they follow
         self.notifications = {}  # username -> list of notification dicts
+        self.competitors = set(competitors)  # the moderator's ground truth: accounts run by teams
+        self.reports = {}        # post_id -> usernames that reported it
+        self.hidden = set()      # posts the moderator confirmed as inauthentic
+        self.reporting_blocked_until: Optional[datetime] = None
         self._ids = itertools.count(1)
 
     async def post(self, username: str, content: str, parent_id: Optional[int] = None) -> dict:
@@ -72,6 +82,19 @@ class FakePlatform:
         followed.remove(target)
         return True
 
+    async def report(self, username: str, post_id: int) -> bool:
+        """Report a post as inauthentic. This moderator rules at once; True if upheld."""
+        now = datetime.now(timezone.utc)
+        if self.reporting_blocked_until is not None and now < self.reporting_blocked_until:
+            raise ReportingSuspended(f"reporting blocked until {self.reporting_blocked_until.isoformat()}")
+        post = self._get(post_id)
+        self.reports.setdefault(post_id, []).append(username)
+        if post["author"] in self.competitors:
+            self.hidden.add(post_id)
+            return True
+        self.reporting_blocked_until = now + REPORT_SUSPENSION
+        return False
+
     async def get_post(self, post_id: int) -> dict:
         return self._get(post_id)
 
@@ -134,6 +157,16 @@ async def _demo() -> None:
     try:
         await p.like("bob", 999)
     except KeyError:
+        pass
+
+    p.competitors = {"bob"}
+    reply = [x for x in p.posts.values() if x["author"] == "bob"][0]
+    assert await p.report("alice", reply["id"]) and reply["id"] in p.hidden
+    assert not await p.report("alice", a["id"])
+    try:
+        await p.report("alice", reply["id"])
+        raise AssertionError("reporting should be suspended after a wrong report")
+    except ReportingSuspended:
         pass
     print("ok:", await p.feed_latest())
 
