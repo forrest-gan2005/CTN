@@ -54,6 +54,18 @@ class UsageLedger:
         self.db = sqlite3.connect(str(path))
         self.db.execute("CREATE TABLE IF NOT EXISTS usage (at TEXT NOT NULL, model TEXT NOT NULL, "
                         "prompt INTEGER NOT NULL, completion INTEGER NOT NULL, reasoning INTEGER NOT NULL)")
+        # A provider's long "retry after" (a used-up daily quota), kept so a restart doesn't ask again first.
+        self.db.execute("CREATE TABLE IF NOT EXISTS blocks (model TEXT PRIMARY KEY, until REAL NOT NULL)")
+
+    def save_block(self, model: str, until: float) -> None:
+        """`until` is a Unix time; a shorter block never replaces a longer one."""
+        with self.db:
+            self.db.execute("INSERT INTO blocks VALUES (?, ?) ON CONFLICT(model) DO UPDATE SET "
+                            "until = MAX(until, excluded.until)", (model, until))
+
+    def block_until(self, model: str) -> float:
+        row = self.db.execute("SELECT until FROM blocks WHERE model = ?", (model,)).fetchone()
+        return row[0] if row else 0.0
 
     def record(self, model: str, usage: dict) -> None:
         details = usage.get("completion_tokens_details") or {}
@@ -220,6 +232,9 @@ class OpenAICompatLLM:
         self._warned = False
         self._sem: Optional[asyncio.Semaphore] = None
         self._client: Optional[httpx.AsyncClient] = None
+        left = usage.block_until(name) - time.time() if usage is not None else 0.0
+        if left > 0:
+            self.quota.block(left)
 
     def delay(self) -> float:
         return float("inf") if self.over_budget() else self.quota.delay()
@@ -257,6 +272,8 @@ class OpenAICompatLLM:
                     self.quota.block(wait)  # for every caller of this model; a short one is sat out, not fallen back from
                     if wait > MAX_WAIT:
                         log.warning("%s rate-limited for %.0fs", self.name, wait)
+                        if self.usage is not None:
+                            self.usage.save_block(self.name, time.time() + wait)
                         return None
                     continue
                 if resp.status_code >= 500:
@@ -533,6 +550,8 @@ async def _cooldown_demo() -> None:
             return httpx.Response(429, headers={"retry-after": "120"})
         if model == "short" and n == 1:
             return httpx.Response(429, headers={"retry-after": "0.5"})
+        if model == "daily":
+            return httpx.Response(429, headers={"retry-after": "3600"})
         usage = {"prompt_tokens": 2_000_000, "completion_tokens": 0} if model == "spend" else {}
         return httpx.Response(200, json={"choices": [{"message": {"content": f"hi from {model}"}}], "usage": usage})
 
@@ -573,6 +592,14 @@ async def _cooldown_demo() -> None:
         await asyncio.sleep(0.01)
     gate.set()
     assert await a == "hi from spend" and await b is None and len(times["spend"]) == 1, "sent over budget"
+
+    # The daily quota runs out; after a restart (nothing in memory) the model is still left alone.
+    book = UsageLedger(":memory:")
+    assert await make("daily", usage=book).generate("s", "p") is None
+    _QUOTAS.clear()
+    assert make("daily", usage=book).delay() == float("inf") and len(times["daily"]) == 1
+    book.save_block("mock:daily", time.time() + 5)
+    assert book.block_until("mock:daily") > time.time() + 3000, "a shorter block replaced a longer one"
 
     quota = Quota(None)
     quota.block(100)
