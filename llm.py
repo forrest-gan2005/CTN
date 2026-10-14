@@ -24,7 +24,7 @@ LOCKOUT = 3600.0  # bad key or unknown model: retrying won't help, so stop tryin
 PROVIDERS = {
     "groq": ("https://api.groq.com/openai/v1", "GROQ_API_KEY", 30),
     "cerebras": ("https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", 5),  # trial gpt-oss-120b; qwen-3.8-27b allows 450
-    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", 10),
+    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", 5),  # Flash Lite 15, Gemma 30
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", 20),
     "mistral": ("https://api.mistral.ai/v1", "MISTRAL_API_KEY", 60),
     "github": ("https://models.github.ai/inference", "GITHUB_TOKEN", 10),
@@ -38,6 +38,9 @@ GAME_TZ = ZoneInfo("Australia/Sydney")  # game days, and so daily budgets, turn 
 PRICES = {
     "cerebras:gpt-oss-120b": (0.35, 0.75),
     "cerebras:qwen-3.8-27b": (0.40, 0.80),  # unpublished; priced like Cerebras' Qwen 3 32B to be safe
+    # Free tier while no billing is linked to the Google project (paid would be $0.30 / $2.50).
+    "gemini:gemini-3.5-flash-lite": (0.0, 0.0),
+    "gemini:gemma-4-31b-it": (0.0, 0.0),
 }
 
 
@@ -101,11 +104,16 @@ def _generated(text: str, model: str) -> Generated:
     return out
 
 
+THINK_OPEN = re.compile(r"<(?:think|thought)>", re.IGNORECASE)
+THINK_CLOSE = re.compile(r"</(?:think|thought)>", re.IGNORECASE)  # Qwen and DeepSeek say think, Gemma thought
+
+
 def strip_thinking(text: str) -> str:
-    """Drop a reasoning model's <think> block; a reply cut off mid-thought has no answer in it."""
-    if "</think>" in text:
-        return text.rsplit("</think>", 1)[1].strip()
-    if "<think>" in text:
+    """Drop a reasoning model's thinking block; a reply cut off mid-thought has no answer in it."""
+    parts = THINK_CLOSE.split(text)
+    if len(parts) > 1:
+        return parts[-1].strip()
+    if THINK_OPEN.search(text):
         return ""
     return text.strip()
 
@@ -425,6 +433,7 @@ async def _demo() -> None:
     assert strip_thinking("<think>hmm, a post</think>\nFerry late again.") == "Ferry late again."
     assert strip_thinking("hmm, a post</think>Ferry late again.") == "Ferry late again."
     assert strip_thinking("<think>still thinking when the tokens ran out") == ""
+    assert strip_thinking("<thought>*   Persona: nurse\n\"rent again\"</thought>rent went up again lol") == "rent went up again lol"
 
     calls = {"busy": 0, "good": 0}
 
