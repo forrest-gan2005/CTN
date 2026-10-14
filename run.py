@@ -1,9 +1,11 @@
 import argparse
 import asyncio
 import logging
+import os
 import random
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 from blue import BlueScanner, Reporter
@@ -12,9 +14,11 @@ from collector import COMPETITION_START, Collector, NpcStore
 from content import load_personas, load_world
 from examples import NpcExamples
 from fake_platform import FakePlatform
-from llm import FakeLLM, team_llms
-from rhythm import Rhythm, UniformPacer, npc_curve
+from health import Health
+from llm import FakeLLM, game_day_start, ledger, load_env, team_llms
+from real_platform import AccountStore, MockLegitSocial, RealPlatform
 from injection import load_injection_classifier
+from rhythm import Rhythm, UniformPacer, npc_curve
 from semantic import NearIndex, load_embedder
 from state import StateStore
 
@@ -29,6 +33,8 @@ EXAMPLE_POSTS = 20_000  # newest citizen posts the style retriever indexes
 CURVE_POSTS = 100_000  # newest citizen posts the activity curve is measured on
 HASHTAG_WINDOW = timedelta(hours=6)
 TEAM_RECENT = 1000  # our latest posts every new draft is checked against for paraphrase
+STATUS_EVERY = 1800.0
+API_URL = "https://social.legitreal.com/api"  # the 2025 address in the organisers' SDK; override with $CTN_API_URL
 
 
 class Team:
@@ -36,11 +42,18 @@ class Team:
 
     def __init__(self, platform, llm, stance_llm, npc_store: NpcStore, state: StateStore,
                  cutoff: datetime = COMPETITION_START, fast: bool = False, collector_interval: float = 5.0,
-                 blue_interval: float = 10.0, embedder=None, injection=None) -> None:
-        personas = load_personas()
-        self.own = {p["username"] for p in personas}
+                 blue_interval: float = 10.0, embedder=None, injection=None, personas: Optional[list] = None,
+                 not_before: Optional[datetime] = None, stagger: timedelta = timedelta(0)) -> None:
+        personas = personas if personas is not None else load_personas()
+        # Every persona we own, reserves and those not running included, so none is ever taken for a rival.
+        self.own = {p["username"] for p in load_personas(status=None)} | {p["username"] for p in personas}
+        self.names = {p["username"]: p["name"] for p in personas}
+        self.platform = platform
         self.npc_store = npc_store
+        self.state = state
         self.cutoff = cutoff
+        self.not_before = not_before  # no bot acts before this (the start); the collector starts at once
+        self.stagger = stagger  # new accounts come online one by one over this long, not all at the start
         self.embedder = embedder  # None turns every meaning-level check off
         self.twins = None
         if embedder is not None:
@@ -61,11 +74,18 @@ class Team:
         reporter = next((p for p in personas if p["line"] == "amplifier"), personas[0])  # rarely posts itself
         self.reporter = Reporter(platform, self.scanner, state, username=reporter["username"],
                                  interval=blue_interval)
+        self.health = Health(platform, state)
+        self.online = set()
+        self.set_quiet(self.health.quiet())
         self.refresh()
 
     def feed(self) -> list:
         posts = self.npc_store.recent_citizen_posts(CITIZEN_FEED, self.cutoff) + self.npc_store.recent(OTHER_FEED)
         return list({p["id"]: p for p in posts}.values())
+
+    def set_quiet(self, usernames: set) -> None:
+        for bot in self.bots:
+            bot.quiet = bot.username in usernames
 
     def refresh(self) -> None:
         """Pick up what the collector learned: who the citizens are, how and when they write, what they tag."""
@@ -84,42 +104,163 @@ class Team:
         log.info("refreshed: %d citizens, %d example posts (%s), hashtags %s",
                  len(self.roster.npcs), len(examples.posts), examples.mode or "too few", hashtags)
 
-    async def _refresh_forever(self, every: float) -> None:
-        while True:
-            await asyncio.sleep(every)
-            try:
-                self.refresh()
-            except Exception:
-                log.exception("refresh failed")
+    def status(self) -> str:
+        """One line on how the last hour went, for the log."""
+        hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
+        spend = ", ".join(f"{model} {calls}" + (f" ${cost:.2f}" if cost else "")
+                          for model, calls, *_, cost in ledger().totals(game_day_start()))
+        quiet = sorted(b.username for b in self.bots if b.quiet)
+        return (f"status: {len(self.online)}/{len(self.bots)} bots online; last hour actions "
+                f"{self.state.action_counts(hour_ago)}, engagement {self.state.engagement_counts(hour_ago)}; "
+                f"reports {self.state.report_counts()}; takedowns {self.state.moderation_counts()}; quiet {quiet}; "
+                f"Blue rules off {sorted(self.scanner.disabled)}; {self.npc_store.count()} posts collected; "
+                f"LLM calls today: {spend or 'none'}")
 
-    async def run(self, until: float, refresh_every: float = REFRESH_EVERY) -> None:
-        refresher = asyncio.create_task(self._refresh_forever(refresh_every))
+    def start_time(self, bot: Bot, now: datetime) -> datetime:
+        """When a bot may first act. One that acted before waits only for the start. A new one gets its own slot
+        in the stagger window, counted from the start or from now if that is later (a reserve brought in
+        mid-competition), and keeps that slot across restarts."""
+        base = max(now, self.not_before) if self.not_before is not None else now
+        if bot.history or not self.stagger:
+            return base
+        planned = self.state.planned_start(bot.username)
+        if planned is None:
+            offset = timedelta(seconds=random.Random(bot.username).uniform(0, self.stagger.total_seconds()))
+            planned = (base + offset).isoformat(timespec="seconds")
+            self.state.plan_start(bot.username, planned)
+        return datetime.fromisoformat(planned)
+
+    async def _start(self, bot: Bot, until: float) -> None:
+        """Hold a bot until its start time, log it in, then let it run; all within this run's deadline."""
+        loop = asyncio.get_running_loop()
+        now = datetime.now(timezone.utc)
+        wait = (self.start_time(bot, now) - now).total_seconds()
+        if loop.time() + wait >= until:
+            log.info("%s is due online after this run ends", bot.username)
+            return
+        if wait > 0:
+            await asyncio.sleep(wait)
+        login = getattr(self.platform, "ensure_account", None)  # the fake platform needs no accounts
+        if login is not None:
+            try:
+                await asyncio.wait_for(login(bot.username, self.names[bot.username]), until - loop.time())
+            except Exception:
+                log.exception("%s could not log in; it stays offline", bot.username)
+                return
+        self.online.add(bot.username)
+        await bot.run(until, self.pacers[bot.username])
+
+    async def _blue(self, until: float) -> None:
+        login = getattr(self.platform, "ensure_account", None)
+        if login is not None:
+            try:
+                await login(self.reporter.username, self.names[self.reporter.username])
+            except Exception:
+                log.exception("the reporting account could not log in; Blue is off")
+                return
+        await self.reporter.run(until)
+
+    async def _every(self, seconds: float, job) -> None:
+        while True:
+            await asyncio.sleep(seconds)
+            try:
+                job()
+            except Exception:
+                log.exception("periodic job failed")
+
+    async def run(self, until: float, refresh_every: float = REFRESH_EVERY, status_every: float = STATUS_EVERY) -> None:
+        background = [asyncio.create_task(self._every(refresh_every, self.refresh)),
+                      asyncio.create_task(self._every(status_every, lambda: log.info(self.status())))]
         try:
             await asyncio.gather(
                 self.collector.run(until),
-                self.reporter.run(until),
-                *(bot.run(until, self.pacers[bot.username]) for bot in self.bots),
+                self._blue(until),
+                self.health.run(until, on_change=self.set_quiet),
+                *(self._start(bot, until) for bot in self.bots),
             )
         finally:
-            refresher.cancel()
+            for task in background:
+                task.cancel()
 
 
-def real_platform():
-    raise SystemExit("RealPlatform isn't written yet: it needs the Legit Social API, available from the start.")
+def real_platform() -> RealPlatform:
+    load_env()
+    key = os.environ.get("CTN_BOT_KEY")
+    if not key:
+        raise SystemExit("set CTN_BOT_KEY (the team's competition bot key) in .env")
+    return RealPlatform(os.environ.get("CTN_API_URL") or API_URL, bot_key=key)
 
 
-async def live() -> None:
+async def live(limit: Optional[int], stagger_hours: float) -> None:
+    personas = load_personas()
+    if limit:
+        personas = personas[:limit]
     platform = real_platform()
     llm, judge = team_llms()
-    own = {p["username"] for p in load_personas()}
+    own = {p["username"] for p in load_personas(status=None)}
     team = Team(platform, llm, judge, NpcStore(DATA / "npc.db", own_usernames=own), StateStore(DATA / "bots.db"),
-                embedder=load_embedder(), injection=load_injection_classifier())
+                embedder=load_embedder(), injection=load_injection_classifier(), personas=personas,
+                not_before=COMPETITION_START, stagger=timedelta(hours=stagger_hours))
+    log.info("live: %d accounts, staggered over %gh, writer %s, judge %s", len(personas), stagger_hours,
+             llm.name, judge.name)
     loop = asyncio.get_running_loop()
     try:
         await team.run(loop.time() + (COMPETITION_END - datetime.now(timezone.utc)).total_seconds())
     finally:
         await llm.aclose()
         await judge.aclose()
+        await platform.aclose()
+
+
+def schedule_check() -> None:
+    """New accounts get a slot in the stagger window both before the start and long after it (reserves), keep
+    it across restarts, and accounts that already acted don't wait again."""
+    start = datetime(2026, 10, 19, 6, tzinfo=timezone.utc)
+    window = timedelta(hours=6)
+    personas = load_personas()[:2]
+    for now in (start - timedelta(hours=1), start + timedelta(days=1)):
+        team = Team(FakePlatform(), FakeLLM(0, 0), None, NpcStore(":memory:"), StateStore(":memory:"),
+                    personas=personas, not_before=start, stagger=window)
+        new, veteran = team.bots
+        veteran.history.append(("t", None))
+        base = max(now, start)
+        slot = team.start_time(new, now)
+        assert base <= slot <= base + window, (now, slot)
+        assert team.start_time(new, now + timedelta(hours=2)) == slot, "a restart must keep the slot"
+        assert team.start_time(veteran, now) == base
+    print("schedule ok")
+
+
+async def smoke(seconds: float = 10) -> None:
+    """The live wiring end to end but offline: RealPlatform over a mock of the API, three accounts held until
+    a start a moment away and then staggered, citizens who posted before it, and the Blue reporter."""
+    import httpx
+
+    mock = MockLegitSocial(bot_key="team-key")
+    platform = RealPlatform("https://legit.test/api", bot_key="team-key", accounts=AccountStore(":memory:"),
+                            transport=httpx.MockTransport(mock.handler))
+    for i in range(5):
+        await platform.ensure_account(f"citizen_{i}", f"Citizen {i}")
+        await platform.post(f"citizen_{i}", citizen_text())
+    personas = [p for p in load_personas() if p["line"] in ("persuade", "amplifier")][:3]
+    own = {p["username"] for p in load_personas(status=None)}
+    now = datetime.now(timezone.utc)
+    start = now + timedelta(seconds=2)
+    team = Team(platform, FakeLLM(0.01, 0.05), None, NpcStore(":memory:", own_usernames=own), StateStore(":memory:"),
+                cutoff=now, fast=True, collector_interval=0.3, blue_interval=1.0, personas=personas,
+                not_before=start, stagger=timedelta(seconds=2))
+    loop = asyncio.get_running_loop()
+    try:
+        await team.run(loop.time() + seconds, refresh_every=seconds / 2, status_every=seconds / 2)
+    finally:
+        await platform.aclose()
+    ours = [p for p in mock.posts.values() if p["author"]["username"] in own]
+    assert {p["username"] for p in personas} <= set(mock.users), "every account registered with the bot key"
+    assert team.online == {p["username"] for p in personas}
+    assert ours and min(p["created_at"] for p in ours) >= start.isoformat(), "nobody posted before the start"
+    assert len(team.roster.npcs) == 5
+    print(f"smoke ok: {len(ours)} posts by {len({p['author']['username'] for p in ours})} accounts, "
+          f"{mock.calls} API calls")
 
 
 THINGS = ["the ferry", "rent", "the reef", "regatta week", "the bus", "work", "the hospital", "fish prices",
@@ -199,7 +340,7 @@ async def rehearse(seconds: float, real_llm: bool) -> None:
     cast = asyncio.create_task(_cast(platform, own, citizens, late, rivals_sloppy, rival_clean, rival_spam))
     loop = asyncio.get_running_loop()
     try:
-        await team.run(loop.time() + seconds, refresh_every=seconds / 3)
+        await team.run(loop.time() + seconds, refresh_every=seconds / 3, status_every=seconds / 2)
     finally:
         cast.cancel()
         await llm.aclose()
@@ -231,7 +372,10 @@ async def rehearse(seconds: float, real_llm: bool) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the whole team")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("live", help="the real competition (needs RealPlatform)")
+    lv = sub.add_parser("live", help="the real competition (needs CTN_BOT_KEY in .env)")
+    lv.add_argument("--limit", type=int, default=None, help="run only the first N active personas, e.g. for a trial")
+    lv.add_argument("--stagger", type=float, default=6, help="hours over which new accounts first come online")
+    sub.add_parser("smoke", help="the live wiring end to end against a mock of the API")
     reh = sub.add_parser("rehearse", help="dress rehearsal on the fake platform")
     reh.add_argument("--seconds", type=float, default=60)
     reh.add_argument("--real", action="store_true", help="use $LLM / $LLM_JUDGE (default Ollama) instead of FakeLLM")
@@ -242,6 +386,9 @@ if __name__ == "__main__":
     if args.cmd == "live":
         DATA.mkdir(exist_ok=True)
         logging.getLogger().addHandler(logging.FileHandler(DATA / "run.log"))
-        asyncio.run(live())
+        asyncio.run(live(args.limit, args.stagger))
+    elif args.cmd == "smoke":
+        schedule_check()
+        asyncio.run(smoke())
     else:
         asyncio.run(rehearse(args.seconds, args.real))

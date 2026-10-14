@@ -2,6 +2,7 @@ import asyncio
 import logging
 import secrets
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -315,7 +316,8 @@ class MockLegitSocial:
         if path == "/twoots/":
             pid = len(self.posts) + 1
             post = {"id": pid, "content": body["content"], "parent_id": body.get("parent_id"),
-                    "author": {"id": 100 + pid, "username": user}, "created_at": f"2026-10-20T00:00:{pid:02d}+00:00"}
+                    "author": {"id": 100 + pid, "username": user},
+                    "created_at": datetime.now(timezone.utc).isoformat(timespec="microseconds")}
             self.posts[pid] = post
             parent = self.posts.get(body.get("parent_id"))
             if parent:
