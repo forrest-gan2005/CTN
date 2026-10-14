@@ -201,6 +201,12 @@ class NpcStore:
         return self.db.execute(
             "SELECT id, author, content, created_at FROM posts WHERE id > ? ORDER BY id", (last_id,)).fetchall()
 
+    def posts_since(self, since: datetime) -> list:
+        """(id, author, content, created_at) for posts created at or after `since`, oldest first."""
+        return self.db.execute(
+            "SELECT id, author, content, created_at FROM posts WHERE created_at >= ? AND content IS NOT NULL "
+            "ORDER BY created_at", (_iso(since),)).fetchall()
+
     def posts_by(self, authors: Iterable[str]) -> list:
         """(id, author, content) for every stored post by these accounts, newest first."""
         authors = list(authors)
