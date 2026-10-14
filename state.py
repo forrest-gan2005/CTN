@@ -156,6 +156,9 @@ class StateStore:
             self.db.execute("INSERT OR REPLACE INTO reports VALUES (?, ?, ?, ?, ?)",
                             (post_id, author, reason, at, status))
 
+    def rejected_reasons(self) -> set:
+        return {r[0] for r in self.db.execute("SELECT DISTINCT reason FROM reports WHERE status = 'rejected'")}
+
     def reported(self) -> set:
         return {r[0] for r in self.db.execute("SELECT post_id FROM reports")}
 
@@ -247,4 +250,6 @@ if __name__ == "__main__":
     s.record_engagement("joe", [{"kind": "like", "actor": "npc1", "post_id": 77}], "2026-10-20T03:00:00+00:00")
     assert s.engagement_counts("2026-10-20") == {"like": 1} and s.report_counts() == {"upheld": 1}
     assert s.action_counts("t0")["reply"] == 2
+    s.record_report(4, "late_npc", "account: output label", "t", "rejected")
+    assert s.rejected_reasons() == {"account: output label"}
     print("state ok")
