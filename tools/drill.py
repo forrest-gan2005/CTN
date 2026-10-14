@@ -75,6 +75,7 @@ class Stage:
         self.report_times = []
         self.cut_writes = 0  # posts cut off by the outage so far
         self.lines = set()  # every line the models have written, so a repeated post can only be a resend
+        self.post_requests = []  # every POST /api/twoots/ that reached us, and what we did with it
 
     def t(self) -> float:
         return time.monotonic() - self.t0
@@ -89,6 +90,16 @@ class Stage:
 
     def handle(self, method: str, path: str, headers: dict, body: bytes):
         """An httpx.Response, or None to drop the connection without answering."""
+        resp = self._handle(method, path, headers, body)
+        if method == "POST" and path == "/api/twoots/":
+            with self.lock:
+                token = headers.get("Authorization", "").removeprefix("Bearer ")
+                self.post_requests.append({"t": round(self.t(), 2), "user": self.mock.tokens.get(token),
+                                           "body": json.loads(body or b"{}"),
+                                           "answer": None if resp is None else resp.status_code})
+        return resp
+
+    def _handle(self, method: str, path: str, headers: dict, body: bytes):
         now = self.t()
         if path.startswith("/v1/"):
             return self._llm(json.loads(body), now)
@@ -334,6 +345,20 @@ async def verify(stage: Stage, tmp: Path, port: int, marks: dict) -> list:
     return failures
 
 
+def keep_evidence(stage: Stage, tmp: Path) -> Path:
+    """Copy a failed run's databases and child logs, with the platform's posts and every post request it got,
+    somewhere that outlives the run."""
+    with stage.lock:
+        posts, requests = list(stage.mock.posts.values()), list(stage.post_requests)
+    (tmp / "platform_posts.json").write_text(json.dumps(posts, default=list, indent=1))
+    (tmp / "post_requests.json").write_text(json.dumps(requests, indent=1))
+    root = paths.DATA / "drill-failures"
+    root.mkdir(parents=True, exist_ok=True)
+    saved = Path(tempfile.mkdtemp(prefix=datetime.now().strftime("%Y%m%d-%H%M%S-"), dir=root))
+    shutil.copytree(tmp, saved, dirs_exist_ok=True)
+    return saved
+
+
 async def main(keep: str = "") -> int:
     stage = Stage(time.monotonic())
     server = serve(stage)
@@ -351,52 +376,52 @@ async def main(keep: str = "") -> int:
     with tempfile.TemporaryDirectory() as tmp_name:
         tmp = Path(keep) if keep else Path(tmp_name)
         tmp.mkdir(parents=True, exist_ok=True)
-        proc = launch(tmp, port, start, end, 1)
         try:
-            await at(KILL_1)
-            proc.kill()
-            proc.wait()
-            await at(RESTART_1)
-            proc = launch(tmp, port, start, end, 2)
-            await at(KILL_2)
-            proc.kill()
-            proc.wait()
-            cutoff = time.time() - RESTORE_AGE
-            snap = next((s for s in reversed(backup.snapshots(tmp / "backups"))
-                         if datetime.strptime(s.name, "%Y%m%dT%H%M%S.%fZ").replace(tzinfo=timezone.utc).timestamp()
-                         <= cutoff), None)
-            if snap is None:
-                print("drill FAILED: no snapshot old enough to restore")
-                return 1
-            taken_at = datetime.strptime(snap.name, "%Y%m%dT%H%M%S.%fZ").replace(tzinfo=timezone.utc)
-            taken = taken_at.isoformat()
-            marks["snapshot_t"] = taken_at.timestamp() - t0_wall
-            with stage.lock:
-                marks["after_snapshot"] = sum(1 for p in stage.mock.posts.values()
-                                              if p["author"]["username"] in own and p["created_at"] > taken)
-            for f in tmp.glob("*.db*"):
-                f.unlink()  # the disk is gone
-            backup.restore(snap, tmp)
-            await at(RESTART_2)
-            proc = launch(tmp, port, start, end, 3)
-            await asyncio.get_running_loop().run_in_executor(None, proc.wait)
-        finally:
-            if proc.poll() is None:
+            proc = launch(tmp, port, start, end, 1)
+            try:
+                await at(KILL_1)
                 proc.kill()
-            stop.set()
-        failures = await verify(stage, tmp, port, marks)
-        if proc.returncode != 0:
-            failures.append(f"the last child exited with {proc.returncode} (child-3.log)")
-        for n in (1, 2, 3):
-            if "never retrieved" in (tmp / f"child-{n}.log").read_text():
-                failures.append(f"child {n} lost a task's exception (child-{n}.log)")
+                proc.wait()
+                await at(RESTART_1)
+                proc = launch(tmp, port, start, end, 2)
+                await at(KILL_2)
+                proc.kill()
+                proc.wait()
+                cutoff = time.time() - RESTORE_AGE
+                snap = next((s for s in reversed(backup.snapshots(tmp / "backups"))
+                             if datetime.strptime(s.name, "%Y%m%dT%H%M%S.%fZ").replace(tzinfo=timezone.utc).timestamp()
+                             <= cutoff), None)
+                if snap is None:
+                    print(f"drill FAILED: no snapshot old enough to restore; evidence in {keep_evidence(stage, tmp)}")
+                    return 1
+                taken_at = datetime.strptime(snap.name, "%Y%m%dT%H%M%S.%fZ").replace(tzinfo=timezone.utc)
+                taken = taken_at.isoformat()
+                marks["snapshot_t"] = taken_at.timestamp() - t0_wall
+                with stage.lock:
+                    marks["after_snapshot"] = sum(1 for p in stage.mock.posts.values()
+                                                  if p["author"]["username"] in own and p["created_at"] > taken)
+                for f in tmp.glob("*.db*"):
+                    f.unlink()  # the disk is gone
+                backup.restore(snap, tmp)
+                await at(RESTART_2)
+                proc = launch(tmp, port, start, end, 3)
+                await asyncio.get_running_loop().run_in_executor(None, proc.wait)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                stop.set()
+            failures = await verify(stage, tmp, port, marks)
+            if proc.returncode != 0:
+                failures.append(f"the last child exited with {proc.returncode} (child-3.log)")
+            for n in (1, 2, 3):
+                if "never retrieved" in (tmp / f"child-{n}.log").read_text():
+                    failures.append(f"child {n} lost a task's exception (child-{n}.log)")
+        except BaseException:
+            if not keep:
+                print(f"drill crashed; evidence kept in {keep_evidence(stage, tmp)}")
+            raise
         if failures and not keep:
-            with stage.lock:
-                posts = list(stage.mock.posts.values())
-            (tmp / "platform_posts.json").write_text(json.dumps(posts, default=list, indent=1))
-            saved = paths.DATA / "drill-failures" / datetime.now().strftime("%Y%m%d-%H%M%S")
-            shutil.copytree(tmp, saved)
-            failures.append(f"databases, child logs and the platform's posts kept in {saved}")
+            failures.append(f"evidence kept in {keep_evidence(stage, tmp)}")
     server.shutdown()
     if failures:
         print("drill FAILED:\n  " + "\n  ".join(failures))
