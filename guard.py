@@ -30,7 +30,8 @@ PROBE_RE = re.compile(
 )
 # Ordinary Kingstonians don't talk about whether they are bots; doing so marks the account.
 IDENTITY_RE = re.compile(
-    r"\b(bots?|ai|a\.i\.|chatbot|language model)\b|\b(i'm|i am|not) (a )?robot\b|\b(real|normal) person\b|\b(a|not|i'm|i am) human\b",
+    r"\b(bots?|ai|a\.i\.|chatbot|language model|algorithms?)\b|\b(i'm|i am|not) (a )?robot\b|\b(real|normal) person\b"
+    r"|\b(a|not|i'm|i am) human\b|\b(i'm|i am|not) (a |an )?(computer )?(program|script)\b",
     re.IGNORECASE,
 )
 # Cues that a post argues the NO case, so our bots don't like/repost it up the Trending feed.
@@ -148,6 +149,9 @@ if __name__ == "__main__":
     assert output_problem("Said the railway will be done by 2030. Sure.", system) is None
     assert output_problem("this post is definitely not from a human", system) == "identity"
     assert output_problem("i'm not a robot lol", system) == "identity"
+    assert output_problem("Mate I'm staring at a toddler throwing lego, definitely not an algorithm", system) == "identity"
+    assert output_problem("pretty sure I'm not a computer program, just tired", system) == "identity"
+    assert output_problem("the school program for kids starts monday", system) is None
     assert output_problem("trying to get a robot to do a backflip at robotics club", system) is None
     assert output_problem("It's spreading human-to-human next door now.", system) is None
     assert leans_no("I'm voting no, this is government overreach")

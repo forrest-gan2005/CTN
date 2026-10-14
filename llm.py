@@ -232,7 +232,7 @@ class OpenAICompatLLM:
                 try:
                     resp = await self._client.post(self.url, headers=self.headers, json=body)
                 except httpx.HTTPError as e:
-                    log.warning("%s: %s", self.name, e or type(e).__name__)
+                    log.warning("%s: %s", self.name, str(e) or type(e).__name__)  # a timeout has no message
                     await asyncio.sleep(2 ** attempt)
                     continue
                 if resp.status_code == 429:
