@@ -11,6 +11,7 @@ from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
 
 from ctn import paths
+from ctn.infra.fake_platform import Incomplete
 
 log = logging.getLogger("collector")
 
@@ -302,7 +303,11 @@ class Collector:
             while max_pages is None or pages < max_pages:
                 if until is not None and loop.time() >= until:
                     return total
-                page = await self.platform.feed_latest(n=self.page_size, before=high)
+                try:
+                    page = await self.platform.feed_latest(n=self.page_size, before=high)
+                except Incomplete as e:  # progress was made; the gap stays and the next round carries on
+                    log.info("gap below #%s not finished this round: %s", high, e)
+                    return total
                 pages += 1
                 total += self.store.add_posts(page)
                 if not page or (low is not None and min(p["id"] for p in page) <= low):

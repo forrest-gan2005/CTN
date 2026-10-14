@@ -14,7 +14,7 @@ from typing import Any, Optional
 import httpx
 
 from ctn import paths
-from ctn.infra.fake_platform import AmbiguousWrite, RateLimited, ReportingSuspended
+from ctn.infra.fake_platform import AmbiguousWrite, Incomplete, RateLimited, ReportingSuspended
 
 log = logging.getLogger("platform")
 
@@ -143,6 +143,7 @@ class RealPlatform:
         self.inbox = {}  # username -> {reply id: notification}
         self.noted = set()  # replies made into a notification already, however often they turn up again
         self.after = {}  # oldest post id a recent-feed call returned -> the server's cursor to carry on from it
+        self.searching = {}  # username -> the search cursor a lookup stopped at
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -238,7 +239,9 @@ class RealPlatform:
                 raise RuntimeError("the feed's cursor didn't move")
             params.update(cursor=cursor, limit=PAGE)
         else:
-            raise RuntimeError(f"{SKIP_PAGES} pages of nothing but reposts")
+            if before is not None:
+                self.after[before] = cursor  # the next call from this post carries on from here
+            raise Incomplete(f"{SKIP_PAGES} pages of nothing but reposts below post {before}")
         if before is not None:
             found = [p for p in found if p["id"] < before]
         if found and cursor:
@@ -271,7 +274,7 @@ class RealPlatform:
     async def account_id(self, username: str) -> int:
         """The id behind a username: from the cache, else searching page by page until it turns up or the
         search ends (a search matches parts of names, so the exact one can be on any page)."""
-        cursor = None
+        cursor = self.searching.pop(username, None)
         for _ in range(SKIP_PAGES):
             if username in self.ids:
                 return self.ids[username]
@@ -284,6 +287,10 @@ class RealPlatform:
             cursor = page.get("next_cursor")
             if not cursor:
                 break
+        else:
+            if username not in self.ids:
+                self.searching[username] = cursor
+                raise Incomplete(f"searched {SKIP_PAGES} pages for {username} without reaching the end")
         if username not in self.ids:
             raise KeyError(f"no account {username}")
         return self.ids[username]
@@ -737,6 +744,49 @@ async def _repost_gap_demo() -> None:
         assert list(restarted.inbox.get("joe", {})) == [buried["id"]], "the buried reply is a notification"
         for client in (p, restarted):
             await client.aclose()
+    global SKIP_PAGES, PAGE
+    saved = SKIP_PAGES, PAGE
+    SKIP_PAGES, PAGE = 2, 1  # a budget too small for the run: each call stops and the next carries on
+    try:
+        mock = MockLegitSocial(team_key="k")
+        transport = httpx.MockTransport(mock.handler)
+        p = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"), transport=transport)
+        await p.ensure_account("npc", "npc")
+        first = await p.post("npc", "the oldest post")
+        for _ in range(7):
+            pid = len(mock.posts) + 1
+            mock.posts[pid] = {"id": pid, "kind": "repost", "content": "", "parent_id": None, "root_id": None,
+                               "repost_of": first["id"], "author": {"id": mock._ids()["npc"], "username": "npc"},
+                               "created_at": _now()}
+        newest = await p.post("npc", "the newest post")
+        store = NpcStore(":memory:")
+        collector = Collector(p, store, page_size=1, min_interval=0)
+        await collector.poll()
+        rounds = 0
+        while store.gaps():
+            await collector.fill_gaps()  # a read that stops short ends the round, its gap kept
+            rounds += 1
+            assert rounds < 10, "it never got past the reposts"
+        assert rounds >= 3 and store.count() == 2, (rounds, store.count())
+
+        for i in range(5):
+            mock.add_user(f"seeker_{i}")
+        mock.add_user("seeker")
+        finder = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"),
+                              transport=transport)
+        lookups = 0
+        while True:
+            try:
+                found = await finder.account_id("seeker")
+                break
+            except Incomplete:
+                lookups += 1  # not "no such account": unfinished, and the next try carries on
+            assert lookups < 10
+        assert found == mock._ids()["seeker"] and lookups >= 2, lookups
+        for client in (p, finder):
+            await client.aclose()
+    finally:
+        SKIP_PAGES, PAGE = saved
     print("repost gaps ok")
 
 

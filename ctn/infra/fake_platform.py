@@ -18,6 +18,10 @@ class AmbiguousWrite(Exception):
     """A request that creates something may or may not have taken effect, so it is never resent blindly."""
 
 
+class Incomplete(RuntimeError):
+    """A read stopped at its page budget before it could tell; calling again carries on where it stopped."""
+
+
 class ReportingSuspended(Exception):
     """The team reported a genuine citizen's post and can't report anything for six hours."""
 
