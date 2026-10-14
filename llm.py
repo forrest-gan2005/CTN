@@ -4,8 +4,11 @@ import logging
 import os
 import random
 import re
+import sqlite3
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 import httpx
@@ -28,6 +31,63 @@ PROVIDERS = {
     "official": (None, "CTN_LLM_KEY", None),  # URL goes in CTN_LLM_URL once the organisers publish it
 }
 RETRY_DELAY_RE = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"')
+USAGE_DB = Path(__file__).parent / "data" / "usage.db"
+GAME_TZ = ZoneInfo("Australia/Sydney")  # game days, and so daily budgets, turn over at Sydney midnight
+# USD per million (input, output) tokens, for estimating spend; reasoning tokens bill as output.
+# Third-party trackers, October 2026: Cerebras doesn't publish them in its docs.
+PRICES = {
+    "cerebras:gpt-oss-120b": (0.35, 0.75),
+    "cerebras:qwen-3.8-27b": (0.40, 0.80),  # unpublished; priced like Cerebras' Qwen 3 32B to be safe
+}
+
+
+class UsageLedger:
+    """Tokens every API call used, so spend can be watched and capped without the provider's console."""
+
+    def __init__(self, path=USAGE_DB) -> None:
+        if path != ":memory:":
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self.db = sqlite3.connect(str(path))
+        self.db.execute("CREATE TABLE IF NOT EXISTS usage (at TEXT NOT NULL, model TEXT NOT NULL, "
+                        "prompt INTEGER NOT NULL, completion INTEGER NOT NULL, reasoning INTEGER NOT NULL)")
+
+    def record(self, model: str, usage: dict) -> None:
+        details = usage.get("completion_tokens_details") or {}
+        with self.db:
+            self.db.execute("INSERT INTO usage VALUES (?, ?, ?, ?, ?)",
+                            (datetime.now(timezone.utc).isoformat(timespec="seconds"), model,
+                             usage.get("prompt_tokens") or 0, usage.get("completion_tokens") or 0,
+                             details.get("reasoning_tokens") or 0))
+
+    def totals(self, since: str = "") -> list:
+        """(model, calls, prompt tokens, completion tokens, reasoning tokens, estimated USD or None)."""
+        rows = self.db.execute("SELECT model, COUNT(*), SUM(prompt), SUM(completion), SUM(reasoning) FROM usage "
+                               "WHERE at >= ? GROUP BY model ORDER BY model", (since,)).fetchall()
+        out = []
+        for model, calls, prompt, completion, reasoning in rows:
+            price = PRICES.get(model)
+            cost = (prompt * price[0] + completion * price[1]) / 1e6 if price else None
+            out.append((model, calls, prompt, completion, reasoning, cost))
+        return out
+
+    def spent(self, provider: str, since: str = "") -> float:
+        """Estimated USD spent on one provider's models, which share its credit."""
+        return sum(cost or 0.0 for model, *_, cost in self.totals(since) if model.startswith(provider + ":"))
+
+
+def game_day_start() -> str:
+    now = datetime.now(GAME_TZ)
+    return now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+_LEDGER: Optional[UsageLedger] = None
+
+
+def ledger() -> UsageLedger:
+    global _LEDGER
+    if _LEDGER is None:
+        _LEDGER = UsageLedger()
+    return _LEDGER
 
 
 class Generated(str):
@@ -116,7 +176,8 @@ class OpenAICompatLLM:
     def __init__(self, base_url: str, api_key: str, model: str, name: str, rpm: Optional[float] = None,
                  temperature: Optional[float] = None, max_tokens: int = 400, extra: Optional[dict] = None,
                  max_concurrent: int = 8, timeout: float = 60,
-                 transport: Optional[httpx.AsyncBaseTransport] = None) -> None:
+                 transport: Optional[httpx.AsyncBaseTransport] = None, usage: Optional[UsageLedger] = None,
+                 budget: Optional[float] = None, daily: Optional[float] = None) -> None:
         self.url = base_url.rstrip("/") + "/chat/completions"
         self.headers = {"Authorization": f"Bearer {api_key}"}
         self.name = name
@@ -127,11 +188,27 @@ class OpenAICompatLLM:
         self.max_concurrent = max_concurrent
         self.timeout = timeout
         self.transport = transport
+        self.usage = usage
+        self.provider = name.partition(":")[0]
+        self.budget = budget  # USD this provider may cost in all, and per game day; None means no cap
+        self.daily = daily
+        self._warned = False
         self._sem: Optional[asyncio.Semaphore] = None
         self._client: Optional[httpx.AsyncClient] = None
 
     def delay(self) -> float:
-        return self.quota.delay()
+        return float("inf") if self.over_budget() else self.quota.delay()
+
+    def over_budget(self) -> bool:
+        if self.usage is None:
+            return False
+        over = ((self.budget is not None and self.usage.spent(self.provider) >= self.budget)
+                or (self.daily is not None and self.usage.spent(self.provider, game_day_start()) >= self.daily))
+        if over and not self._warned:
+            log.error("%s budget reached (spent $%.2f in all, $%.2f today); falling back", self.name,
+                      self.usage.spent(self.provider), self.usage.spent(self.provider, game_day_start()))
+            self._warned = True
+        return over
 
     async def generate(self, system: str, prompt: str) -> Optional[str]:
         if self._sem is None:
@@ -141,7 +218,7 @@ class OpenAICompatLLM:
                                           {"role": "user", "content": prompt}]}
         async with self._sem:
             for attempt in range(3):
-                if time.monotonic() < self.quota.blocked_until:
+                if time.monotonic() < self.quota.blocked_until or self.over_budget():
                     return None
                 await self.quota.wait_turn()
                 try:
@@ -169,7 +246,10 @@ class OpenAICompatLLM:
                     log.warning("%s: HTTP %d %s", self.name, resp.status_code, resp.text[:200])
                     return None
                 try:
-                    text = _content(resp.json())
+                    data = resp.json()
+                    if self.usage is not None and data.get("usage"):
+                        self.usage.record(self.name, data["usage"])
+                    text = _content(data)
                 except (ValueError, KeyError, IndexError, TypeError, AttributeError):
                     log.warning("%s: unexpected response %s", self.name, resp.text[:200])
                     return None
@@ -299,8 +379,9 @@ def _option(value: str):
 def make_llm(spec: Optional[str] = None, temperature: Optional[float] = None):
     """The LLM a spec names: 'groq:llama-3.3-70b-versatile', 'ollama:llama3.1:8b', 'fake', ...
 
-    Specs joined by commas fall back in that order. Options go after '?', e.g. '?rpm=5&reasoning_effort=low';
-    rpm and max_tokens are ours, anything else is sent to the provider. With no spec, $LLM is used.
+    Specs joined by commas fall back in that order. Options go after '?', e.g. '?rpm=5&budget=4.5&daily=0.4';
+    rpm, max_tokens, budget and daily (USD caps on the provider's estimated spend, in all and per game day)
+    are ours, anything else is sent to the provider. With no spec, $LLM is used.
     """
     load_env()
     spec = spec or os.environ.get("LLM") or "ollama"
@@ -322,7 +403,9 @@ def make_llm(spec: Optional[str] = None, temperature: Optional[float] = None):
     if not model or not base_url or not key:
         raise ValueError(f"{spec!r} needs a model name, a base URL and ${key_var} (put keys in .env)")
     return OpenAICompatLLM(base_url, key, model, name=spec, rpm=options.pop("rpm", rpm),
-                           temperature=temperature, max_tokens=options.pop("max_tokens", 400), extra=options)
+                           temperature=temperature, max_tokens=options.pop("max_tokens", 400),
+                           usage=ledger(), budget=options.pop("budget", None), daily=options.pop("daily", None),
+                           extra=options)
 
 
 def team_llms() -> tuple:
@@ -356,7 +439,10 @@ async def _demo() -> None:
             return httpx.Response(429, text='{"error": {"details": [{"retryDelay": "0.01s"}]}}')
         if model == "badkey":
             return httpx.Response(401, text="invalid api key")
-        return httpx.Response(200, json={"choices": [{"message": {"content": f"<think>x</think> hi from {model}"}}]})
+        usage = {"prompt_tokens": 2_000_000, "completion_tokens": 1_000_000,
+                 "completion_tokens_details": {"reasoning_tokens": 400_000}}
+        return httpx.Response(200, json={"choices": [{"message": {"content": f"<think>x</think> hi from {model}"}}],
+                                         "usage": usage})
 
     mock = httpx.MockTransport(handler)
     make = lambda model, rpm=None: OpenAICompatLLM("http://mock/v1", "k", model, name=f"mock:{model}",
@@ -380,9 +466,23 @@ async def _demo() -> None:
     second = make("paced", rpm=600)
     assert second.quota is paced.quota, "two clients on one model must share its limit"
 
+    book = UsageLedger(":memory:")
+    PRICES["mock:priced"] = (0.5, 1.0)  # 2M in + 1M out = $2 a call
+    capped = OpenAICompatLLM("http://mock/v1", "k", "priced", name="mock:priced", transport=mock, usage=book,
+                             budget=3.0)
+    assert await capped.generate("s", "p") and await capped.generate("s", "p")
+    assert book.spent("mock") == 4.0 and capped.over_budget() and capped.delay() == float("inf")
+    assert await capped.generate("s", "p") is None and calls["priced"] == 2, "over budget, so no third call"
+    model, n, prompt, completion, reasoning, cost = book.totals()[0]
+    assert (model, n, reasoning, cost) == ("mock:priced", 2, 800_000, 4.0)
+    daily = OpenAICompatLLM("http://mock/v1", "k", "priced", name="mock:priced", transport=mock, usage=book, daily=5.0)
+    assert not daily.over_budget() and book.spent("mock", game_day_start()) == 4.0
+    await capped.aclose()
+
     os.environ["GROQ_API_KEY"] = "test"
-    groq = make_llm("groq:llama-3.3-70b-versatile?rpm=5&reasoning_effort=low", temperature=0)
+    groq = make_llm("groq:llama-3.3-70b-versatile?rpm=5&reasoning_effort=low&budget=4.5&daily=0.4", temperature=0)
     assert groq.quota.gap == 12 and groq.body["reasoning_effort"] == "low" and groq.body["temperature"] == 0
+    assert (groq.budget, groq.daily) == (4.5, 0.4) and "budget" not in groq.body
     both = make_llm("fake, ollama:qwen3:8b")
     assert isinstance(both, ChainLLM) and both.name == "fake+ollama:qwen3:8b"
     for llm in (flaky, chain, paced):
@@ -390,5 +490,20 @@ async def _demo() -> None:
     print("llm ok")
 
 
+def print_usage() -> None:
+    book = ledger()
+    for title, since in (("today (Sydney game day)", game_day_start()), ("in all", "")):
+        print(f"{title}:")
+        for model, calls, prompt, completion, reasoning, cost in book.totals(since):
+            spend = f"${cost:.3f}" if cost is not None else "price unknown"
+            print(f"  {model:<28}{calls:>6} calls {prompt:>11,} in {completion:>10,} out "
+                  f"({reasoning:,} reasoning)  {spend}")
+
+
 if __name__ == "__main__":
-    asyncio.run(_demo())
+    import sys
+
+    if sys.argv[1:] == ["usage"]:
+        print_usage()
+    else:
+        asyncio.run(_demo())
