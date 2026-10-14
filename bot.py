@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from content import load_personas, load_vaccine_angles, load_world
 from fake_platform import FakePlatform
 from guard import about_referendum, judge_stance, leans_no, looks_like_probe, output_problem, wrap_external
-from llm import FakeLLM, OllamaLLM
+from llm import FakeLLM, team_llms
 from rhythm import UniformPacer
 from state import StateStore
 
@@ -232,6 +232,7 @@ class Bot:
             if self.profile is not None and self.roster.classify(target["author"]) == "npc":
                 about = [t for t in self.profile(target["author"]) if t != target.get("content")][:3]
         raw = await self.llm.generate(system, self._user_prompt(kind, target, topic, earlier, about))
+        model = getattr(raw, "model", None) or getattr(self.llm, "name", None)  # a fallback model may have written it
         content = self._clean(raw)
         if content is None or self._too_similar(content, examples):
             return None
@@ -242,7 +243,6 @@ class Bot:
             log.warning("%s rejected %s%s: %r", self.username, problem, source, content)
             return None
 
-        model = getattr(self.llm, "name", None)
         if kind == "reply":
             return Action("reply", post_id=target["id"], content=content, line=self.line, topic_kind=topic[0],
                           angle=f"lean:{topic[1]}" if topic[1] else None, target_author=target["author"],
@@ -563,7 +563,7 @@ async def npc_traffic(platform, npcs: list, own: set) -> None:
 
 
 async def main(real: bool, n_bots: int, seconds: float) -> None:
-    llm = OllamaLLM() if real else FakeLLM()
+    llm, judge = team_llms() if real else (FakeLLM(), None)
     p = FakePlatform()
     world = load_world()
     personas = load_personas()
@@ -577,7 +577,7 @@ async def main(real: bool, n_bots: int, seconds: float) -> None:
     npcs = [f"npc_{i}" for i in range(8)]
     roster = Roster(own={s["username"] for s in specs}, npcs=npcs)
     store = StateStore(":memory:")
-    bots = [Bot(s, p, llm, world, stance_llm=llm if real else None, roster=roster, store=store)
+    bots = [Bot(s, p, llm, world, stance_llm=judge, roster=roster, store=store)
             for s in specs]
 
     loop = asyncio.get_running_loop()
@@ -588,6 +588,8 @@ async def main(real: bool, n_bots: int, seconds: float) -> None:
     finally:
         traffic.cancel()
         await llm.aclose()
+        if judge is not None:
+            await judge.aclose()
     elapsed = loop.time() - start
 
     for post in p.posts.values():
@@ -630,7 +632,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--real", action="store_true", help="use Ollama instead of FakeLLM")
+    parser.add_argument("--real", action="store_true", help="use $LLM / $LLM_JUDGE (default Ollama) instead of FakeLLM")
     parser.add_argument("--bots", type=int, default=None)
     parser.add_argument("--seconds", type=float, default=30)
     args = parser.parse_args()

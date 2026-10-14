@@ -170,10 +170,10 @@ async def make_drafts(n: int, real: bool, npc_db: str, out: str, reply_share: fl
     from content import load_personas, load_world
     from examples import NpcExamples
     from fake_platform import FakePlatform
-    from llm import FakeLLM, OllamaLLM
+    from llm import FakeLLM, team_llms
     from state import StateStore
 
-    llm = OllamaLLM() if real else FakeLLM(0.01, 0.05)
+    llm, judge = team_llms() if real else (FakeLLM(0.01, 0.05), None)
     world, personas = load_world(), load_personas()
     npc_store = NpcStore(npc_db) if Path(npc_db).exists() else None
     targets, examples = [], None
@@ -182,7 +182,7 @@ async def make_drafts(n: int, real: bool, npc_db: str, out: str, reply_share: fl
                    for i, (author, content, _, parent) in enumerate(npc_store.npc_posts()) if parent is None]
         examples = NpcExamples.from_store(npc_store)
     memory = StateStore(":memory:")
-    bots = [Bot(p, FakePlatform(), llm, world, stance_llm=llm if real else None, store=memory, examples=examples)
+    bots = [Bot(p, FakePlatform(), llm, world, stance_llm=judge, store=memory, examples=examples)
             for p in personas]
     drafts = DraftStore(out)
 
@@ -200,6 +200,8 @@ async def make_drafts(n: int, real: bool, npc_db: str, out: str, reply_share: fl
         return sum(await asyncio.gather(*(one() for _ in range(n))))
     finally:
         await llm.aclose()
+        if judge is not None:
+            await judge.aclose()
 
 
 def _load(args) -> tuple:
@@ -289,7 +291,7 @@ if __name__ == "__main__":
     sub = parser.add_subparsers(dest="cmd", required=True)
     gen = sub.add_parser("drafts", help="generate unpublished drafts with every persona")
     gen.add_argument("--n", type=int, default=200)
-    gen.add_argument("--real", action="store_true", help="use Ollama instead of FakeLLM")
+    gen.add_argument("--real", action="store_true", help="use $LLM / $LLM_JUDGE (default Ollama) instead of FakeLLM")
     sub.add_parser("stats", help="style features side by side")
     sub.add_parser("train", help="cross-validate the detector, show our tells, save the model")
     rank = sub.add_parser("rank", help="score unknown accounts with the saved detector (Blue candidates)")

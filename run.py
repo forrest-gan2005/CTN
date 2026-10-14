@@ -12,7 +12,7 @@ from collector import COMPETITION_START, Collector, NpcStore
 from content import load_personas, load_world
 from examples import NpcExamples
 from fake_platform import FakePlatform
-from llm import FakeLLM, OllamaLLM
+from llm import FakeLLM, team_llms
 from rhythm import Rhythm, UniformPacer, npc_curve
 from state import StateStore
 
@@ -98,14 +98,15 @@ def real_platform():
 
 async def live() -> None:
     platform = real_platform()
-    llm = OllamaLLM()
+    llm, judge = team_llms()
     own = {p["username"] for p in load_personas()}
-    team = Team(platform, llm, llm, NpcStore(DATA / "npc.db", own_usernames=own), StateStore(DATA / "bots.db"))
+    team = Team(platform, llm, judge, NpcStore(DATA / "npc.db", own_usernames=own), StateStore(DATA / "bots.db"))
     loop = asyncio.get_running_loop()
     try:
         await team.run(loop.time() + (COMPETITION_END - datetime.now(timezone.utc)).total_seconds())
     finally:
         await llm.aclose()
+        await judge.aclose()
 
 
 THINGS = ["the ferry", "rent", "the reef", "regatta week", "the bus", "work", "the hospital", "fish prices",
@@ -178,8 +179,8 @@ async def rehearse(seconds: float, real_llm: bool) -> None:
     await seed.fill_gaps()
     cutoff = datetime.now(timezone.utc)  # everything after this counts as "after the start"
 
-    llm = OllamaLLM() if real_llm else FakeLLM(0.2, 0.8)
-    team = Team(platform, llm, llm if real_llm else None, npc_store, state, cutoff=cutoff, fast=True,
+    llm, judge = team_llms() if real_llm else (FakeLLM(0.2, 0.8), None)
+    team = Team(platform, llm, judge, npc_store, state, cutoff=cutoff, fast=True,
                 collector_interval=0.5, blue_interval=1.0)
     cast = asyncio.create_task(_cast(platform, own, citizens, late, rivals_sloppy, rival_clean, rival_spam))
     loop = asyncio.get_running_loop()
@@ -188,6 +189,8 @@ async def rehearse(seconds: float, real_llm: bool) -> None:
     finally:
         cast.cancel()
         await llm.aclose()
+        if judge is not None:
+            await judge.aclose()
 
     actions = [a for bot in team.bots for _, a in bot.history]
     counts = {}
@@ -217,7 +220,7 @@ if __name__ == "__main__":
     sub.add_parser("live", help="the real competition (needs RealPlatform)")
     reh = sub.add_parser("rehearse", help="dress rehearsal on the fake platform")
     reh.add_argument("--seconds", type=float, default=60)
-    reh.add_argument("--real", action="store_true", help="use Ollama instead of FakeLLM")
+    reh.add_argument("--real", action="store_true", help="use $LLM / $LLM_JUDGE (default Ollama) instead of FakeLLM")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S")
