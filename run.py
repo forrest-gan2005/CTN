@@ -290,6 +290,16 @@ async def unresolved_check() -> None:
                 raise AmbiguousWrite("POST /twoots/: ReadTimeout")
             return await super().post(username, content, parent_id)
 
+    class Distinct(FakeLLM):
+        """FakeLLM's five lines soon trip the similarity check; these never resemble each other."""
+        lines = ["The reef off New Haven looked grey on today's dive.",
+                 "Landlord still hasn't fixed the leak, and rent went up again.",
+                 "Regatta week was loud, crowded and the best fun all year."]
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.calls += 1
+            return self.lines[(self.calls - 1) % len(self.lines)]
+
     global UNRESOLVED_GIVE_UP
     saved = bot_module.ACTION_WEIGHTS, UNRESOLVED_GIVE_UP
     bot_module.ACTION_WEIGHTS = {"post": 1}
@@ -298,7 +308,7 @@ async def unresolved_check() -> None:
     try:
         with tempfile.TemporaryDirectory() as tmp:
             p, npc_store = Lossy(), NpcStore(":memory:", own_usernames={me})
-            team = Team(p, FakeLLM(0, 0), None, npc_store, StateStore(f"{tmp}/bots.db"), personas=personas)
+            team = Team(p, Distinct(0, 0), None, npc_store, StateStore(f"{tmp}/bots.db"), personas=personas)
             p.failures = ["landed"]
             action = await team.bots[0].step()
             assert action.type == "post" and action.made_id is None
@@ -306,7 +316,8 @@ async def unresolved_check() -> None:
             restarted = StateStore(f"{tmp}/bots.db")
             assert len(restarted.unresolved()) == 1 and restarted.made_posts("") == []
             await Collector(p, npc_store).poll()
-            team = Team(p, FakeLLM(0, 0), None, npc_store, restarted, personas=personas)
+            team = Team(p, Distinct(0, 0), None, npc_store, restarted, personas=personas)
+            team.bots[0].llm.calls = 1  # carry on after the first line
             team.reconcile()
             found = [x["id"] for x in p.posts.values() if x["author"] == me]
             assert restarted.unresolved() == [] and [pid for _, pid, _ in restarted.made_posts("")] == found
