@@ -403,10 +403,14 @@ class Distinct(FakeLLM):
     lines = ["The reef off New Haven looked grey on today's dive.",
              "Landlord still hasn't fixed the leak, and rent went up again.",
              "Regatta week was loud, crowded and the best fun all year."]
+    issue_lines = ["Proof of vaccination at the door is a small ask if it keeps the clinic open.",
+                   "Voting yes on the 2nd, for the nurses who did the last one.",
+                   "If a vaccine pass keeps the ferries running, it has my vote."]
 
     async def generate(self, system: str, prompt: str) -> Optional[str]:
         self.calls += 1
-        return self.lines[(self.calls - 1) % len(self.lines)]
+        lines = self.issue_lines if "post about the referendum" in prompt else self.lines
+        return lines[(self.calls - 1) % len(lines)]
 
 
 async def unresolved_check() -> None:
@@ -525,6 +529,7 @@ async def interrupted_check() -> None:
                     restarted = StateStore(f"{tmp}/bots.db")
                     history = restarted.load_history(me)
                     assert len(restarted.unresolved()) == 1 and [h[1] for h in history] == [kind], (kind, when)
+                    interrupted = restarted.unresolved()[0][4]
                     assert history[0][9] is None and restarted.made_posts("") == []
                     if kind == "reply":
                         assert restarted.claimed([f"post:{target['id']}"]) and target["id"] in restarted.load_seen(me)
@@ -541,7 +546,7 @@ async def interrupted_check() -> None:
                     await again.step()
                     replies = [x for x in ours(p) if x["parent_id"] == target["id"]]
                     assert len(replies) == (kind == "reply" and when == "after"), "a teammate answered it again"
-                    assert sum(x["content"] == Distinct.lines[0] for x in ours(p)) == (when == "after"), "resent"
+                    assert sum(x["content"] == interrupted for x in ours(p)) == (when == "after"), "resent"
 
         # Killed outright while the post waits for its answer: nothing but the journal row is left.
         with tempfile.TemporaryDirectory() as tmp:
@@ -882,6 +887,44 @@ def persona_story_check() -> None:
     system = key._system_prompt([], False)
     assert "the biscuit" in system and "never a new relative, job or past event" in system and "During covid" not in system
     assert "During covid you" in plain_bot._system_prompt([], False) and "Your life" not in plain_bot._system_prompt([], False)
+    assert "Sign-offs" not in system, "sign-offs are handed out post by post, not listed"
+
+    walter = Bot(by["walter_h"], FakePlatform(), FakeLLM(0, 0), load_world(), store=state)
+    grace = Bot(by["grace_teo"], FakePlatform(), FakeLLM(0, 0), load_world(), store=state)
+    note = {"id": 1, "author": "npc_1", "content": "ferry late again"}
+
+    def prompts(b: Bot, kind: str) -> list:
+        return [b._user_prompt(kind, note if kind == "reply" else None, ("daily", "the weather")) for _ in range(400)]
+    saved = random.getstate()
+    random.seed(7)
+    try:
+        signed = [u for u in prompts(walter, "post") if "End it with your sign-off" in u]
+        assert 60 <= len(signed) <= 140, f"{len(signed)}/400 posts signed off"
+        assert {s for s in ("Thats all from me.", "Righto.", "Make of it what you will.") if any(s in u for u in signed)} \
+            == {"Thats all from me.", "Righto.", "Make of it what you will."}, "the sign-offs take turns"
+        assert not any("No emoji" in u for u in prompts(walter, "post")), "no emoji habit, nothing to hold back"
+        bare = sum("No emoji" in u for u in prompts(grace, "post"))
+        assert 220 <= bare <= 340, f"{bare}/400 of Grace's posts told to skip the emoji"
+        assert not any("sign-off" in u for u in prompts(grace, "reply")), "replies don't sign off"
+        assert not any("sign-off" in u or "No emoji" in u for u in prompts(plain_bot, "post")), "other accounts unchanged"
+    finally:
+        random.setstate(saved)
+
+    class Says(FakeLLM):
+        def __init__(self, text: str) -> None:
+            super().__init__(0, 0)
+            self.text = text
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            return self.text
+
+    hint = Bot(by["walter_h"], FakePlatform(), Says("Weather looks like a blow coming. Better to tie things down early."),
+               load_world(), store=StateStore(":memory:"))
+    assert asyncio.run(hint._compose("post", ("issue", "careful early"))) is None and hint.rejected == {"off topic": 1}
+    assert asyncio.run(hint._compose("post", ("daily", "the weather"))) is not None, "only issue posts must say it"
+    said_it = Bot(by["walter_h"], FakePlatform(), Says("Id rather show proof of vaccination than lose another winter."),
+                  load_world(), store=StateStore(":memory:"))
+    assert asyncio.run(said_it._compose("post", ("issue", "careful early"))) is not None
 
     def said(user: str, text: str, days_ago: float = 0) -> None:
         at = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat(timespec="seconds")

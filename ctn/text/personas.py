@@ -5,7 +5,7 @@ import re
 from collections import Counter
 
 from ctn.text.content import CONTENT_DIR, LINES, load_personas, load_world
-from ctn.text.guard import fresh_phrases
+from ctn.text.guard import EMOJI_RE, fresh_phrases
 
 ARCHETYPES = CONTENT_DIR / "archetypes.json"
 PERSONAS = CONTENT_DIR / "personas.json"
@@ -91,7 +91,6 @@ def check(personas: list) -> list:
     return problems
 
 
-EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF]")
 STORY_WORDS = (250, 700)
 
 

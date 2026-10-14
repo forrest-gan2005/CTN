@@ -137,6 +137,8 @@ def plain(text: Optional[str]) -> str:
     return (text or "").translate(PLAIN)
 
 
+EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF]")
+
 PHRASE_STOP = frozenset(
     "a an and the to of in on at for with by from is are was were be been am it its it's this that these those i im "
     "i'm me my we our us you your he she they them their his her him as or but if so not no do does did just about up "

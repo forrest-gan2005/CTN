@@ -390,6 +390,10 @@ class FakeLLM:
         "Checking a pass takes ten seconds. Closing takes months.",
         "Heard the same rumour three times before lunch.",
     ]
+    ISSUE_LINES = [  # what a writer asked for a referendum post says, so the topic gate lets it through
+        "Showing proof of vaccination takes ten seconds. Closing takes months.",
+        "Voting yes on the 2nd, mostly so the clinic queue never looks like 2021 again.",
+    ]
 
     def __init__(self, min_delay: float = 0.5, max_delay: float = 2.0) -> None:
         self.name = "fake"
@@ -406,7 +410,7 @@ class FakeLLM:
         await asyncio.sleep(delay)
         self.calls += 1
         self.total_wait += delay
-        return random.choice(self.LINES)
+        return random.choice(self.ISSUE_LINES if "post about the referendum" in prompt else self.LINES)
 
     async def aclose(self) -> None:
         pass

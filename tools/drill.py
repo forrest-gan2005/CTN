@@ -140,6 +140,8 @@ class Stage:
             self._block("llm:backup", now, 2.0)
             return httpx.Response(429, headers={"retry-after": "2"})
         text = "SUPPORT" if model == "judge" else self._fresh_line()
+        if model != "judge" and any("post about the referendum" in str(m.get("content")) for m in body["messages"]):
+            text += " Voting yes on the 2nd."  # as asked, or the topic gate drops it
         return httpx.Response(200, json={"choices": [{"message": {"content": text}}],
                                          "usage": {"prompt_tokens": 900, "completion_tokens": 30}})
 

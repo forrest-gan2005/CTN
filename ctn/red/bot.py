@@ -13,8 +13,8 @@ from ctn.infra.llm import FakeLLM, team_llms
 from ctn.infra.state import StateStore
 from ctn.red.rhythm import UniformPacer
 from ctn.text.content import load_personas, load_vaccine_angles, load_world
-from ctn.text.guard import (about_referendum, judge_stance, leans_no, looks_like_probe, output_problem,
-                            fresh_phrases, phrases, plain, wrap_external)
+from ctn.text.guard import (EMOJI_RE, about_referendum, fresh_phrases, judge_stance, leans_no, looks_like_probe,
+                            output_problem, phrases, plain, wrap_external)
 from ctn.text.semantic import TWIN
 
 log = logging.getLogger("bot")
@@ -47,6 +47,8 @@ TARGET_LEANS = {"persuade": ("undecided", "no"), "bridge": ("no", "undecided"), 
 LEAN_CHECKS = 3  # citizens profiled per reply decision; each can cost a few LLM calls
 LEAN_TTL = timedelta(hours=12)
 HASHTAG_PROB = 0.3
+SIGN_OFF_PROB = 0.25  # a key account's sign-off on every post is a tic people notice
+EMOJI_PROB = 0.3  # posts allowed an emoji, for a voice that has the habit at all
 NO_TAG_HINTS = ("voteno", "keepkingstoniaopen", "protectchoice", "nomandate", "mybody")
 VACCINE_ANGLES = load_vaccine_angles()
 
@@ -281,7 +283,10 @@ class Bot:
         content = self._clean(raw)
         if content is None or self._too_similar(content, examples):
             return None
-        problem = await self._check(content, system)
+        if kind == "post" and topic[0] == "issue" and not about_referendum(content):
+            problem = "off topic"  # a hint the reader has to decode moves nobody
+        else:
+            problem = await self._check(content, system)
         if problem:
             self.rejected[problem] = self.rejected.get(problem, 0) + 1
             source = f" (replying to #{target['id']} by {target['author']})" if target else ""
@@ -418,7 +423,7 @@ class Bot:
         today = datetime.now(TIMEZONE).date()
         story = p.get("backstory")
         if story:  # a key account: its whole life in its own words, and nothing beyond it
-            habits = "\n".join(f"- {h}" for h in story["voice"])
+            habits = "\n".join(f"- {h}" for h in story["voice"] if not h.startswith("Sign-offs:"))
             who = (f"You are {p['name']}, {p['age']}, from {p['home']}. Your life, as you'd tell it:\n\n"
                    f"{story['story']}\n\nPeople in your life: {story['people']}.\n"
                    f"{LINE_BRIEF[self.line].format(why=p['why_yes'])}\n"
@@ -481,7 +486,8 @@ class Bot:
                     "or chatting, keep it short and friendly and don't restart the argument."
                 )
         elif topic[0] == "issue":
-            parts.append(f"Write a new post about the referendum, along this line: {topic[1]}.")
+            parts.append(f"Write a new post about the referendum, along this line: {topic[1]}. Make it plain that "
+                         "you mean the referendum on proof of vaccination; don't leave it as a hint or a metaphor.")
         elif topic[0] == "vaccine":
             parts.append(f"Write a new post about vaccination in your everyday life: {topic[1]}. Don't mention the "
                          "referendum or any mandate in this one, and don't give anyone medical advice.")
@@ -500,6 +506,16 @@ class Bot:
         if recent:
             listed = "\n".join(f"- {c}" for c in recent)
             parts.append(f"You recently posted these. Do not repeat them or say the same thing again:\n{listed}")
+
+        story = self.persona.get("backstory")
+        if story:  # told outright, since a listed habit turns up in every post
+            signoffs = [s for h in story["voice"] if h.startswith("Sign-offs:") for s in re.findall(r'"([^"]+)"', h)]
+            sign = random.choice(signoffs) if kind == "post" and signoffs and random.random() < SIGN_OFF_PROB else None
+            if sign:
+                parts.append(f'End it with your sign-off "{sign}".')
+            emoji = any(EMOJI_RE.search(h) for h in story["voice"] if not h.startswith("Sign-offs:"))
+            if emoji and not (sign and EMOJI_RE.search(sign)) and random.random() >= EMOJI_PROB:
+                parts.append("No emoji in this one.")
 
         return "\n\n".join(parts)
 
@@ -705,7 +721,7 @@ async def quiet_race() -> None:
         async def generate(self, system: str, prompt: str) -> Optional[str]:
             self.started.set()
             await self.go.wait()
-            return "Ferry was packed this morning, standing room only again."
+            return "Ferry was packed this morning, standing room only again. Voting yes on the 2nd."
 
     persona = next(p for p in load_personas() if p["line"] == "persuade")
     saved = ACTION_WEIGHTS, QUIET_ACTIONS
