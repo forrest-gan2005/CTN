@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import base64
+import itertools
 import json
 from typing import Any, Optional
 
@@ -365,14 +366,14 @@ class RealPlatform:
         starts after it. The format is undocumented, so a server-issued cursor is always preferred."""
         if post_id in self.after:
             return self.after[post_id], []
+        if self.created.get(post_id):
+            return cursor_for(post_id, self.created[post_id]), []
         for candidate in range(post_id, max(0, post_id - NEIGHBOURS), -1):
-            extra = []
-            if not self.created.get(candidate):
-                try:
-                    extra = [await self.get_post(candidate)]
-                except KeyError:
-                    continue
-            return cursor_for(candidate, self.created[candidate]), extra if candidate != post_id else []
+            try:  # fetched even when seen before: having seen a post doesn't mean the caller has it
+                post = await self.get_post(candidate)
+            except KeyError:
+                continue
+            return cursor_for(candidate, self.created[candidate]), [] if candidate == post_id else [post]
         raise KeyError(f"can't page back from post {post_id}: it and the {NEIGHBOURS - 1} before it are gone")
 
     async def _toggle(self, method: str, path: str, username: str) -> bool:
@@ -780,28 +781,35 @@ async def _repost_gap_demo() -> None:
             collector = Collector(p, store, page_size=1, min_interval=0)  # and a restart carries on from there
         assert rounds >= 3 and {r[0] for r in store.posts_after(0)} == {first["id"], newest["id"]}, rounds
 
-        # A gap whose top post is hidden: its visible neighbour, then more reposts than one round reads.
-        mock = MockLegitSocial(team_key="k")
-        transport = httpx.MockTransport(mock.handler)
-        p = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"), transport=transport)
-        await p.ensure_account("npc", "npc")
-        kept = [(await p.post("npc", "the oldest post"))["id"]]
-        for _ in range(7):
-            pid = len(mock.posts) + 1
-            mock.posts[pid] = {"id": pid, "kind": "repost", "content": "", "parent_id": None, "root_id": None,
-                               "repost_of": kept[0], "author": {"id": mock._ids()["npc"], "username": "npc"},
-                               "created_at": _now()}
-        kept.append((await p.post("npc", "just below a hidden post"))["id"])
-        hidden = (await p.post("npc", "hidden"))["id"]
-        mock.hidden.add(hidden)
-        store = NpcStore(":memory:")
-        store.add_gap(None, hidden)
-        for _ in range(10):  # a restart before every round
+        # A gap whose top post is hidden: its visible neighbour (a post or a reply, fetched before by something
+        # else or not), then more reposts than one round reads.
+        for kind, seen in itertools.product(("post", "reply"), (False, True)):
+            mock = MockLegitSocial(team_key="k")
+            transport = httpx.MockTransport(mock.handler)
+            p = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"),
+                             transport=transport)
+            await p.ensure_account("npc", "npc")
+            kept = [(await p.post("npc", "the oldest post"))["id"]]
+            for _ in range(7):
+                pid = len(mock.posts) + 1
+                mock.posts[pid] = {"id": pid, "kind": "repost", "content": "", "parent_id": None, "root_id": None,
+                                   "repost_of": kept[0], "author": {"id": mock._ids()["npc"], "username": "npc"},
+                                   "created_at": _now()}
+            kept.append((await p.post("npc", "just below a hidden post", kept[0] if kind == "reply" else None))["id"])
+            hidden = (await p.post("npc", "hidden"))["id"]
+            mock.hidden.add(hidden)
+            store = NpcStore(":memory:")
+            store.add_gap(None, hidden)
             p = RealPlatform("https://legit.test/api", team_key="k", accounts=p.accounts, transport=transport)
-            await Collector(p, store, page_size=1, min_interval=0).fill_gaps()
-            if not store.gaps():
-                break
-        assert store.gaps() == [] and {r[0] for r in store.posts_after(0)} == set(kept), store.posts_after(0)
+            if seen:
+                await p.get_post(kept[1])  # e.g. a health check read it: the platform has seen it, the store hasn't
+            for _ in range(10):  # a restart before every round, unless the cache is what's being tested
+                await Collector(p, store, page_size=1, min_interval=0).fill_gaps()
+                if not store.gaps():
+                    break
+                if not seen:
+                    p = RealPlatform("https://legit.test/api", team_key="k", accounts=p.accounts, transport=transport)
+            assert store.gaps() == [] and {r[0] for r in store.posts_after(0)} == set(kept), (kind, seen)
 
         for i in range(5):
             mock.add_user(f"seeker_{i}")
