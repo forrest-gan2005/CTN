@@ -22,7 +22,7 @@ DEFAULT_ACCOUNTS_DB = paths.DATA / "accounts.db"
 PAGE = 100  # items asked for per page; the server may send fewer
 MAX_BODY = 500  # characters the platform accepts in a post
 RELIST_AT = 20  # unknown authors in one page above which the whole account list is fetched again
-REPOST_PAGES = 5  # pages of nothing but reposts read through before a feed call gives up
+SKIP_PAGES = 1000  # pages of nothing but reposts a feed call reads through before it fails (never returns empty)
 NEIGHBOURS = 20  # older post ids tried when paging back from a post that is gone
 MAX_RETRIES = 4
 MAX_CONCURRENT = 8
@@ -225,7 +225,7 @@ class RealPlatform:
         if before is not None:
             params["cursor"], found = await self._cursor_before(before)
             found = [p for p in found if p.get("kind") != "repost"]
-        for _ in range(REPOST_PAGES):
+        for _ in range(SKIP_PAGES):  # a page of nothing but reposts isn't the end: read on until one isn't
             resp = await self._send("GET", "/posts", params=params)
             resp.raise_for_status()
             page = resp.json()
@@ -234,7 +234,11 @@ class RealPlatform:
             cursor = page.get("next_cursor")
             if fresh or not cursor:
                 break
-            params["cursor"] = cursor
+            if cursor == params.get("cursor"):
+                raise RuntimeError("the feed's cursor didn't move")
+            params.update(cursor=cursor, limit=PAGE)
+        else:
+            raise RuntimeError(f"{SKIP_PAGES} pages of nothing but reposts")
         if before is not None:
             found = [p for p in found if p["id"] < before]
         if found and cursor:
@@ -253,7 +257,7 @@ class RealPlatform:
     async def report(self, username: str, post_id: int, reason: str = "inauthentic", detail: str = "") -> None:
         """File a report; the moderator rules later, so the outcome isn't known here."""
         resp = await self._call("POST", f"/posts/{post_id}/report", username,
-                                json={"reason": reason, "detail": detail}, idempotent=False)
+                                json={"reason": reason, "detail": detail or None}, idempotent=False)
         if resp.status_code in (403, 429) and any(w in resp.text.lower() for w in ("suspend", "block", "banned")):
             raise ReportingSuspended(resp.text[:200])
         resp.raise_for_status()
@@ -265,11 +269,21 @@ class RealPlatform:
         return body.get("items", []) if isinstance(body, dict) else body
 
     async def account_id(self, username: str) -> int:
-        if username not in self.ids:
-            resp = await self._send("GET", "/accounts", params={"q": username, "limit": 8})
+        """The id behind a username: from the cache, else searching page by page until it turns up or the
+        search ends (a search matches parts of names, so the exact one can be on any page)."""
+        cursor = None
+        for _ in range(SKIP_PAGES):
+            if username in self.ids:
+                return self.ids[username]
+            params = {"q": username, "limit": PAGE, **({"cursor": cursor} if cursor else {})}
+            resp = await self._send("GET", "/accounts", params=params)
             resp.raise_for_status()
-            for account in resp.json().get("items") or []:
+            page = resp.json()
+            for account in page.get("items") or []:
                 self._know(account)
+            cursor = page.get("next_cursor")
+            if not cursor:
+                break
         if username not in self.ids:
             raise KeyError(f"no account {username}")
         return self.ids[username]
@@ -662,6 +676,19 @@ async def _demo() -> None:
     except httpx.HTTPStatusError as e:
         assert e.response.status_code == 403
 
+    for i in range(120):  # a search matches parts of names: the exact one may be on a later page
+        mock.add_user(f"target_{i}")
+    mock.add_user("target")
+    finder = RealPlatform("https://legit.test/api", team_key=mock.team_key, accounts=AccountStore(":memory:"),
+                          transport=transport)
+    assert await finder.account_id("target") == mock._ids()["target"]
+    try:
+        await finder.account_id("targe")
+        raise AssertionError("a near name was taken for the one asked")
+    except KeyError:
+        pass
+    await finder.aclose()
+
     lost = []  # the registration lands but its answer is lost: logging in finds the account
 
     def lose_register(request: httpx.Request) -> httpx.Response:
@@ -677,6 +704,40 @@ async def _demo() -> None:
     for client in (p, restarted, blind, stranger_team, q):
         await client.aclose()
     print(f"real platform ok ({mock.calls} HTTP calls)")
+
+
+async def _repost_gap_demo() -> None:
+    """A long run of reposts isn't the end of history: a gap behind it is read to its end, and a reply buried
+    under it still reaches its post's author after a restart."""
+    from ctn.infra.collector import Collector, NpcStore
+
+    for page_size, run in ((1, 5), (50, 300)):
+        mock = MockLegitSocial(team_key="k")
+        transport = httpx.MockTransport(mock.handler)
+        p = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"), transport=transport)
+        for who in ("joe", "npc"):
+            await p.ensure_account(who, who)
+        first = await p.post("joe", "the oldest post")
+        buried = await p.reply("npc", first["id"], "a reply under the reposts")
+        for _ in range(run):
+            pid = len(mock.posts) + 1
+            mock.posts[pid] = {"id": pid, "kind": "repost", "content": "", "parent_id": None, "root_id": None,
+                               "repost_of": first["id"], "author": {"id": mock._ids()["npc"], "username": "npc"},
+                               "created_at": _now()}
+        newest = await p.post("npc", "the newest post")
+        restarted = RealPlatform("https://legit.test/api", team_key="k", accounts=p.accounts, transport=transport)
+        restarted.adopt(first["id"], "joe")
+        store = NpcStore(":memory:")
+        collector = Collector(restarted, store, page_size=page_size, min_interval=0)
+        await collector.poll()
+        assert store.gaps(), (page_size, "the first look should leave history to fill")
+        await collector.fill_gaps()
+        assert store.count() == 3 and store.gaps() == [], (page_size, store.count(), store.gaps())
+        assert {r[0] for r in store.posts_after(0)} == {first["id"], buried["id"], newest["id"]}
+        assert list(restarted.inbox.get("joe", {})) == [buried["id"]], "the buried reply is a notification"
+        for client in (p, restarted):
+            await client.aclose()
+    print("repost gaps ok")
 
 
 async def _retry_demo() -> None:
@@ -853,4 +914,5 @@ async def _retry_demo() -> None:
 
 if __name__ == "__main__":
     asyncio.run(_demo())
+    asyncio.run(_repost_gap_demo())
     asyncio.run(_retry_demo())
