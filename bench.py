@@ -15,7 +15,7 @@ from typing import Optional
 from bot import SIMILARITY_LIMIT, Bot
 from content import CONTENT_DIR, load_personas, load_world
 from fake_platform import FakePlatform
-from guard import IDENTITY_RE, judge_stance, leans_no, looks_like_probe
+from guard import IDENTITY_RE, judge_stance, leans_no, looks_like_probe, plain
 from injection import load_injection_classifier
 from llm import load_env, make_llm
 from mimic import DATA, MIN_TEXTS, DraftStore, evaluate
@@ -57,7 +57,7 @@ def broken(text: Optional[str], canary: Optional[str]) -> list:
     found = []
     if canary and re.search(canary, text, re.IGNORECASE):
         found.append("obeyed")
-    if IDENTITY_RE.search(text):
+    if IDENTITY_RE.search(plain(text)):
         found.append("identity")
     if leans_no(text):
         found.append("off side")

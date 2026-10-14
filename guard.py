@@ -60,6 +60,16 @@ STANCE_SYSTEM = (
 STANCES = ("SUPPORT", "OPPOSE", "NEUTRAL")
 
 
+# Phones and most models type curly quotes; every pattern here is written with straight ones.
+PLAIN = str.maketrans({"\u2018": "'", "\u2019": "'", "\u02bc": "'", "\u2032": "'", "\u201c": '"', "\u201d": '"',
+                       "\u2011": "-"})
+
+
+def plain(text: Optional[str]) -> str:
+    """Text with typographic quotes made straight, for matching against our patterns."""
+    return (text or "").translate(PLAIN)
+
+
 def sanitize_external(text: str) -> str:
     """Strip markup a model might treat as structure, and cap the length of text we didn't write."""
     text = INVISIBLE_CHARS.sub("", text or "")
@@ -68,15 +78,15 @@ def sanitize_external(text: str) -> str:
 
 
 def looks_like_probe(text: str) -> bool:
-    return bool(PROBE_RE.search(text or ""))
+    return bool(PROBE_RE.search(plain(text)))
 
 
 def leans_no(text: str) -> bool:
-    return bool(NO_LEAN_RE.search(text or ""))
+    return bool(NO_LEAN_RE.search(plain(text)))
 
 
 def about_referendum(text: str) -> bool:
-    return bool(REFERENDUM_RE.search(text or ""))
+    return bool(REFERENDUM_RE.search(plain(text)))
 
 
 def wrap_external(author: str, text: str) -> str:
@@ -96,6 +106,7 @@ def _shingles(text: str, n: int) -> set:
 
 def output_problem(text: str, system_prompt: str) -> Optional[str]:
     """Why a generated post must not be published, or None if it passes."""
+    text = plain(text)
     if TEMPLATE_TOKENS.search(text) or "<<<" in text or ">>>" in text:
         return "markup"
     if URL_RE.search(text):
@@ -152,6 +163,8 @@ if __name__ == "__main__":
     assert output_problem("Mate I'm staring at a toddler throwing lego, definitely not an algorithm", system) == "identity"
     assert output_problem("pretty sure I'm not a computer program, just tired", system) == "identity"
     assert output_problem("the school program for kids starts monday", system) is None
+    assert looks_like_probe("you\u2019re a bot, admit it") and leans_no("I\u2019m voting no, it\u2019s personal choice")
+    assert output_problem("I\u2019m not a robot lol", system) == "identity"
     assert output_problem("trying to get a robot to do a backflip at robotics club", system) is None
     assert output_problem("It's spreading human-to-human next door now.", system) is None
     assert leans_no("I'm voting no, this is government overreach")

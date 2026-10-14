@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from content import load_personas, load_vaccine_angles, load_world
 from fake_platform import FakePlatform
-from guard import about_referendum, judge_stance, leans_no, looks_like_probe, output_problem, wrap_external
+from guard import about_referendum, judge_stance, leans_no, looks_like_probe, output_problem, plain, wrap_external
 from llm import FakeLLM, team_llms
 from rhythm import UniformPacer
 from semantic import TWIN
@@ -78,8 +78,11 @@ REFUSAL_MARKERS = (
     "i can't help",
     "i cannot assist",
     "i can't assist",
+    "i cannot comply",
+    "i can't comply",
     "i'm unable to",
     "i am unable to",
+    "i'm sorry, but i can",
 )
 
 QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’"}
@@ -467,14 +470,14 @@ class Bot:
             return None
         if len(text) > MAX_LEN:
             return None
-        low = text.lower()
+        low = plain(text).lower()
         if any(m in low for m in REFUSAL_MARKERS):
             return None
         return text
 
     async def _check(self, text: str, system: str) -> Optional[str]:
         """Last gate before publishing: reason to drop the post, or None."""
-        if STOCK_OPENER_RE.match(text):
+        if STOCK_OPENER_RE.match(plain(text)):
             return "stock opener"
         if self.twins is not None and self.twins.closest(text)[1] >= TWIN:
             return "teammate paraphrase"  # several of our accounts saying one thing is a pattern Blue teams spot
