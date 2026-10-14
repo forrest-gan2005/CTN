@@ -410,12 +410,14 @@ async def smoke(seconds: float = 10) -> None:
     ours = [p for p in mock.posts.values() if p["author"]["username"] in own]
     assert {p["username"] for p in personas} <= set(mock.users), "every account registered with the bot key"
     assert team.online == {p["username"] for p in personas}
-    assert ours and min(p["created_at"] for p in ours) >= start.isoformat(), "nobody posted before the start"
+    first, actions = team.state.db.execute("SELECT MIN(ts), COUNT(*) FROM history").fetchone()
+    assert actions, "no account did anything"
+    assert datetime.fromisoformat(first) >= start.replace(microsecond=0), "an account acted before the start"
+    assert all(p["created_at"] >= start.isoformat() for p in ours), "an account posted before the start"
     assert len(team.roster.npcs) == 5
     assert reports_before_start == [], "Blue reported before the start"
     assert any(pid == giveaway["id"] for _, pid, _ in mock.reports), "the giveaway was never reported"
-    print(f"smoke ok: {len(ours)} posts by {len({p['author']['username'] for p in ours})} accounts, "
-          f"{mock.calls} API calls")
+    print(f"smoke ok: {actions} actions, {len(ours)} posts, {mock.calls} API calls")
 
 
 THINGS = ["the ferry", "rent", "the reef", "regatta week", "the bus", "work", "the hospital", "fish prices",
