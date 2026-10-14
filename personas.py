@@ -9,6 +9,7 @@ from content import CONTENT_DIR, LINES, load_personas
 ARCHETYPES = CONTENT_DIR / "archetypes.json"
 PERSONAS = CONTENT_DIR / "personas.json"
 MAX_PER_ARCHETYPE = 3  # more accounts with the same job and story would start to look like a set
+YEAR = 2026  # ages are as of the competition
 
 
 def _username(rng: random.Random, first: str, last: str) -> str:
@@ -47,7 +48,7 @@ def generate(n: int, line: str, status: str, existing: list, seed: int) -> list:
         made.append({
             "username": username,
             "name": name,
-            "age": rng.randint(*arch["ages"]),
+            "age": rng.randint(*_age_range(arch)),
             "job": arch["job"],
             "home": rng.choice(arch["homes"]) if arch["homes"] else rng.choices(homes, weights)[0],
             "line": line,
@@ -66,7 +67,33 @@ def generate(n: int, line: str, status: str, existing: list, seed: int) -> list:
     return made
 
 
+def _age_range(arch: dict) -> tuple:
+    """Ages the job allows that also fit its 2021 story (e.g. old enough then to have had the job)."""
+    lo, hi = arch["age_2021"]
+    return max(arch["ages"][0], lo + YEAR - 2021), min(arch["ages"][1], hi + YEAR - 2021)
+
+
+def check(personas: list) -> list:
+    """Problems with personas built from an archetype: an age that doesn't fit the archetype's 2021 story.
+    Hand-written personas, whose job matches no archetype, are left to whoever wrote them."""
+    pools = json.loads(ARCHETYPES.read_text(encoding="utf-8"))
+    by_job = {a["job"]: a for a in pools["archetypes"]}
+    problems = []
+    for p in personas:
+        arch = by_job.get(p["job"])
+        if arch is None:
+            continue
+        lo, hi = arch["age_2021"]
+        then = p["age"] - (YEAR - 2021)  # during 2021 they were this or one less
+        if then < lo or then - 1 > hi:
+            problems.append(f"{p['username']}: {p['age']} now, about {then} in 2021, but the story needs {lo}-{hi}")
+    return problems
+
+
 def _save(personas: list) -> None:
+    problems = check(personas)
+    if problems:
+        raise SystemExit("not saved:\n" + "\n".join(problems))
     PERSONAS.write_text(json.dumps(personas, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     load_personas(status=None)  # fail fast if anything written is invalid
 
@@ -82,6 +109,7 @@ if __name__ == "__main__":
     act = sub.add_parser("activate", help="move a reserve persona into play, e.g. to replace a banned account")
     act.add_argument("username")
     sub.add_parser("list", help="count personas by line and status")
+    sub.add_parser("check", help="ages that don't fit an archetype's 2021 story")
     args = parser.parse_args()
 
     personas = json.loads(PERSONAS.read_text(encoding="utf-8"))
@@ -96,6 +124,10 @@ if __name__ == "__main__":
         match[0]["status"] = "active"
         _save(personas)
         print(f"{args.username} is active")
+    elif args.cmd == "check":
+        problems = check(personas)
+        print("\n".join(problems) or f"{len(personas)} personas ok")
+        raise SystemExit(1 if problems else 0)
     else:
         counts = Counter((p["line"], p.get("status", "active")) for p in personas)
         for (line, status), k in sorted(counts.items()):
