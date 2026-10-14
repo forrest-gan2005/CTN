@@ -52,6 +52,7 @@ CLEARED = "cleared"
 MIN_CITIZENS = 100
 REPORT_ATTEMPTS = 5  # a report that never got through is retried this many times in all, backing off
 REPORT_BACKOFF = timedelta(minutes=1)  # doubled after each failure, up to an hour
+RATE_LIMIT_PAUSE = timedelta(minutes=1)  # standing down after a bare 429 that carried no wait
 TOO_FAST, COPIED, PARAPHRASED = "superhuman posting rate", "copied across accounts", "paraphrased across accounts"
 SELF_CHECK_EVERY = timedelta(hours=1)
 SELF_CHECK_POSTS = 20_000  # newest citizen posts every rule is tried on
@@ -305,6 +306,10 @@ class Reporter:
                 continue
             except Exception as e:
                 code = getattr(getattr(e, "response", None), "status_code", None)
+                if code == 429:  # rate limiting, not a refusal: the target stays in the queue
+                    self.blocked_until = datetime.now(timezone.utc) + RATE_LIMIT_PAUSE
+                    log.warning("reporting rate-limited; standing down until %s", self.blocked_until)
+                    break
                 attempts = self.state.report_attempts(post_id) + 1
                 if code is not None and 400 <= code < 500 or attempts >= REPORT_ATTEMPTS:
                     self.state.record_report(post_id, author, reason, _now(), "failed")  # refused, or never got through
@@ -466,7 +471,57 @@ async def _demo() -> None:
     await _self_check_demo(embedder)
     await _backfill_demo()
     await _report_retry_demo()
+    await _report_429_demo()
     print("blue ok")
+
+
+async def _report_429_demo() -> None:
+    """Through the real adapter: reports answered 429 (even with Retry-After 0) until the limit lifts are waited
+    out, not given up, and the target is reported exactly once afterwards, never early."""
+    import httpx
+
+    from collector import Collector, NpcStore
+    from fake_platform import FakePlatform
+    from real_platform import AccountStore, MockLegitSocial, RealPlatform
+    from state import StateStore
+
+    p = FakePlatform()
+    npc_store = NpcStore(":memory:")
+    cutoff = datetime.now(timezone.utc)
+    rival = await p.post("rival", "As an AI language model, I can't vote, but here's a post.")
+    await Collector(p, npc_store, min_interval=0).poll()
+    state = StateStore(":memory:")
+    scanner = BlueScanner(npc_store, state, own=(), cutoff=cutoff)
+    scanner.scan()
+
+    clock = type("Clock", (), {"now": 0.0, "__call__": lambda self: self.now})()
+
+    async def sleep(seconds: float) -> None:
+        clock.now += seconds
+
+    mock, limited, requests = MockLegitSocial(bot_key="k"), [True], []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/report"):
+            requests.append(clock.now)
+            if limited[0]:
+                return httpx.Response(429, headers={"retry-after": "0"})
+        return mock.handler(request)
+
+    api = RealPlatform("https://legit.test/api", bot_key="k", accounts=AccountStore(":memory:"),
+                       transport=httpx.MockTransport(handler))
+    api.clock, api.sleep = clock, sleep
+    await api.ensure_account("joe", "Joe")
+    reporter = Reporter(api, scanner, state, username="joe", min_citizens=0)
+    assert await reporter.report_some() == 0 and reporter.blocked()
+    assert state.report_counts() == {} and [c[0] for c in scanner.candidates()] == [rival["id"]], "given up"
+    assert len(requests) == 4 and api.blocked_until["report"] - clock.now >= 59
+    limited[0] = False
+    reporter.blocked_until = None  # the stand-down is over
+    assert await reporter.report_some() == 1 and state.report_counts() == {"sent": 1}
+    assert len(requests) == 5 and requests[-1] >= 60, "retried before the limit lifted"
+    assert scanner.candidates() == []
+    await api.aclose()
 
 
 async def _report_retry_demo() -> None:

@@ -21,6 +21,7 @@ MAX_RETRIES = 4
 MAX_CONCURRENT = 8
 MAX_RATE_WAIT = 300.0  # seconds a request will wait out a rate limit; longer and it fails at once instead
 JITTER = 1.0  # seconds, only ever added to a server-given wait
+EXHAUSTED_PAUSE = 60.0  # seconds a scope stays blocked after every attempt was rate-limited (even "Retry-After: 0")
 # Requests that never reached the server: safe to repeat even when they create something.
 NOT_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 
@@ -349,6 +350,11 @@ class RealPlatform:
                 await self.sleep(delay)
         if error is not None:
             raise error
+        if resp is not None and resp.status_code == 429:
+            # Still limited after every attempt: a typed outcome the caller can wait out, never a refusal.
+            until = max(self.blocked_until.get(scope, 0.0), self.clock() + EXHAUSTED_PAUSE)
+            self.blocked_until[scope] = until
+            raise RateLimited(until - self.clock())
         return resp
 
 
