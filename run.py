@@ -948,6 +948,18 @@ def persona_story_check() -> None:
     assert sides._too_similar("Had my flu jab at the clinic this morning, then sat on the wharf with Eli watching the "
                               f"crews come in with not much to show for it. {reef}", []), "a sentence of its own, again"
     assert not sides._too_similar("Had my flu jab at the clinic this morning, before the rush.", [])
+    family = "I don't trust strangers with my family's stories."
+    sides.history.append(("", bot_module.Action("post", content=(
+        f"Repaired the nets by the wharf before dawn and watched a young crew take the boat out. {family}"))))
+    curly = family.replace("'", "\u2019") + " A quiet Sunday at home with soup on the stove, then a slow walk round the garden."
+    assert sides._too_similar(curly, []), "the same sentence with curly quotes"
+    again = Bot(by["walter_h"], FakePlatform(), Says(curly), load_world(), store=StateStore(":memory:"))
+    again.history = list(sides.history)
+    assert asyncio.run(again._compose("post", ("daily", "home"))) is None and again.rejected == {"too similar": 1}
+
+    kai = Bot(by["kai_lind"], FakePlatform(), FakeLLM(0, 0), load_world(), store=state)
+    assert "don't know when it's on" in kai._user_prompt("post", None, ("daily", "Regatta Week parties"))
+    assert "don't know when it's on" not in kai._user_prompt("post", None, ("daily", "uni assignments due"))
     vague = Bot(by["walter_h"], FakePlatform(), Says(paper), load_world(), stance_llm=Judge("NEUTRAL"),
                 store=StateStore(":memory:"))
     assert asyncio.run(vague._compose("post", ("issue", "careful early"))) is None and vague.rejected == {"off topic": 1}, \
@@ -984,10 +996,11 @@ def persona_story_check() -> None:
     for user in ("jordan_wake", "nadia_kemp"):
         stories[user]["backstory"]["story"] += " A prepared island sparkles."
     stories["lena_brook"]["backstory"]["story"] += " I understand parents who are nervous about a new vaccine."
+    stories["nadia_kemp"]["backstory"]["story"] += " Waiting until it\u2019s spreading here is a choice too."
     found = check_backstories(broken)
     for expected in ("phrase 'roti stall by the'", "name 'tevita'", "Rosa in the family", "sign-off 'righto.'",
                      "emoji '🤖'", "grace_teo: story is 2 words", "phrase 'a prepared island sparkles'",
-                     "lena_brook: story tells its angle"):
+                     "lena_brook: story tells its angle", "nadia_kemp: story tells its angle"):
         assert any(expected in f for f in found), (expected, found)
     print("persona stories ok")
 

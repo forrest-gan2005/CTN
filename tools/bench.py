@@ -163,7 +163,7 @@ async def run_drafts(writer: Metered, judge, n: int, concurrency: int) -> dict:
         rejected.update(bot.rejected)
     failed = sum(out is None for out in writer.outputs[calls_before:])
     rejected["no answer"] = failed
-    rejected["cleaned away or too similar"] = n - len(made) - sum(rejected.values())
+    rejected["cleaned away"] = n - len(made) - sum(rejected.values())
     pairs = [(a, b) for i, a in enumerate(texts) for b in texts[i + 1:]]
     near = sum(SequenceMatcher(None, a.lower(), b.lower(), autojunk=False).ratio() > SIMILARITY_LIMIT
                for a, b in pairs)

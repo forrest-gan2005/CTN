@@ -231,7 +231,7 @@ def wrap_external(author: str, text: str) -> str:
 
 
 def _shingles(text: str, n: int) -> set:
-    words = re.findall(r"[a-z0-9']+", text.lower())
+    words = re.findall(r"[a-z0-9']+", plain(text).lower())
     return {" ".join(words[i:i + n]) for i in range(len(words) - n + 1)}
 
 
@@ -292,6 +292,12 @@ if __name__ == "__main__":
     assert wrapped.count(f"<<<END POST {tag}>>>") == 1
     assert "<|eot_id|>" not in wrapped and "\u200b" not in wrapped
     assert len(sanitize_external("x" * 5000)) == MAX_EXTERNAL_LEN
+
+    straight, curly = "I don't trust strangers with my family's stories.", "I don\u2019t trust strangers with my family\u2019s stories."
+    for a in (straight, curly):
+        for b in (straight, curly):
+            assert copies(a, b) and output_problem(a, f"Your life: {b}") == "prompt leak", (a, b)
+    assert not copies("I don't trust strangers.", straight), "fewer than eight words in common"
 
     system = "You are Joe Tama, 46, from Crown Harbour. You run a small cafe near the marina."
     assert output_problem("milk went up again, third time this year", system) is None

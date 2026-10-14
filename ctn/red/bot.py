@@ -47,6 +47,7 @@ TARGET_LEANS = {"persuade": ("undecided", "no"), "bridge": ("no", "undecided"), 
 LEAN_CHECKS = 3  # citizens profiled per reply decision; each can cost a few LLM calls
 LEAN_TTL = timedelta(hours=12)
 HASHTAG_PROB = 0.3
+EVENT_RE = re.compile(r"festival|regatta", re.IGNORECASE)  # the setting's events, whose dates nobody knows
 SIGN_OFF_PROB = 0.15  # a key account's sign-off on every post is a tic people notice; no real-world rate behind it
 EMOJI_PROB = 0.3  # posts allowed an emoji, for a voice that has the habit at all (an engineering guess)
 NO_TAG_HINTS = ("voteno", "keepkingstoniaopen", "protectchoice", "nomandate", "mybody")
@@ -281,7 +282,10 @@ class Bot:
         raw = await self.llm.generate(system, self._user_prompt(kind, target, topic, earlier, about))
         model = getattr(raw, "model", None) or getattr(self.llm, "name", None)  # a fallback model may have written it
         content = self._clean(raw)
-        if content is None or self._too_similar(content, examples):
+        if content is None:
+            return None
+        if self._too_similar(content, examples):
+            self.rejected["too similar"] = self.rejected.get("too similar", 0) + 1
             return None
         problem = await self._check(content, system, takes_side=kind == "post" and topic[0] == "issue")
         if problem:
@@ -495,6 +499,9 @@ class Bot:
         else:
             parts.append(f"Write a new post about something from your everyday life: {topic[1]}. "
                          "Leave the referendum out of this one.")
+            if EVENT_RE.search(topic[1] or ""):
+                parts.append("You don't know when it's on this year, so write about past years or looking forward to "
+                             "the next one, not as if it's happening now.")
 
         tags = [t for t in self.hashtags if not any(h in t for h in NO_TAG_HINTS)]
         if kind == "post" and topic[0] in ("issue", "vaccine") and tags and random.random() < HASHTAG_PROB:
