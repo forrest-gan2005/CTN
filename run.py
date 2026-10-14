@@ -224,13 +224,20 @@ class Team:
                 log.exception("backup failed")
 
     def reply_mix(self, since: str) -> str:
-        """Reply targets since `since`; an author unknown when picked is shown as what we know now: a report on it
-        upheld makes it a rival, Blue's own rules only flag it."""
+        """Replies picked since `since`, and how many of those picks have gone live so far (not how many replies
+        went out in the window). An author unknown when picked is shown as what we know now: a report on it upheld
+        makes it a rival, Blue's own rules only flag it; a citizen the whitelist has confirmed shows as one, with any
+        such mark beside it rather than over it."""
         rivals, flagged = self.state.upheld_authors(), self.state.suspects()
-        now = lambda a: "rival" if a in rivals else "flagged" if a in flagged else self.roster.classify(a)
+
+        def now(author: str) -> str:
+            mark = "rival" if author in rivals else "flagged" if author in flagged else None
+            known = self.roster.classify(author)
+            return f"{known}/{mark}" if known == "npc" and mark else mark or known
+
         m = self.state.reply_mix(since, now)
         picked, live = sum(m["picked"].values()), sum(m["live"].values())
-        return (f"picked {dict(m['picked'])}, live {dict(m['live'])}; unknown when picked "
+        return (f"picked {dict(m['picked'])}, of those live {dict(m['live'])}; unknown when picked "
                 f"{m['unknown_picked']}/{picked}, live {m['unknown_live']}/{live}, now {dict(m['unknown_now'])}")
 
     def status(self) -> str:
@@ -806,14 +813,56 @@ async def reply_route_check() -> None:
             assert mix["outcomes"] == {"sent": 4, "found": 1, "claim_failed": 1, "dropped": 1, "not_sent": 1}, mix
             assert (mix["unknown_picked"], mix["unknown_live"]) == (2, 2)
             assert len(ours()) == 5 and len({x["content"] for x in ours()}) == 5, "nothing resent"
-            team.roster.npcs.add("ghost")
+            team.roster.npcs = {"ghost"}  # before the start the collector whitelists everyone; say who is what
+            assert "now {'unknown': 1, 'npc': 1}" in team.reply_mix(""), team.reply_mix("")
             state.add_suspect("stranger", "assistant talk", None, "t")
             assert "now {'flagged': 1, 'npc': 1}" in team.reply_mix(""), team.reply_mix("")
             state.record_report(99, "stranger", "assistant talk", "t", "upheld")
             assert "now {'rival': 1, 'npc': 1}" in team.reply_mix(""), team.reply_mix("")
+            state.add_suspect("ghost", "assistant talk", None, "t")  # a citizen Blue's rules got wrong
+            assert "now {'rival': 1, 'npc/flagged': 1}" in team.reply_mix(""), team.reply_mix("")
     finally:
         bot_module.ACTION_WEIGHTS = saved
     print("reply routes ok")
+
+
+async def reply_abort_check() -> None:
+    """A reply that fails or is cancelled while it is being written (judging the citizen's lean, or generating)
+    is dropped once and frees the post for a teammate; nothing is sent or journalled, and the error still
+    propagates."""
+    from ctn.red import bot as bot_module
+
+    # A background account doesn't weigh leans when choosing, so here _lean only runs inside _reply.
+    personas = [x for x in load_personas() if x["line"] == "background"][:1] + load_personas()[:1]
+    me, mate = personas[0]["username"], personas[1]["username"]
+    saved = bot_module.ACTION_WEIGHTS
+    bot_module.ACTION_WEIGHTS = {"reply": 1}
+    try:
+        for stage in ("_lean", "_compose"):
+            for error in (RuntimeError("generation failed"), asyncio.CancelledError()):
+                p, state = FakePlatform(), StateStore(":memory:")
+                target = await p.post("npc_1", "Clinic queue was out the door again")
+                before = len(p.posts)
+                b = Bot(personas[0], p, Distinct(0, 0), load_world(), roster=Roster(own={me, mate}, npcs=["npc_1"]),
+                        store=state)
+
+                async def fail(*args, **kwargs):
+                    raise error
+                setattr(b, stage, fail)
+                try:
+                    await b.step()
+                    raise AssertionError(f"{type(error).__name__} in {stage} was swallowed")
+                except type(error):
+                    pass
+                key = f"post:{target['id']}"
+                assert state.reply_mix("")["outcomes"] == {"dropped": 1}, (stage, error)
+                assert len(p.posts) == before and b.history == [], (stage, error)
+                assert state.db.execute("SELECT COUNT(*) FROM writes").fetchone()[0] == 0
+                assert state.claimed([key]) == set(), f"{stage}: the post stayed claimed after {error!r}"
+                assert state.claim(key, mate), "a teammate can take it"
+    finally:
+        bot_module.ACTION_WEIGHTS = saved
+    print("reply abort ok")
 
 
 async def smoke(seconds: float = 10) -> None:
@@ -996,6 +1045,7 @@ if __name__ == "__main__":
         asyncio.run(blue_gate_check())
         asyncio.run(injection_reject_check())
         asyncio.run(reply_route_check())
+        asyncio.run(reply_abort_check())
         asyncio.run(smoke())
     else:
         asyncio.run(rehearse(args.seconds, args.real))

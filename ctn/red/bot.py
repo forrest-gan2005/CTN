@@ -252,10 +252,10 @@ class Bot:
                 lean = await self._lean(target["author"], target.get("content") or "")
             action = await self._compose("reply", target=target, topic=(source, lean))
         finally:
-            if action is None:
+            if action is None:  # nothing to send, even if writing it failed or was cancelled: free the post
                 self.store.end_pick(pick, "dropped")
+                self.store.release(key)
         if action is None:
-            self.store.release(key)
             return None
         action.pick = pick
         return action
