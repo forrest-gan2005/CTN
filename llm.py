@@ -19,6 +19,7 @@ ENV_FILE = Path(__file__).parent / ".env"
 MAX_WAIT = 20.0  # seconds; a model rate-limited or queued for longer hands the call to the next one
 COOLDOWN = 60.0  # how long to skip a model that keeps failing
 LOCKOUT = 3600.0  # bad key or unknown model: retrying won't help, so stop trying for a while
+POLL = 1.0  # seconds; a caller waiting for its slot notices a new block at least this often
 
 # provider: (OpenAI-compatible base URL, env var holding the key, free-tier requests per minute)
 PROVIDERS = {
@@ -139,17 +140,33 @@ class Quota:
         self.blocked_until = 0.0
 
     def delay(self) -> float:
+        """Seconds before a request could go out; infinite while blocked for longer than a caller would wait."""
         now = time.monotonic()
-        if now < self.blocked_until:
+        if self.blocked_until - now > MAX_WAIT:
             return float("inf")
-        return max(0.0, self.next_slot - now)
+        return max(0.0, self.blocked_until - now, self.next_slot - now)
 
-    async def wait_turn(self) -> None:
-        now = time.monotonic()
-        slot = max(now, self.next_slot)
+    def block(self, seconds: float) -> None:
+        """Back off for `seconds`; a shorter block never cuts an existing longer one short."""
+        self.blocked_until = max(self.blocked_until, time.monotonic() + seconds)
+
+    async def wait_turn(self, patience: float) -> bool:
+        """Wait for this caller's request slot. False, and send nothing, if the provider has told us to back
+        off for longer than `patience` seconds, whether before the wait or while it lasts."""
+        give_up = time.monotonic() + patience
+        while time.monotonic() < self.blocked_until:
+            if self.blocked_until > give_up:
+                return False
+            await asyncio.sleep(min(POLL, self.blocked_until - time.monotonic()))
+        slot = max(time.monotonic(), self.next_slot)
         self.next_slot = slot + self.gap
-        if slot > now:
-            await asyncio.sleep(slot - now)
+        while True:
+            now = time.monotonic()
+            if now < self.blocked_until:  # someone else was told to back off while we queued: start again
+                return await self.wait_turn(max(0.0, give_up - now))
+            if now >= slot:
+                return True
+            await asyncio.sleep(min(POLL, slot - now))
 
 
 _QUOTAS = {}
@@ -226,9 +243,9 @@ class OpenAICompatLLM:
                                           {"role": "user", "content": prompt}]}
         async with self._sem:
             for attempt in range(3):
-                if time.monotonic() < self.quota.blocked_until or self.over_budget():
+                # Checked again after queueing: a limit or the budget may have been reached meanwhile.
+                if self.over_budget() or not await self.quota.wait_turn(MAX_WAIT) or self.over_budget():
                     return None
-                await self.quota.wait_turn()
                 try:
                     resp = await self._client.post(self.url, headers=self.headers, json=body)
                 except httpx.HTTPError as e:
@@ -237,18 +254,17 @@ class OpenAICompatLLM:
                     continue
                 if resp.status_code == 429:
                     wait = _retry_after(resp)
+                    self.quota.block(wait)  # for every caller of this model; a short one is sat out, not fallen back from
                     if wait > MAX_WAIT:
                         log.warning("%s rate-limited for %.0fs", self.name, wait)
-                        self.quota.blocked_until = time.monotonic() + wait
                         return None
-                    await asyncio.sleep(wait)
                     continue
                 if resp.status_code >= 500:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 if resp.status_code in (401, 403, 404):
                     log.error("%s: HTTP %d %s", self.name, resp.status_code, resp.text[:200])
-                    self.quota.blocked_until = time.monotonic() + LOCKOUT
+                    self.quota.block(LOCKOUT)
                     return None
                 if resp.status_code >= 400:  # e.g. a content filter refusing this one prompt
                     log.warning("%s: HTTP %d %s", self.name, resp.status_code, resp.text[:200])
@@ -262,7 +278,7 @@ class OpenAICompatLLM:
                     log.warning("%s: unexpected response %s", self.name, resp.text[:200])
                     return None
                 return _generated(text, self.name) if text else None
-            self.quota.blocked_until = time.monotonic() + COOLDOWN
+            self.quota.block(COOLDOWN)
             return None
 
     async def aclose(self) -> None:
@@ -496,7 +512,75 @@ async def _demo() -> None:
     assert isinstance(both, ChainLLM) and both.name == "fake+ollama:qwen3:8b"
     for llm in (flaky, chain, paced):
         await llm.aclose()
+    await _cooldown_demo()
     print("llm ok")
+
+
+async def _cooldown_demo() -> None:
+    """Callers already queued for a model's next slot respect a block or a budget reached meanwhile: a long 429
+    sends nobody else and hands their calls to the fallback, a short one is sat out by everyone, and a later
+    shorter block never shortens a longer one."""
+    gate, sent, times = asyncio.Event(), asyncio.Event(), {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        model = json.loads(request.content)["model"]
+        times.setdefault(model, []).append(time.monotonic())
+        n = len(times[model])
+        if model in ("gated", "spend") and n == 1:
+            sent.set()
+            await gate.wait()
+        if model == "gated" and n == 1:
+            return httpx.Response(429, headers={"retry-after": "120"})
+        if model == "short" and n == 1:
+            return httpx.Response(429, headers={"retry-after": "0.5"})
+        usage = {"prompt_tokens": 2_000_000, "completion_tokens": 0} if model == "spend" else {}
+        return httpx.Response(200, json={"choices": [{"message": {"content": f"hi from {model}"}}], "usage": usage})
+
+    mock = httpx.MockTransport(handler)
+    make = lambda model, rpm=None, **kw: OpenAICompatLLM("http://mock/v1", "k", model, name=f"mock:{model}", rpm=rpm,
+                                                         transport=mock, **kw)
+
+    # A long 429 arrives while the second caller waits for its slot (ten seconds away).
+    first, second, spare = make("gated", rpm=6), make("gated", rpm=6), make("spare")
+    start = time.monotonic()
+    a = asyncio.ensure_future(first.generate("s", "p"))
+    await sent.wait()
+    b = asyncio.ensure_future(ChainLLM([second, spare]).generate("s", "p"))
+    while second.quota.next_slot < start + 15:  # both slots taken: the second caller is queued
+        await asyncio.sleep(0.01)
+    gate.set()
+    assert await a is None and await b == "hi from spare"
+    assert len(times["gated"]) == 1, "a queued caller was sent during the block"
+    assert time.monotonic() - start < POLL + 1, "the queued caller didn't notice the block promptly"
+
+    # A short 429 holds back every caller of the model, then both go through without falling back.
+    first, second = make("short", rpm=600), make("short", rpm=600)
+    outs = await asyncio.gather(first.generate("s", "p"), second.generate("s", "p"))
+    assert outs == ["hi from short"] * 2 and len(times["short"]) == 3
+    assert all(t >= times["short"][0] + 0.5 for t in times["short"][1:]), "sent inside the shared block"
+
+    # The budget is used up while the second caller is queued.
+    gate.clear()
+    sent.clear()
+    PRICES["mock:spend"] = (1.0, 1.0)  # 2M tokens in = $2 a call
+    book = UsageLedger(":memory:")
+    first, second = (make("spend", rpm=120, usage=book, budget=1.0) for _ in range(2))
+    start = time.monotonic()
+    a = asyncio.ensure_future(first.generate("s", "p"))
+    await sent.wait()
+    b = asyncio.ensure_future(second.generate("s", "p"))
+    while second.quota.next_slot < start + 0.9:
+        await asyncio.sleep(0.01)
+    gate.set()
+    assert await a == "hi from spend" and await b is None and len(times["spend"]) == 1, "sent over budget"
+
+    quota = Quota(None)
+    quota.block(100)
+    until = quota.blocked_until
+    quota.block(1)
+    assert quota.blocked_until == until and quota.delay() == float("inf")
+    for llm in (first, second, spare):
+        await llm.aclose()
 
 
 def print_usage() -> None:
