@@ -19,7 +19,12 @@ class AmbiguousWrite(Exception):
 
 
 class Incomplete(RuntimeError):
-    """A read stopped at its page budget before it could tell; calling again carries on where it stopped."""
+    """A read stopped at its page budget before it could tell; calling again carries on where it stopped.
+    `below` is the oldest post id it read past, when that is progress worth keeping."""
+
+    def __init__(self, message: str, below: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.below = below
 
 
 class ReportingSuspended(Exception):

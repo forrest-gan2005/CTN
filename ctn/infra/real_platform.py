@@ -226,11 +226,14 @@ class RealPlatform:
         if before is not None:
             params["cursor"], found = await self._cursor_before(before)
             found = [p for p in found if p.get("kind") != "repost"]
+            if found:  # the nearest post below a missing one is a page of its own, delivered before reading on
+                return found
         for _ in range(SKIP_PAGES):  # a page of nothing but reposts isn't the end: read on until one isn't
             resp = await self._send("GET", "/posts", params=params)
             resp.raise_for_status()
             page = resp.json()
-            fresh = [p for p in await self._posts(page.get("items") or []) if p.get("kind") != "repost"]
+            items = page.get("items") or []
+            fresh = [p for p in await self._posts(items) if p.get("kind") != "repost"]
             found += fresh
             cursor = page.get("next_cursor")
             if fresh or not cursor:
@@ -239,9 +242,11 @@ class RealPlatform:
                 raise RuntimeError("the feed's cursor didn't move")
             params.update(cursor=cursor, limit=PAGE)
         else:
-            if before is not None:
-                self.after[before] = cursor  # the next call from this post carries on from here
-            raise Incomplete(f"{SKIP_PAGES} pages of nothing but reposts below post {before}")
+            # Only reposts so far. The last one read is a post id like any other: the caller can keep it as
+            # where its history stands, and a call from it carries on with the server's own cursor.
+            below = items[-1]["post_id"]
+            self.after[below] = cursor
+            raise Incomplete(f"{SKIP_PAGES} pages of nothing but reposts below post {before}", below=below)
         if before is not None:
             found = [p for p in found if p["id"] < before]
         if found and cursor:
@@ -650,7 +655,9 @@ async def _demo() -> None:
     assert [x["id"] for x in await restarted.feed_latest(n=10, before=made[1])] == older, "or one written like it"
     mock.hidden.add(made[1])
     blind = RealPlatform("https://legit.test/api", team_key=mock.team_key, accounts=p.accounts, transport=transport)
-    assert [x["id"] for x in await blind.feed_latest(n=10, before=made[1])] == older, "from below a hidden post too"
+    nearest = [x["id"] for x in await blind.feed_latest(n=10, before=made[1])]
+    assert nearest == older[:1], "below a hidden post, its nearest neighbour comes first, as a page of its own"
+    assert [x["id"] for x in await blind.feed_latest(n=10, before=nearest[0])] == older[1:]
     mock.hidden.discard(made[1])
     for who, target in (("npc_1", made[1]), ("joe_tama", made[2]), ("npc_1", made[2])):
         await p.repost(who, target)
@@ -764,10 +771,37 @@ async def _repost_gap_demo() -> None:
         await collector.poll()
         rounds = 0
         while store.gaps():
-            await collector.fill_gaps()  # a read that stops short ends the round, its gap kept
+            before = store.gaps()[0][2]
+            await collector.fill_gaps()  # a read that stops short ends the round, its gap kept and moved down
             rounds += 1
             assert rounds < 10, "it never got past the reposts"
-        assert rounds >= 3 and store.count() == 2, (rounds, store.count())
+            assert not store.gaps() or store.gaps()[0][2] < before, "the gap kept where it got to"
+            p = RealPlatform("https://legit.test/api", team_key="k", accounts=p.accounts, transport=transport)
+            collector = Collector(p, store, page_size=1, min_interval=0)  # and a restart carries on from there
+        assert rounds >= 3 and {r[0] for r in store.posts_after(0)} == {first["id"], newest["id"]}, rounds
+
+        # A gap whose top post is hidden: its visible neighbour, then more reposts than one round reads.
+        mock = MockLegitSocial(team_key="k")
+        transport = httpx.MockTransport(mock.handler)
+        p = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"), transport=transport)
+        await p.ensure_account("npc", "npc")
+        kept = [(await p.post("npc", "the oldest post"))["id"]]
+        for _ in range(7):
+            pid = len(mock.posts) + 1
+            mock.posts[pid] = {"id": pid, "kind": "repost", "content": "", "parent_id": None, "root_id": None,
+                               "repost_of": kept[0], "author": {"id": mock._ids()["npc"], "username": "npc"},
+                               "created_at": _now()}
+        kept.append((await p.post("npc", "just below a hidden post"))["id"])
+        hidden = (await p.post("npc", "hidden"))["id"]
+        mock.hidden.add(hidden)
+        store = NpcStore(":memory:")
+        store.add_gap(None, hidden)
+        for _ in range(10):  # a restart before every round
+            p = RealPlatform("https://legit.test/api", team_key="k", accounts=p.accounts, transport=transport)
+            await Collector(p, store, page_size=1, min_interval=0).fill_gaps()
+            if not store.gaps():
+                break
+        assert store.gaps() == [] and {r[0] for r in store.posts_after(0)} == set(kept), store.posts_after(0)
 
         for i in range(5):
             mock.add_user(f"seeker_{i}")

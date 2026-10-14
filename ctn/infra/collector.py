@@ -305,7 +305,11 @@ class Collector:
                     return total
                 try:
                     page = await self.platform.feed_latest(n=self.page_size, before=high)
-                except Incomplete as e:  # progress was made; the gap stays and the next round carries on
+                except Incomplete as e:  # nothing to keep yet, but it read this far: the gap starts there now
+                    if e.below is not None and low is not None and e.below <= low:
+                        self.store.delete_gap(gap_id)
+                    elif e.below is not None and e.below < high:
+                        self.store.update_gap(gap_id, e.below)
                     log.info("gap below #%s not finished this round: %s", high, e)
                     return total
                 pages += 1
