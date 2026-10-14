@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Optional
 
 from ctn import paths
@@ -26,6 +27,22 @@ def load_vaccine_angles() -> list:
     return json.loads((CONTENT_DIR / "archetypes.json").read_text(encoding="utf-8"))["vaccine_angles"]
 
 
+def load_backstories() -> dict:
+    """The key accounts' own stories (backstories.md): username -> {"story", "people", "voice"}."""
+    text = (CONTENT_DIR / "backstories.md").read_text(encoding="utf-8")
+    stories = {}
+    for block in re.split(r"^## ", text, flags=re.M)[1:]:
+        username, _, body = block.partition("\n")
+        story, _, rest = body.partition("\nPeople: ")
+        people, _, voice = rest.partition("\nVoice:\n")
+        habits = [line[2:].strip() for line in voice.splitlines() if line.startswith("- ")]
+        if not (story.strip() and people.strip() and habits):
+            raise ValueError(f"backstory for {username!r} needs a story, a People line and Voice habits")
+        paragraphs = [" ".join(par.split()) for par in re.split(r"\n\s*\n", story.strip())]
+        stories[username.strip()] = {"story": "\n\n".join(paragraphs), "people": people.strip(), "voice": habits}
+    return stories
+
+
 def load_personas(status: Optional[str] = "active") -> list:
     """Load and validate the persona library, failing fast on a hand-editing mistake.
 
@@ -44,4 +61,11 @@ def load_personas(status: Optional[str] = "active") -> list:
         if p["username"] in seen:
             raise ValueError(f"duplicate username {p['username']!r}")
         seen.add(p["username"])
+    stories = load_backstories()
+    unknown = stories.keys() - seen
+    if unknown:
+        raise ValueError(f"backstories for unknown accounts {sorted(unknown)}")
+    for p in personas:
+        if p["username"] in stories:
+            p["backstory"] = stories[p["username"]]
     return [p for p in personas if status is None or p.get("status", "active") == status]

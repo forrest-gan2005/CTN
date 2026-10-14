@@ -212,6 +212,11 @@ class StateStore:
                  action.angle, action.target_author, action.target_class, action.made_id, action.model),
             )
 
+    def team_texts(self, since: str, exclude: str) -> list:
+        """(username, text) of every post and reply the other accounts have made since UTC ISO time `since`."""
+        return self.db.execute("SELECT username, content FROM history WHERE type IN ('post', 'reply') AND ts >= ? "
+                               "AND username != ? AND content IS NOT NULL", (since, exclude)).fetchall()
+
     def replies_to(self, author: str, since: str) -> int:
         """How many replies the whole team has sent `author` since UTC ISO time `since`."""
         return self.db.execute(

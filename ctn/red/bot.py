@@ -13,8 +13,8 @@ from ctn.infra.llm import FakeLLM, team_llms
 from ctn.infra.state import StateStore
 from ctn.red.rhythm import UniformPacer
 from ctn.text.content import load_personas, load_vaccine_angles, load_world
-from ctn.text.guard import (about_referendum, judge_stance, leans_no, looks_like_probe, output_problem, plain,
-                            wrap_external)
+from ctn.text.guard import (about_referendum, judge_stance, leans_no, looks_like_probe, output_problem,
+                            fresh_phrases, phrases, plain, wrap_external)
 from ctn.text.semantic import TWIN
 
 log = logging.getLogger("bot")
@@ -72,6 +72,8 @@ DEFAULT_GUIDE = ("Respond to their actual point. If they lean NO, acknowledge th
 NPC_REPLY_PREF = 0.8  # how strongly reply targeting prefers citizens over unknown accounts
 CONV_REPLY_PROB = 0.5  # chance of replying back when an NPC has engaged us
 INBOX_TTL = timedelta(hours=12)  # answering a much older reply looks odd
+SHARED_WINDOW = timedelta(days=7)  # a phrase two teammates used this recently is one too many for a third
+SHARED_LIMIT = 2
 MAX_REPLIES_PER_AUTHOR = 4  # team-wide per 24h: no ping-pong with competitor bots, no crowding one citizen
 
 REFUSAL_MARKERS = (
@@ -414,20 +416,33 @@ class Bot:
                 heading = "Examples of your voice (match the voice, never reuse the wording):"
             shown = f"{heading}\n{listed}\n\n"
         today = datetime.now(TIMEZONE).date()
+        story = p.get("backstory")
+        if story:  # a key account: its whole life in its own words, and nothing beyond it
+            habits = "\n".join(f"- {h}" for h in story["voice"])
+            who = (f"You are {p['name']}, {p['age']}, from {p['home']}. Your life, as you'd tell it:\n\n"
+                   f"{story['story']}\n\nPeople in your life: {story['people']}.\n"
+                   f"{LINE_BRIEF[self.line].format(why=p['why_yes'])}\n"
+                   "Only mention people, places and past events from your story. Small everyday details (the "
+                   "weather, a meal, a customer) are yours to add, but never a new relative, job or past event, "
+                   "and don't bring the hardest parts of your story into every post.\n"
+                   f"How you write:\n{habits}\n\n")
+            own_words = " Say things in your own words; don't repeat sentences from your story."
+        else:
+            who = (f"You are {p['name']}, {p['age']}, from {p['home']}. You {p['job']}.\n"
+                   f"During covid you {p['covid']}.\n"
+                   f"{LINE_BRIEF[self.line].format(why=p['why_yes'])}\n"
+                   f"Other things you think: {'; '.join(p['views'])}.\n"
+                   f"How you write: {p['style']}.\n\n")
+            own_words = ""
         return (
             f"{self.world}\n\n"
             f"Today is {today:%A} {today.day} {today:%B %Y}. "
             f"The referendum is in {(REFERENDUM_DAY - today).days} days.\n\n"
-            "# Who you are\n"
-            f"You are {p['name']}, {p['age']}, from {p['home']}. You {p['job']}.\n"
-            f"During covid you {p['covid']}.\n"
-            f"{LINE_BRIEF[self.line].format(why=p['why_yes'])}\n"
-            f"Other things you think: {'; '.join(p['views'])}.\n"
-            f"How you write: {p['style']}.\n\n"
+            f"# Who you are\n{who}"
             f"{shown}"
             "# Output\n"
-            "Write in first person as yourself. Keep it to 1-3 short sentences, under 40 words. "
-            "Output only the text of the post: no quotation marks, no explanation, no label."
+            "Write in first person as yourself. Keep it to 1-3 short sentences, under 40 words."
+            f"{own_words} Output only the text of the post: no quotation marks, no explanation, no label."
         )
 
     def _user_prompt(self, kind: str, target: Optional[dict], topic: tuple, earlier: Optional[str] = None,
@@ -512,6 +527,10 @@ class Bot:
             return "stock opener"
         if self.twins is not None and self.twins.closest(text)[1] >= TWIN:
             return "teammate paraphrase"  # several of our accounts saying one thing is a pattern Blue teams spot
+        shared = self._shared_phrase(text)
+        if shared:
+            log.info("%s: %r is already in %d teammates' posts", self.username, shared, SHARED_LIMIT)
+            return "shared phrase"
         problem = output_problem(text, system)
         if problem or self.stance_llm is None:
             return problem
@@ -521,6 +540,19 @@ class Bot:
         if stance == "OPPOSE":
             return "off side"
         return None
+
+    def _shared_phrase(self, text: str) -> Optional[str]:
+        """A phrase at least SHARED_LIMIT other accounts of ours used this week, setting names aside: the same
+        turn of phrase across accounts is what links them, even when the posts say different things."""
+        mine = fresh_phrases(text, self.world)
+        if not mine:
+            return None
+        users = {}
+        since = _iso(datetime.now(timezone.utc) - SHARED_WINDOW)
+        for user, content in self.store.team_texts(since, self.username):
+            for phrase in mine & phrases(content):
+                users.setdefault(phrase, set()).add(user)
+        return next((phrase for phrase, who in users.items() if len(who) >= SHARED_LIMIT), None)
 
     def _too_similar(self, text: str, examples: list) -> bool:
         """Reject near-copies of the examples shown or of this bot's own earlier posts."""

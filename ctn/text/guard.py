@@ -1,6 +1,7 @@
 import json
 import re
 import secrets
+from functools import lru_cache
 from typing import Optional
 
 from ctn import paths
@@ -134,6 +135,29 @@ PLAIN = str.maketrans({"\u2018": "'", "\u2019": "'", "\u02bc": "'", "\u2032": "'
 def plain(text: Optional[str]) -> str:
     """Text with typographic quotes made straight, for matching against our patterns."""
     return (text or "").translate(PLAIN)
+
+
+PHRASE_STOP = frozenset(
+    "a an and the to of in on at for with by from is are was were be been am it its it's this that these those i im "
+    "i'm me my we our us you your he she they them their his her him as or but if so not no do does did just about up "
+    "out over than then there here what who all get got have has had will would can could".split())
+
+
+@lru_cache(maxsize=8192)
+def phrases(text: str, n: int = 4) -> frozenset:
+    """Runs of n words with at least two that aren't little common words: phrasing a reader notices when it
+    turns up in several accounts."""
+    words = re.findall(r"[a-z0-9']+", plain(text).lower())
+    return frozenset(" ".join(words[i:i + n]) for i in range(len(words) - n + 1)
+                     if sum(w not in PHRASE_STOP for w in words[i:i + n]) >= 2)
+
+
+def fresh_phrases(text: str, setting: str) -> frozenset:
+    """The phrases of `text` the setting doesn't account for: not in it, and not built on one of its names
+    (anyone may write "the Mango & Spice Festival")."""
+    known, names = phrases(setting), phrases(setting, 3)
+    return frozenset(p for p in phrases(text) - known
+                     if not any(" ".join(p.split()[i:i + 3]) in names for i in (0, 1)))
 
 
 def sanitize_external(text: str) -> str:

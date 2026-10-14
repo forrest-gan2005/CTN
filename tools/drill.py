@@ -236,6 +236,7 @@ async def child(tmp: Path, port: int, start: float, end: float) -> None:
     from ctn.infra import llm, real_platform
     from ctn.infra.collector import NpcStore
     from ctn.infra.state import StateStore
+    from ctn.red import bot as bot_module
     from run import Team
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S")
@@ -243,6 +244,7 @@ async def child(tmp: Path, port: int, start: float, end: float) -> None:
     import run
 
     run.RESTORE_RETRY = 1.0
+    bot_module.SHARED_LIMIT = 10**6  # the stand-in writes from a few stock phrases; this drill is about faults
     llm.COOLDOWN = 3.0
     real_platform.EXHAUSTED_PAUSE = 3.0
     blue.RATE_LIMIT_PAUSE = timedelta(seconds=3)

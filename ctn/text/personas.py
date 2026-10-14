@@ -4,7 +4,8 @@ import random
 import re
 from collections import Counter
 
-from ctn.text.content import CONTENT_DIR, LINES, load_personas
+from ctn.text.content import CONTENT_DIR, LINES, load_personas, load_world
+from ctn.text.guard import fresh_phrases
 
 ARCHETYPES = CONTENT_DIR / "archetypes.json"
 PERSONAS = CONTENT_DIR / "personas.json"
@@ -90,6 +91,37 @@ def check(personas: list) -> list:
     return problems
 
 
+EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF]")
+STORY_WORDS = (250, 700)
+
+
+def check_backstories(personas: list) -> list:
+    """Problems with the key accounts' stories: too short or too long, and anything two accounts share that a
+    reader of both could notice (a phrase the setting doesn't explain, a family name, a sign-off, an emoji), or
+    a family name that is also one of our accounts' names."""
+    keyed = {p["username"]: p["backstory"] for p in personas if "backstory" in p}
+    accounts = {p["name"].split()[0].lower() for p in personas}
+    setting = load_world()
+    problems, owners = [], {}
+    for user, b in keyed.items():
+        words = len(b["story"].split())
+        if not STORY_WORDS[0] <= words <= STORY_WORDS[1]:
+            problems.append(f"{user}: story is {words} words, want {STORY_WORDS[0]}-{STORY_WORDS[1]}")
+        names = {m.lower() for m in re.findall(r"\b([A-Z][a-z]+) \(", b["people"])}
+        for name in names & accounts:
+            problems.append(f"{user}: {name.title()} in the family is also one of our accounts")
+        signoffs = {s.lower() for h in b["voice"] if h.startswith("Sign-offs:") for s in re.findall(r'"([^"]+)"', h)}
+        emojis = set(EMOJI_RE.findall(" ".join(b["voice"])))
+        for kind, items in (("phrase", fresh_phrases(b["story"], setting)), ("name", names), ("sign-off", signoffs),
+                            ("emoji", emojis)):
+            for item in items:
+                owners.setdefault((kind, item), set()).add(user)
+    for (kind, item), users in sorted(owners.items()):
+        if len(users) > 1:
+            problems.append(f"{kind} {item!r} is in {', '.join(sorted(users))}")
+    return problems
+
+
 def _save(personas: list) -> None:
     problems = check(personas)
     if problems:
@@ -125,8 +157,10 @@ if __name__ == "__main__":
         _save(personas)
         print(f"{args.username} is active")
     elif args.cmd == "check":
-        problems = check(personas)
-        print("\n".join(problems) or f"{len(personas)} personas ok")
+        merged = load_personas(status=None)
+        problems = check(personas) + check_backstories(merged)
+        print("\n".join(problems) or f"{len(personas)} personas ok, "
+              f"{sum('backstory' in p for p in merged)} with backstories")
         raise SystemExit(1 if problems else 0)
     else:
         counts = Counter((p["line"], p.get("status", "active")) for p in personas)

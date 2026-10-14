@@ -865,6 +865,54 @@ async def reply_abort_check() -> None:
     print("reply abort ok")
 
 
+def persona_story_check() -> None:
+    """Key accounts write from their own story and nothing beyond it; the rest keep their short brief; a phrase
+    two teammates used this week is refused (setting names aside, older posts forgotten); and the story check
+    catches what two accounts share."""
+    import copy
+
+    from ctn.red import bot as bot_module
+    from ctn.text.personas import check_backstories
+
+    personas = load_personas(status=None)
+    by = {p["username"]: p for p in personas}
+    state = StateStore(":memory:")
+    key = Bot(by["jordan_wake"], FakePlatform(), FakeLLM(0, 0), load_world(), store=state)
+    plain_bot = Bot(by["rosa_dives"], FakePlatform(), FakeLLM(0, 0), load_world(), store=state)
+    system = key._system_prompt([], False)
+    assert "the biscuit" in system and "never a new relative, job or past event" in system and "During covid" not in system
+    assert "During covid you" in plain_bot._system_prompt([], False) and "Your life" not in plain_bot._system_prompt([], False)
+
+    def said(user: str, text: str, days_ago: float = 0) -> None:
+        at = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat(timespec="seconds")
+        state.record(user, at, bot_module.Action("post", content=text))
+
+    said("grace_teo", "Night shift done, and the vending machine coffee tasted like regret again.")
+    draft = "honestly the vending machine coffee tasted like regret at the depot too"
+    assert key._shared_phrase(draft) is None, "one teammate is a coincidence"
+    said("joe_tama", "Some days the vending machine coffee tasted like regret, and I sell coffee.", days_ago=9)
+    assert key._shared_phrase(draft) is None, "a phrase from last fortnight is forgotten"
+    said("lena_brook", "Staffroom vending machine coffee tasted like regret today.")
+    assert asyncio.run(key._check(draft, system)) == "shared phrase", "two teammates this week: refused"
+    for user in ("ana_moala", "walter_h"):
+        said(user, "Off to the Mango & Spice Festival for the food, not the crowds.")
+    assert key._shared_phrase("cant wait for the mango & spice festival for real") is None, "setting names are free"
+
+    assert check_backstories(personas) == []
+    broken = copy.deepcopy(personas)
+    stories = {p["username"]: p for p in broken if "backstory" in p}
+    stories["kai_lind"]["backstory"]["story"] += " The roti stall by the city markets is undefeated, no contest."
+    stories["kai_lind"]["backstory"]["people"] += ", Tevita (cousin), Rosa (aunt)"
+    stories["kai_lind"]["backstory"]["voice"].append('Sign-offs: "Righto."')
+    stories["lena_brook"]["backstory"]["voice"].append("Emoji: 🤖")
+    stories["grace_teo"]["backstory"]["story"] = "Too short."
+    found = check_backstories(broken)
+    for expected in ("phrase 'roti stall by the'", "name 'tevita'", "Rosa in the family", "sign-off 'righto.'",
+                     "emoji '🤖'", "grace_teo: story is 2 words"):
+        assert any(expected in f for f in found), (expected, found)
+    print("persona stories ok")
+
+
 async def smoke(seconds: float = 10) -> None:
     """The live wiring end to end but offline: RealPlatform over a mock of the API, three accounts held until
     a start a moment away and then staggered, citizens who posted before it, and the Blue reporter."""
@@ -1046,6 +1094,7 @@ if __name__ == "__main__":
         asyncio.run(injection_reject_check())
         asyncio.run(reply_route_check())
         asyncio.run(reply_abort_check())
+        persona_story_check()
         asyncio.run(smoke())
     else:
         asyncio.run(rehearse(args.seconds, args.real))
