@@ -5,7 +5,7 @@ The parent serves the API, plays the citizens and a rival, injects faults on a t
 restarts the child; at the end it checks what must hold: nothing posted twice, every post of ours tracked,
 nothing sent inside a cooldown, nothing before the start, work resumed after every fault.
 
-    python3 drill.py            # about two minutes, offline, nothing paid
+    python3 -m tools.drill      # about two minutes, offline, nothing paid
 """
 import argparse
 import asyncio
@@ -25,9 +25,10 @@ from pathlib import Path
 
 import httpx
 
-import backup
-from content import load_personas
-from real_platform import MockLegitSocial
+from ctn import paths
+from ctn.infra import backup
+from ctn.infra.real_platform import MockLegitSocial
+from ctn.text.content import load_personas
 
 BOT_KEY = "drill-key"
 GRACE = 0.5  # seconds; a request already on its way when a block was announced isn't a violation
@@ -200,8 +201,8 @@ def citizens(stage: Stage, own: set, stop: threading.Event) -> None:
 
 def launch(tmp: Path, port: int, start: float, end: float, n: int) -> subprocess.Popen:
     log = open(tmp / f"child-{n}.log", "w")
-    return subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "child", str(tmp), str(port),
-                             str(start), str(end)], stdout=log, stderr=subprocess.STDOUT, cwd=Path(__file__).parent)
+    return subprocess.Popen([sys.executable, "-m", "tools.drill", "child", str(tmp), str(port),
+                             str(start), str(end)], stdout=log, stderr=subprocess.STDOUT, cwd=paths.ROOT)
 
 
 def drill_personas() -> list:
@@ -210,12 +211,11 @@ def drill_personas() -> list:
 
 async def child(tmp: Path, port: int, start: float, end: float) -> None:
     """The team as it runs for real, with its waits scaled down to fit a two-minute timeline."""
-    import blue
-    import llm
-    import real_platform
-    from collector import NpcStore
+    from ctn.blue import blue
+    from ctn.infra import llm, real_platform
+    from ctn.infra.collector import NpcStore
+    from ctn.infra.state import StateStore
     from run import Team
-    from state import StateStore
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -250,11 +250,10 @@ async def child(tmp: Path, port: int, start: float, end: float) -> None:
 
 async def verify(stage: Stage, tmp: Path, port: int, marks: dict) -> list:
     """What must hold once the dust settles; returns the failures. A last catch-up stands for the next start."""
-    import llm
-    import real_platform
-    from collector import NpcStore
+    from ctn.infra import llm, real_platform
+    from ctn.infra.collector import NpcStore
+    from ctn.infra.state import StateStore
     from run import Team
-    from state import StateStore
 
     llm._LEDGER = llm.UsageLedger(tmp / "usage.db")
     personas = drill_personas()

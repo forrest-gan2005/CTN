@@ -4,7 +4,7 @@ import random
 import re
 from collections import Counter
 
-from content import CONTENT_DIR, LINES, load_personas
+from ctn.text.content import CONTENT_DIR, LINES, load_personas
 
 ARCHETYPES = CONTENT_DIR / "archetypes.json"
 PERSONAS = CONTENT_DIR / "personas.json"

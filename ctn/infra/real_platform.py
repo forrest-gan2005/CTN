@@ -11,11 +11,12 @@ from typing import Any, Optional
 
 import httpx
 
-from fake_platform import AmbiguousWrite, RateLimited, ReportingSuspended
+from ctn import paths
+from ctn.infra.fake_platform import AmbiguousWrite, RateLimited, ReportingSuspended
 
 log = logging.getLogger("platform")
 
-DEFAULT_ACCOUNTS_DB = Path(__file__).parent / "data" / "accounts.db"
+DEFAULT_ACCOUNTS_DB = paths.DATA / "accounts.db"
 LIST_KEYS = ("data", "items", "results", "posts", "twoots", "notifications")
 MAX_RETRIES = 4
 MAX_CONCURRENT = 8

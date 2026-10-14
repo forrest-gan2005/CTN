@@ -8,13 +8,14 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
-from content import load_personas, load_vaccine_angles, load_world
-from fake_platform import AmbiguousWrite, FakePlatform, RateLimited
-from guard import about_referendum, judge_stance, leans_no, looks_like_probe, output_problem, plain, wrap_external
-from llm import FakeLLM, team_llms
-from rhythm import UniformPacer
-from semantic import TWIN
-from state import StateStore
+from ctn.infra.fake_platform import AmbiguousWrite, FakePlatform, RateLimited
+from ctn.infra.llm import FakeLLM, team_llms
+from ctn.infra.state import StateStore
+from ctn.red.rhythm import UniformPacer
+from ctn.text.content import load_personas, load_vaccine_angles, load_world
+from ctn.text.guard import (about_referendum, judge_stance, leans_no, looks_like_probe, output_problem, plain,
+                            wrap_external)
+from ctn.text.semantic import TWIN
 
 log = logging.getLogger("bot")
 
@@ -677,7 +678,7 @@ async def notification_durability() -> None:
     """Replies to us survive a failure before storing, between storing and acknowledging, and halfway through
     acknowledging, without being counted twice when they come back."""
     import httpx
-    from real_platform import AccountStore, MockLegitSocial, RealPlatform
+    from ctn.infra.real_platform import AccountStore, MockLegitSocial, RealPlatform
 
     class FlakyStore(StateStore):
         fail_ingest = False

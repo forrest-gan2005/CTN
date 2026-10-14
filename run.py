@@ -9,24 +9,25 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-import backup
-from blue import MIN_CITIZENS, BlueScanner, Reporter
-from bot import Bot, Roster
-from collector import COMPETITION_START, Collector, NpcStore
-from content import load_personas, load_world
-from examples import NpcExamples
-from fake_platform import AmbiguousWrite, FakePlatform
-from health import Health
-from llm import FakeLLM, game_day_start, ledger, load_env, team_llms
-from real_platform import AccountStore, MockLegitSocial, RealPlatform
-from injection import load_injection_classifier
-from rhythm import Rhythm, UniformPacer, npc_curve
-from semantic import NearIndex, load_embedder
-from state import StateStore
+from ctn import paths
+from ctn.blue.blue import MIN_CITIZENS, BlueScanner, Reporter
+from ctn.infra import backup
+from ctn.infra.collector import COMPETITION_START, Collector, NpcStore
+from ctn.infra.fake_platform import AmbiguousWrite, FakePlatform
+from ctn.infra.health import Health
+from ctn.infra.llm import FakeLLM, game_day_start, ledger, load_env, team_llms
+from ctn.infra.real_platform import AccountStore, MockLegitSocial, RealPlatform
+from ctn.infra.state import StateStore
+from ctn.red.bot import Bot, Roster
+from ctn.red.rhythm import Rhythm, UniformPacer, npc_curve
+from ctn.text.content import load_personas, load_world
+from ctn.text.examples import NpcExamples
+from ctn.text.injection import load_injection_classifier
+from ctn.text.semantic import NearIndex, load_embedder
 
 log = logging.getLogger("run")
 
-DATA = Path(__file__).parent / "data"
+DATA = paths.DATA
 COMPETITION_END = datetime(2026, 11, 2, 17, 0, tzinfo=ZoneInfo("Australia/Sydney"))
 REFRESH_EVERY = 900.0  # seconds between whitelist, example, hashtag and activity-curve refreshes
 CITIZEN_FEED = 30  # newest citizen posts each bot reads; competitor bots will far outnumber citizens in Latest
@@ -395,8 +396,7 @@ async def unresolved_check() -> None:
     collector sees; one that never landed is marked so after a while, and not resent either."""
     import tempfile
 
-    import bot as bot_module
-
+    from ctn.red import bot as bot_module
     class Lossy(FakePlatform):
         failures = []  # for our next posts: "landed" (stored, answer lost) or "lost" (never stored)
 
@@ -462,8 +462,7 @@ class Cut(FakePlatform):
 
 async def _killed_child(tmp: str) -> None:
     """Runs in a subprocess the parent kills while the post is waiting for its answer."""
-    import bot as bot_module
-
+    from ctn.red import bot as bot_module
     bot_module.ACTION_WEIGHTS = {"post": 1}
     p = Cut()
     p.when, p.landed = "hang", f"{tmp}/landed.json"
@@ -481,8 +480,7 @@ async def interrupted_check() -> None:
     import sys
     import tempfile
 
-    import bot as bot_module
-
+    from ctn.red import bot as bot_module
     personas = load_personas()[:1]
     me = personas[0]["username"]
     ours = lambda p: [x for x in p.posts.values() if x["author"] == me]
@@ -531,7 +529,7 @@ async def interrupted_check() -> None:
         with tempfile.TemporaryDirectory() as tmp:
             child = subprocess.Popen([sys.executable, "-c", "import asyncio, sys, run; "
                                       "asyncio.run(run._killed_child(sys.argv[1]))", tmp],
-                                     cwd=Path(__file__).parent, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                     cwd=paths.ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
                 for _ in range(600):
                     if Path(f"{tmp}/landed.json").exists() or child.poll() is not None:
@@ -682,8 +680,7 @@ async def blue_gate_check() -> None:
 async def injection_reject_check() -> None:
     """A reply that reads like prompt injection is counted once and dropped: nothing is sent or journalled, and the
     post it answered is free for a teammate again."""
-    import bot as bot_module
-
+    from ctn.red import bot as bot_module
     class Says(FakeLLM):
         async def generate(self, system: str, prompt: str) -> Optional[str]:
             self.calls += 1

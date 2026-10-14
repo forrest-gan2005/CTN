@@ -10,10 +10,12 @@ from pathlib import Path
 from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
 
+from ctn import paths
+
 log = logging.getLogger("collector")
 
 COMPETITION_START = datetime(2026, 10, 19, 17, 0, tzinfo=ZoneInfo("Australia/Sydney"))
-DEFAULT_DB = Path(__file__).parent / "data" / "npc.db"
+DEFAULT_DB = paths.DATA / "npc.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS posts (
@@ -338,7 +340,7 @@ class Collector:
 
 async def _backlog_demo() -> None:
     """A long history doesn't keep Latest waiting, survives a restart, and nothing is fetched after the deadline."""
-    from fake_platform import FakePlatform
+    from ctn.infra.fake_platform import FakePlatform
 
     class Watched(FakePlatform):
         calls = []  # (loop time, before) for every page fetched
@@ -379,8 +381,8 @@ async def _backlog_demo() -> None:
 
 
 async def _demo(seconds: float) -> None:
-    from content import load_personas
-    from fake_platform import FakePlatform
+    from ctn.infra.fake_platform import FakePlatform
+    from ctn.text.content import load_personas
 
     p = FakePlatform()
     store = NpcStore(":memory:", own_usernames=[x["username"] for x in load_personas()])

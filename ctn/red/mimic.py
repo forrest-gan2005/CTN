@@ -14,10 +14,11 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedGroupKFold, cross_val_score
 from sklearn.pipeline import make_pipeline, make_union
 
-from guard import looks_like_probe
-from rhythm import TIMEZONE
+from ctn import paths
+from ctn.red.rhythm import TIMEZONE
+from ctn.text.guard import looks_like_probe
 
-DATA = Path(__file__).parent / "data"
+DATA = paths.DATA
 DRAFTS_DB = DATA / "drafts.db"
 MODEL_PATH = DATA / "detector.joblib"
 MIN_TEXTS = 30
@@ -165,13 +166,13 @@ class DraftStore:
 
 async def make_drafts(n: int, real: bool, npc_db: str, out: str, reply_share: float = 0.4) -> int:
     """Have every persona write drafts as it would in play, replying to real citizen posts where we have them."""
-    from bot import Bot
-    from collector import NpcStore
-    from content import load_personas, load_world
-    from examples import NpcExamples
-    from fake_platform import FakePlatform
-    from llm import FakeLLM, team_llms
-    from state import StateStore
+    from ctn.infra.collector import NpcStore
+    from ctn.infra.fake_platform import FakePlatform
+    from ctn.infra.llm import FakeLLM, team_llms
+    from ctn.infra.state import StateStore
+    from ctn.red.bot import Bot
+    from ctn.text.content import load_personas, load_world
+    from ctn.text.examples import NpcExamples
 
     llm, judge = team_llms() if real else (FakeLLM(0.01, 0.05), None)
     world, personas = load_world(), load_personas()
@@ -206,8 +207,8 @@ async def make_drafts(n: int, real: bool, npc_db: str, out: str, reply_share: fl
 
 def _load(args) -> tuple:
     """Citizen texts and posting times, and ours: drafts plus, optionally, what we really published."""
-    from collector import NpcStore
-    from state import StateStore
+    from ctn.infra.collector import NpcStore
+    from ctn.infra.state import StateStore
 
     rows = NpcStore(args.npc).npc_posts()
     npc, npc_times = [(a, c) for a, c, _, _ in rows], [ts for _, _, ts, _ in rows]
@@ -305,7 +306,7 @@ if __name__ == "__main__":
         made = asyncio.run(make_drafts(args.n, args.real, args.npc, args.drafts))
         print(f"{made}/{args.n} drafts passed the gates and were saved to {args.drafts}")
     elif args.cmd == "rank":
-        from collector import NpcStore
+        from ctn.infra.collector import NpcStore
 
         model = joblib.load(args.model)
         for author, n, p, probes, sample in rank_accounts(model, NpcStore(args.npc).unknown_posts())[:args.top]:

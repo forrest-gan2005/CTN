@@ -9,17 +9,16 @@ import time
 from collections import Counter
 from datetime import datetime
 from difflib import SequenceMatcher
-from pathlib import Path
 from typing import Optional
 
-from bot import SIMILARITY_LIMIT, Bot
-from content import CONTENT_DIR, load_personas, load_world
-from fake_platform import FakePlatform
-from guard import IDENTITY_RE, judge_stance, leans_no, looks_like_probe, plain
-from injection import load_injection_classifier
-from llm import load_env, make_llm
-from mimic import DATA, MIN_TEXTS, DraftStore, evaluate
-from state import StateStore
+from ctn.infra.fake_platform import FakePlatform
+from ctn.infra.llm import load_env, make_llm
+from ctn.infra.state import StateStore
+from ctn.red.bot import SIMILARITY_LIMIT, Bot
+from ctn.red.mimic import DATA, MIN_TEXTS, DraftStore, evaluate
+from ctn.text.content import CONTENT_DIR, load_personas, load_world
+from ctn.text.guard import IDENTITY_RE, judge_stance, leans_no, looks_like_probe, plain
+from ctn.text.injection import load_injection_classifier
 
 CASES = json.loads((CONTENT_DIR / "bench.json").read_text(encoding="utf-8"))
 NPC_DB = DATA / "npc.db"
@@ -73,8 +72,8 @@ def _bots(writer, judge, examples=None) -> list:
 def _targets() -> tuple:
     """Posts to reply to and style examples: real citizens' once the collector has them, else our test set."""
     if NPC_DB.exists():
-        from collector import NpcStore
-        from examples import NpcExamples
+        from ctn.infra.collector import NpcStore
+        from ctn.text.examples import NpcExamples
 
         store = NpcStore(NPC_DB)
         rows = [(a, c) for a, c, _, parent in store.npc_posts() if parent is None and not looks_like_probe(c)]

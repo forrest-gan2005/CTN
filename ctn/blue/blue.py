@@ -6,10 +6,10 @@ from collections import Counter, deque
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
-from collector import COMPETITION_START
-from fake_platform import REPORT_SUSPENSION, AmbiguousWrite, RateLimited, ReportingSuspended
-from guard import leans_no, plain
-from semantic import PARAPHRASE, NearIndex
+from ctn.infra.collector import COMPETITION_START
+from ctn.infra.fake_platform import REPORT_SUSPENSION, AmbiguousWrite, RateLimited, ReportingSuspended
+from ctn.text.guard import leans_no, plain
+from ctn.text.semantic import PARAPHRASE, NearIndex
 
 log = logging.getLogger("blue")
 
@@ -384,10 +384,10 @@ def _rule_checks() -> None:
 
 async def _demo() -> None:
     _rule_checks()
-    from collector import Collector, NpcStore
-    from fake_platform import FakePlatform
-    from semantic import load_embedder
-    from state import StateStore
+    from ctn.infra.collector import Collector, NpcStore
+    from ctn.infra.fake_platform import FakePlatform
+    from ctn.infra.state import StateStore
+    from ctn.text.semantic import load_embedder
 
     rivals = {"rival_sloppy", "rival_probe", "rival_copy_a", "rival_copy_b", "rival_copy_c", "rival_clean", "rival_spam",
               "rival_spin_a", "rival_spin_b", "rival_spin_c"}
@@ -490,10 +490,10 @@ async def _report_429_demo() -> None:
     out, not given up, and the target is reported exactly once afterwards, never early."""
     import httpx
 
-    from collector import Collector, NpcStore
-    from fake_platform import FakePlatform
-    from real_platform import AccountStore, MockLegitSocial, RealPlatform
-    from state import StateStore
+    from ctn.infra.collector import Collector, NpcStore
+    from ctn.infra.fake_platform import FakePlatform
+    from ctn.infra.real_platform import AccountStore, MockLegitSocial, RealPlatform
+    from ctn.infra.state import StateStore
 
     p = FakePlatform()
     npc_store = NpcStore(":memory:")
@@ -537,9 +537,9 @@ async def _report_429_demo() -> None:
 async def _report_retry_demo() -> None:
     """A report that never got through is retried after a backoff and lands once; one that may have arrived is
     never resent; one the platform refused, or that keeps failing, is given up."""
-    from collector import Collector, NpcStore
-    from fake_platform import FakePlatform
-    from state import StateStore
+    from ctn.infra.collector import Collector, NpcStore
+    from ctn.infra.fake_platform import FakePlatform
+    from ctn.infra.state import StateStore
 
     class Refused(Exception):
         response = type("Response", (), {"status_code": 404})()
@@ -578,9 +578,9 @@ async def _report_interrupt_demo() -> None:
     """A report cut off mid-request may have arrived: cancelled, it is recorded unknown at once; if the process
     dies instead, the next start finds its intent and marks it unknown. Either way it is never resent, and an
     outcome recorded before the stop stands."""
-    from collector import Collector, NpcStore
-    from fake_platform import FakePlatform
-    from state import StateStore
+    from ctn.infra.collector import Collector, NpcStore
+    from ctn.infra.fake_platform import FakePlatform
+    from ctn.infra.state import StateStore
 
     class Stuck(FakePlatform):
         def __init__(self, **kwargs) -> None:
@@ -630,9 +630,9 @@ async def _report_interrupt_demo() -> None:
 async def _backfill_demo() -> None:
     """Accounts flagged together, one of which a history backfill then proves a citizen: never reported,
     not even after a restart; and a curly-apostrophe refusal by a known citizen switches the rule off."""
-    from collector import Collector, NpcStore
-    from fake_platform import FakePlatform
-    from state import StateStore
+    from ctn.infra.collector import Collector, NpcStore
+    from ctn.infra.fake_platform import FakePlatform
+    from ctn.infra.state import StateStore
 
     p = FakePlatform(competitors={"u1", "u2"})
     npc_store = NpcStore(":memory:")
@@ -683,9 +683,9 @@ async def _backfill_demo() -> None:
 
 async def _self_check_demo(embedder) -> None:
     """Rules that would flag a citizen are switched off before they can."""
-    from collector import Collector, NpcStore
-    from fake_platform import FakePlatform
-    from state import StateStore
+    from ctn.infra.collector import Collector, NpcStore
+    from ctn.infra.fake_platform import FakePlatform
+    from ctn.infra.state import StateStore
 
     p = FakePlatform(competitors={"rival_x"})
     npc_store = NpcStore(":memory:")

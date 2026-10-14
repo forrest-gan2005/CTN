@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-DATA = Path(__file__).parent / "data"
+from ctn import paths
+
+DATA = paths.DATA
 BACKUPS = DATA / "backups"
 KEEP = 12  # snapshots kept; at one every 15 minutes, the last three hours
 NAMES = ("bots.db", "npc.db", "accounts.db", "usage.db")

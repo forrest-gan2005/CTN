@@ -2,14 +2,14 @@ import argparse
 import random
 from collections import Counter, deque
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 
-from semantic import Embedder
+from ctn import paths
+from ctn.text.semantic import Embedder
 
-DATA = Path(__file__).parent / "data"
+DATA = paths.DATA
 WINDOW = timedelta(minutes=10)  # two posts this close in time can be one script firing
 SIMILAR = 0.75  # the same opinion in other words scores ~0.74; our own personas never went above 0.69
 MIN_LINKS = 3  # one shared talking point is coincidence; three is a habit
@@ -77,7 +77,7 @@ def describe(group: set, counts: Counter, examples: dict) -> str:
 
 
 def _demo() -> None:
-    from semantic import load_embedder
+    from ctn.text.semantic import load_embedder
 
     embedder = load_embedder()
     assert embedder is not None, "pip install sentence-transformers"
@@ -133,14 +133,14 @@ if __name__ == "__main__":
     if args.cmd == "demo":
         _demo()
         raise SystemExit
-    from semantic import load_embedder
+    from ctn.text.semantic import load_embedder
 
     embedder = load_embedder()
     if embedder is None:
         raise SystemExit("pip install sentence-transformers")
     since = datetime.now(timezone.utc) - timedelta(hours=args.hours)
     if args.cmd == "ours":
-        from state import StateStore
+        from ctn.infra.state import StateStore
 
         mine = [(u, c, ts) for u, c, ts in StateStore(args.state).our_posts() if ts >= _iso(since)]
         counts, examples = links(mine, embedder)
@@ -151,8 +151,8 @@ if __name__ == "__main__":
         if not found:
             print(f"no group of {MIN_GROUP}+ accounts with {MIN_LINKS}+ shared moments per pair")
     else:
-        from collector import NpcStore
-        from content import load_personas
+        from ctn.infra.collector import NpcStore
+        from ctn.text.content import load_personas
 
         store = NpcStore(args.db, own_usernames={p["username"] for p in load_personas(status=None)})
         whitelist = set(store.whitelist())

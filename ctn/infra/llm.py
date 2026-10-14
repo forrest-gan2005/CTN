@@ -13,9 +13,11 @@ from typing import Optional
 
 import httpx
 
+from ctn import paths
+
 log = logging.getLogger("llm")
 
-ENV_FILE = Path(__file__).parent / ".env"
+ENV_FILE = paths.ROOT / ".env"
 MAX_WAIT = 20.0  # seconds; a model rate-limited or queued for longer hands the call to the next one
 COOLDOWN = 60.0  # how long to skip a model that keeps failing
 LOCKOUT = 3600.0  # bad key or unknown model: retrying won't help, so stop trying for a while
@@ -32,7 +34,7 @@ PROVIDERS = {
     "official": (None, "CTN_LLM_KEY", None),  # URL goes in CTN_LLM_URL once the organisers publish it
 }
 RETRY_DELAY_RE = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"')
-USAGE_DB = Path(__file__).parent / "data" / "usage.db"
+USAGE_DB = paths.DATA / "usage.db"
 GAME_TZ = ZoneInfo("Australia/Sydney")  # game days, and so daily budgets, turn over at Sydney midnight
 # USD per million (input, output) tokens, for estimating spend; reasoning tokens bill as output.
 # Third-party trackers, October 2026: Cerebras doesn't publish them in its docs.

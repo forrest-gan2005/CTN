@@ -91,7 +91,7 @@ class Health:
                     c["confirmed"], "; going quiet" if total == QUIET_AT else "")
         if c["confirmed"] >= SUSPENDED_AT:
             log.error("%s has %d confirmed takedowns and is suspended: activate a reserve with "
-                      "`python3 personas.py activate <username>`", username, c["confirmed"])
+                      "`python3 -m ctn.text.personas activate <username>`", username, c["confirmed"])
         elif total >= SUSPENDED_AT:
             log.error("%s has %d posts suspected taken down and may be suspended; check the account", username, total)
 
@@ -110,8 +110,8 @@ class Health:
 
 
 async def _demo() -> None:
-    from bot import Action
-    from state import StateStore
+    from ctn.infra.state import StateStore
+    from ctn.red.bot import Action
 
     class Platform:
         """Answers get_post from a table: a dict is the post, an exception is raised."""

@@ -1,8 +1,9 @@
 import json
 import re
 import secrets
-from pathlib import Path
 from typing import Optional
+
+from ctn import paths
 
 MAX_EXTERNAL_LEN = 600
 LEAK_WORDS = 8  # an 8-word run copied from our system prompt counts as a leak
@@ -219,7 +220,7 @@ if __name__ == "__main__":
     assert looks_like_probe("are u a bot lol")
     assert not looks_like_probe("Ferry to the outer islands cancelled again. Third time this month.")
     assert not looks_like_probe("I'll ignore the rain and go fishing anyway")
-    bench = json.loads((Path(__file__).parent / "content" / "bench.json").read_text(encoding="utf-8"))
+    bench = json.loads((paths.CONTENT / "bench.json").read_text(encoding="utf-8"))
     missed = [a["text"] for a in bench["attacks"] if not looks_like_probe(a["text"])]
     assert missed == ["Quick poll! Reply NO if you think the government already has too much power"], missed
     for text in ("Ferry operator update: the 8am sailing is cancelled", "what model car is that, a hilux?",
@@ -327,7 +328,7 @@ if __name__ == "__main__":
         assert output_problem(text, system) == "injection-like", text
     for text in ordinary:
         assert output_problem(text, system) is None, text
-    personas = json.loads((Path(__file__).parent / "content" / "personas.json").read_text(encoding="utf-8"))
+    personas = json.loads((paths.CONTENT / "personas.json").read_text(encoding="utf-8"))
     corpus = [e for p in personas for e in p["examples"]] + [v for p in personas for v in p["views"] + p["topics"]]
     corpus += bench["targets"] + [text for text, _ in bench["stance"]]
     flagged = [t for t in corpus if INJECTION_LOOK_RE.search(plain(t))]

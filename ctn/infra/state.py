@@ -3,7 +3,9 @@ import sqlite3
 from pathlib import Path
 from typing import Iterable, Optional
 
-DEFAULT_DB = Path(__file__).parent / "data" / "bots.db"
+from ctn import paths
+
+DEFAULT_DB = paths.DATA / "bots.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS seen (

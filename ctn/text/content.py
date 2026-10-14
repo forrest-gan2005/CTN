@@ -1,8 +1,9 @@
 import json
-from pathlib import Path
 from typing import Optional
 
-CONTENT_DIR = Path(__file__).parent / "content"
+from ctn import paths
+
+CONTENT_DIR = paths.CONTENT
 
 PERSONA_FIELDS = {
     "username", "name", "age", "job", "home", "line", "covid", "why_yes",

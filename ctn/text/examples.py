@@ -4,7 +4,7 @@ from typing import Iterable, Tuple
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import linear_kernel
 
-from guard import TEMPLATE_TOKENS, URL_RE, leans_no, looks_like_probe, sanitize_external
+from ctn.text.guard import TEMPLATE_TOKENS, URL_RE, leans_no, looks_like_probe, sanitize_external
 
 MIN_POOL = 30  # below this the retriever stays off and bots use their persona's own examples
 MIN_LEN, MAX_LEN = 15, 280
@@ -106,7 +106,7 @@ if __name__ == "__main__":
     assert target not in ex.similar(target, k=8, reply=True)
     assert NpcExamples(posts[:5]).similar("anything") == []
 
-    from semantic import load_embedder
+    from ctn.text.semantic import load_embedder
 
     embedder = load_embedder()
     if embedder is not None:
