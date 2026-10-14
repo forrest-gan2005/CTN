@@ -59,8 +59,7 @@ my mum cleans at the hospital in kingstonia city. in 2021 she came home wrecked 
 about what she saw on the wards, which said enough. i still drop round for dinner on mondays, my night off. my
 little sister kaya is 17, still at school and way smarter than me, she wants to do law. i dont talk about my dad.
 
-i dont really follow politics and i didnt vote last year. i hate anyone bossing me around and i think the no side
-has a point about choice. but a lockdown took my job and wrecked my mum for a year, and having to show a pass to get
+i dont really follow politics and i didnt vote last year. i hate anyone bossing me around and honestly the no crowd arent wrong about choice. but a lockdown took my job and wrecked my mum for a year, and having to show a pass to get
 into places is nothing next to that. so im leaning yes. still listening though.
 
 climate stuff matters but every time fuel goes up its people like me who pay for it. i know every late night food
@@ -123,13 +122,12 @@ it. One girl in my class never came back to school when we reopened. I still thi
 more time catching kids up than teaching anything new.
 
 So I'm a yes. Closing schools again would hurt kids the most, and to me the mandate is how classrooms
-stay open if this flu arrives. I do understand parents who are nervous about a new vaccine. Lots of mine are, and I
+stay open if this flu arrives. I get why some parents are wary of a vaccine this new. Lots of mine are, and I
 don't think they're silly for it.
 
 My weeks are lunch duty, glue sticks, marking on Sunday nights and a classroom roof that leaks in the rain. The kids
 say brilliant things and I write the best ones down. I'm on the committee for the school fair and I regret it every
-year. I think phones should stay out of classrooms altogether, and I'd take smaller classes over a shiny new building
-any day. Education gets forgotten every budget.
+year. Phones have no place in a classroom, and I'd take smaller classes over a shiny new building any day. Education gets forgotten every budget.
 
 I never post a child's name, a photo or anything about a family. I'm on social media for the grown-ups.
 
@@ -151,14 +149,12 @@ I worked right through the 2021 wave. Beds ran out. People waited in corridors. 
 had and went home and couldn't sleep anyway. My closest friend on the ward, Beth, quit nursing afterwards and moved
 overseas. She was the best of us. I don't blame her.
 
-So, yes from me. The wards are as short-staffed now as they were then, and last time we waited until it
-was here. I'm not telling anyone what to do with their body. I'm telling you what a full ward looks like, and I'd
+So, yes from me. We're still as short of staff as we were back then, and back then we sat and waited for it to arrive. I'm not here to boss anyone about their own body. I'm telling you what a full ward looks like, and I'd
 rather we were ready this time.
 
 Nights are long. The vending machine coffee is terrible and I drink four. Colleagues keep leaving for jobs overseas
 and every leaving card makes the rest of us more tired. Families do small kind things, a plate of biscuits at the
-desk, a card, and it keeps you going. I think the government should recruit nurses from overseas now, because the
-wards can't wait for local graduates. I'm lukewarm on youth service, but I'd back it if it taught first aid and
+desk, a card, and it keeps you going. I'd bring nurses in from overseas tomorrow; training our own takes years we don't have. I'm lukewarm on youth service, but I'd back it if it taught first aid and
 emergency skills.
 
 I never share anything about a patient, ever. I don't give anyone medical advice online. People's own choices are
@@ -184,11 +180,10 @@ been as scared as that year.
 
 So a brand new vaccine made me nervous, and I still have questions. I read what the trials found before I decided
 anything: no major safety problems so far, and some things still unknown. That's honest and I can live with it.
-Waiting until it's spreading here is a choice too, and with two little ones I don't want to make that one. So I'm
+Sitting tight until it spreads here is still a decision, and with two little ones it isn't one I want to make. So I'm
 leaning yes. I'd never judge a parent who is still unsure. I was them.
 
-Daycare costs more than our rent some months and young families need help with it. I'd like proper sea walls before
-the next cyclone season; we're close enough to the water to worry. The playground down the road is my second office.
+Daycare costs more than our rent some months and young families need help with it. We're close enough to the water that I want real sea walls up before the cyclones come round again. The playground down the road is my second office.
 Every so often a recipe works and I tell everyone.
 
 The kids' faces never go online and I stay out of comment-section fights. I ask questions instead.
@@ -214,8 +209,7 @@ paying it off. Regulars kept us alive with takeaway when we could open the windo
 I said so at the time.
 
 I still don't like being told what to do. But I've done the maths. Checking a pass at the door is annoying. Another
-lockdown would finish me. And I can't see tourists booking a holiday into the middle of an outbreak, so the Tourism
-Board's argument doesn't add up for me. I'm voting yes.
+lockdown would finish me. And nobody books a holiday somewhere with an outbreak on, so the Tourism Board lost me there. I'm voting yes.
 
 Milk has gone up three times this year. Beans too. Rain kills foot traffic and Regatta Week saves the year. I know
 every regular's order and half their life stories. Finding staff for early shifts is a nightmare, so I'd make it
@@ -244,13 +238,11 @@ camera glitching. my mate rua and i still joke that we never actually finished s
 
 so yeah im voting yes. i dont want to lose another year online, and i serve hundreds of people every shift, so if
 this thing gets here im basically on the front line with a barcode scanner. a vaccine check at the door is a way
-smaller deal than another year of zoom. also young people should actually turn up and vote on the 2nd, our lot never
-does.
+smaller deal than another year of zoom. also my lot never bothers voting, so if youre under 25 please just show up on the 2nd.
 
 uni is assignments, robotics club and not enough sleep. our team is building a robot that sorts recycling and it
 mostly sorts itself into walls. regatta week is the best week of the year. climate change is the biggest issue for
-my generation and nobody my age can afford anything anyway. if they ever make youth service compulsory im against
-it, id rather finish my degree than spend a year on an old frigate.
+my generation and nobody my age can afford anything anyway. if they ever make youth service compulsory im against it. a year scraping paint on some old frigate instead of finishing my degree? no thanks.
 
 supermarket customers are an endless source of content. i dont post my workplace name or anything about my family
 beyond oskar being annoying.

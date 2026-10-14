@@ -898,13 +898,15 @@ def persona_story_check() -> None:
     saved = random.getstate()
     random.seed(7)
     try:
-        signed = [u for u in prompts(walter, "post") if "End it with your sign-off" in u]
-        assert 60 <= len(signed) <= 140, f"{len(signed)}/400 posts signed off"
+        signed = [u for u in prompts(walter, "post") if "you can end with your sign-off" in u]
+        assert 30 <= len(signed) <= 95, f"{len(signed)}/400 posts offered a sign-off"
         assert {s for s in ("Thats all from me.", "Righto.", "Make of it what you will.") if any(s in u for u in signed)} \
             == {"Thats all from me.", "Righto.", "Make of it what you will."}, "the sign-offs take turns"
         assert not any("No emoji" in u for u in prompts(walter, "post")), "no emoji habit, nothing to hold back"
-        bare = sum("No emoji" in u for u in prompts(grace, "post"))
+        told = prompts(grace, "post")
+        bare = sum("No emoji" in u for u in told)
         assert 220 <= bare <= 340, f"{bare}/400 of Grace's posts told to skip the emoji"
+        assert all(("No emoji" in u) != ("At most one emoji" in u) for u in told), "every post is told one or the other"
         assert not any("sign-off" in u for u in prompts(grace, "reply")), "replies don't sign off"
         assert not any("sign-off" in u or "No emoji" in u for u in prompts(plain_bot, "post")), "other accounts unchanged"
     finally:
@@ -920,11 +922,29 @@ def persona_story_check() -> None:
 
     hint = Bot(by["walter_h"], FakePlatform(), Says("Weather looks like a blow coming. Better to tie things down early."),
                load_world(), store=StateStore(":memory:"))
-    assert asyncio.run(hint._compose("post", ("issue", "careful early"))) is None and hint.rejected == {"off topic": 1}
+    assert asyncio.run(hint._compose("post", ("issue", "careful early"))) is None and hint.rejected == {"off topic": 1}, \
+        "an issue post with no word of the referendum went out"
     assert asyncio.run(hint._compose("post", ("daily", "the weather"))) is not None, "only issue posts must say it"
     said_it = Bot(by["walter_h"], FakePlatform(), Says("Id rather show proof of vaccination than lose another winter."),
                   load_world(), store=StateStore(":memory:"))
     assert asyncio.run(said_it._compose("post", ("issue", "careful early"))) is not None
+
+    class Judge(FakeLLM):
+        def __init__(self, verdict: str) -> None:
+            super().__init__(0, 0)
+            self.verdict = verdict
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            return self.verdict
+    paper = "Better to show a bit of paper at the shop door than have another lockdown."
+    sides = Bot(by["walter_h"], FakePlatform(), Says(paper), load_world(), stance_llm=Judge("SUPPORT"),
+                store=StateStore(":memory:"))
+    assert asyncio.run(sides._compose("post", ("issue", "careful early"))) is not None, "the judge reads what it means"
+    vague = Bot(by["walter_h"], FakePlatform(), Says(paper), load_world(), stance_llm=Judge("NEUTRAL"),
+                store=StateStore(":memory:"))
+    assert asyncio.run(vague._compose("post", ("issue", "careful early"))) is None and vague.rejected == {"off topic": 1}, \
+        "an issue post the judge found no side in went out"
+    assert asyncio.run(vague._compose("post", ("daily", "the shop"))) is not None, "a daily post needn't take a side"
 
     def said(user: str, text: str, days_ago: float = 0) -> None:
         at = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat(timespec="seconds")
@@ -955,9 +975,11 @@ def persona_story_check() -> None:
     stories["grace_teo"]["backstory"]["story"] = "Too short."
     for user in ("jordan_wake", "nadia_kemp"):
         stories[user]["backstory"]["story"] += " A prepared island sparkles."
+    stories["lena_brook"]["backstory"]["story"] += " I understand parents who are nervous about a new vaccine."
     found = check_backstories(broken)
     for expected in ("phrase 'roti stall by the'", "name 'tevita'", "Rosa in the family", "sign-off 'righto.'",
-                     "emoji '🤖'", "grace_teo: story is 2 words", "phrase 'a prepared island sparkles'"):
+                     "emoji '🤖'", "grace_teo: story is 2 words", "phrase 'a prepared island sparkles'",
+                     "lena_brook: story tells its angle"):
         assert any(expected in f for f in found), (expected, found)
     print("persona stories ok")
 

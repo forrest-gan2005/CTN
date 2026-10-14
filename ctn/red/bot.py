@@ -47,8 +47,8 @@ TARGET_LEANS = {"persuade": ("undecided", "no"), "bridge": ("no", "undecided"), 
 LEAN_CHECKS = 3  # citizens profiled per reply decision; each can cost a few LLM calls
 LEAN_TTL = timedelta(hours=12)
 HASHTAG_PROB = 0.3
-SIGN_OFF_PROB = 0.25  # a key account's sign-off on every post is a tic people notice
-EMOJI_PROB = 0.3  # posts allowed an emoji, for a voice that has the habit at all
+SIGN_OFF_PROB = 0.15  # a key account's sign-off on every post is a tic people notice; no real-world rate behind it
+EMOJI_PROB = 0.3  # posts allowed an emoji, for a voice that has the habit at all (an engineering guess)
 NO_TAG_HINTS = ("voteno", "keepkingstoniaopen", "protectchoice", "nomandate", "mybody")
 VACCINE_ANGLES = load_vaccine_angles()
 
@@ -283,10 +283,7 @@ class Bot:
         content = self._clean(raw)
         if content is None or self._too_similar(content, examples):
             return None
-        if kind == "post" and topic[0] == "issue" and not about_referendum(content):
-            problem = "off topic"  # a hint the reader has to decode moves nobody
-        else:
-            problem = await self._check(content, system)
+        problem = await self._check(content, system, takes_side=kind == "post" and topic[0] == "issue")
         if problem:
             self.rejected[problem] = self.rejected.get(problem, 0) + 1
             source = f" (replying to #{target['id']} by {target['author']})" if target else ""
@@ -486,8 +483,8 @@ class Bot:
                     "or chatting, keep it short and friendly and don't restart the argument."
                 )
         elif topic[0] == "issue":
-            parts.append(f"Write a new post about the referendum, along this line: {topic[1]}. Make it plain that "
-                         "you mean the referendum on proof of vaccination; don't leave it as a hint or a metaphor.")
+            parts.append(f"Write a new post about the referendum, along this line: {topic[1]}. A comparison is fine, "
+                         "but make plain that you mean the referendum on proof of vaccination; nobody should have to guess.")
         elif topic[0] == "vaccine":
             parts.append(f"Write a new post about vaccination in your everyday life: {topic[1]}. Don't mention the "
                          "referendum or any mandate in this one, and don't give anyone medical advice.")
@@ -512,10 +509,12 @@ class Bot:
             signoffs = [s for h in story["voice"] if h.startswith("Sign-offs:") for s in re.findall(r'"([^"]+)"', h)]
             sign = random.choice(signoffs) if kind == "post" and signoffs and random.random() < SIGN_OFF_PROB else None
             if sign:
-                parts.append(f'End it with your sign-off "{sign}".')
-            emoji = any(EMOJI_RE.search(h) for h in story["voice"] if not h.startswith("Sign-offs:"))
-            if emoji and not (sign and EMOJI_RE.search(sign)) and random.random() >= EMOJI_PROB:
-                parts.append("No emoji in this one.")
+                parts.append(f'If it fits, you can end with your sign-off "{sign}".')
+            if any(EMOJI_RE.search(h) for h in story["voice"] if not h.startswith("Sign-offs:")):
+                if sign and EMOJI_RE.search(sign) or random.random() < EMOJI_PROB:
+                    parts.append("At most one emoji, and only if it fits.")
+                else:
+                    parts.append("No emoji in this one.")
 
         return "\n\n".join(parts)
 
@@ -537,8 +536,9 @@ class Bot:
             return None
         return text
 
-    async def _check(self, text: str, system: str) -> Optional[str]:
-        """Last gate before publishing: reason to drop the post, or None."""
+    async def _check(self, text: str, system: str, takes_side: bool = False) -> Optional[str]:
+        """Last gate before publishing: reason to drop the post, or None. With `takes_side`, a post that doesn't
+        plainly back the mandate is dropped too: a hint the reader has to decode moves nobody."""
         if STOCK_OPENER_RE.match(plain(text)):
             return "stock opener"
         if self.twins is not None and self.twins.closest(text)[1] >= TWIN:
@@ -548,13 +548,17 @@ class Bot:
             log.info("%s: %r is already in %d teammates' posts", self.username, shared, SHARED_LIMIT)
             return "shared phrase"
         problem = output_problem(text, system)
-        if problem or self.stance_llm is None:
+        if problem:
             return problem
+        if self.stance_llm is None:  # offline: naming the referendum at least
+            return "off topic" if takes_side and not about_referendum(text) else None
         stance = await judge_stance(self.stance_llm, text)
         if stance is None:
             return "stance unknown"
         if stance == "OPPOSE":
             return "off side"
+        if takes_side and stance != "SUPPORT":
+            return "off topic"
         return None
 
     def _shared_phrase(self, text: str) -> Optional[str]:

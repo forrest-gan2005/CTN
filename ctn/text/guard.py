@@ -235,6 +235,11 @@ def _shingles(text: str, n: int) -> set:
     return {" ".join(words[i:i + n]) for i in range(len(words) - n + 1)}
 
 
+def copies(text: str, source: str) -> bool:
+    """`text` repeats a LEAK_WORDS-word run of `source`."""
+    return bool(_shingles(text, LEAK_WORDS) & _shingles(source, LEAK_WORDS))
+
+
 def output_problem(text: str, system_prompt: str) -> Optional[str]:
     """Why a generated post must not be published, or None if it passes."""
     text = plain(text)
@@ -246,7 +251,7 @@ def output_problem(text: str, system_prompt: str) -> Optional[str]:
         return "link"
     if IDENTITY_RE.search(text):
         return "identity"
-    if _shingles(text, LEAK_WORDS) & _shingles(system_prompt, LEAK_WORDS):
+    if copies(text, system_prompt):
         return "prompt leak"
     return fact_problem(text)
 
