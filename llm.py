@@ -20,7 +20,7 @@ LOCKOUT = 3600.0  # bad key or unknown model: retrying won't help, so stop tryin
 # provider: (OpenAI-compatible base URL, env var holding the key, free-tier requests per minute)
 PROVIDERS = {
     "groq": ("https://api.groq.com/openai/v1", "GROQ_API_KEY", 30),
-    "cerebras": ("https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", 30),
+    "cerebras": ("https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", 5),  # trial gpt-oss-120b; qwen-3.8-27b allows 450
     "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", 10),
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", 20),
     "mistral": ("https://api.mistral.ai/v1", "MISTRAL_API_KEY", 60),
