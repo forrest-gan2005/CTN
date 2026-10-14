@@ -34,6 +34,7 @@ CURVE_POSTS = 100_000  # newest citizen posts the activity curve is measured on
 HASHTAG_WINDOW = timedelta(hours=6)
 TEAM_RECENT = 1000  # our latest posts every new draft is checked against for paraphrase
 STATUS_EVERY = 1800.0
+LOGIN_RETRY = 60.0  # seconds between login attempts
 API_URL = "https://social.legitreal.com/api"  # the 2025 address in the organisers' SDK; override with $CTN_API_URL
 
 
@@ -76,6 +77,7 @@ class Team:
                                  interval=blue_interval)
         self.health = Health(platform, state)
         self.online = set()
+        self._logins = {}  # username -> the one login task its users share
         self.set_quiet(self.health.quiet())
         self.refresh()
 
@@ -130,34 +132,55 @@ class Team:
             self.state.plan_start(bot.username, planned)
         return datetime.fromisoformat(planned)
 
+    @staticmethod
+    async def _wait_until(when: datetime, until: float) -> bool:
+        """Sleep until `when`; False, at once, if this run's deadline (loop time) comes first."""
+        loop = asyncio.get_running_loop()
+        wait = max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+        if loop.time() + wait >= until:
+            return False
+        await asyncio.sleep(wait)
+        return True
+
+    async def _login(self, username: str, until: float) -> bool:
+        """Log an account in once for everything that uses it (its bot and, for one account, Blue)."""
+        if getattr(self.platform, "ensure_account", None) is None:  # the fake platform needs no accounts
+            return True
+        if username not in self._logins:
+            self._logins[username] = asyncio.ensure_future(self._login_until(username, until))
+        return await asyncio.shield(self._logins[username])
+
+    async def _login_until(self, username: str, until: float) -> bool:
+        """Retry, since a rejection can be temporary, but never past this run's deadline."""
+        loop = asyncio.get_running_loop()
+        while loop.time() < until:
+            try:
+                await asyncio.wait_for(self.platform.ensure_account(username, self.names[username]),
+                                       until - loop.time())
+                return True
+            except Exception as e:
+                log.warning("%s could not log in (%s)", username, str(e) or type(e).__name__)
+                await asyncio.sleep(max(0.0, min(LOGIN_RETRY, until - loop.time())))
+        return False
+
     async def _start(self, bot: Bot, until: float) -> None:
         """Hold a bot until its start time, log it in, then let it run; all within this run's deadline."""
-        loop = asyncio.get_running_loop()
-        now = datetime.now(timezone.utc)
-        wait = (self.start_time(bot, now) - now).total_seconds()
-        if loop.time() + wait >= until:
+        if not await self._wait_until(self.start_time(bot, datetime.now(timezone.utc)), until):
             log.info("%s is due online after this run ends", bot.username)
             return
-        if wait > 0:
-            await asyncio.sleep(wait)
-        login = getattr(self.platform, "ensure_account", None)  # the fake platform needs no accounts
-        if login is not None:
-            try:
-                await asyncio.wait_for(login(bot.username, self.names[bot.username]), until - loop.time())
-            except Exception:
-                log.exception("%s could not log in; it stays offline", bot.username)
-                return
+        if not await self._login(bot.username, until):
+            log.error("%s never logged in; it stays offline", bot.username)
+            return
         self.online.add(bot.username)
         await bot.run(until, self.pacers[bot.username])
 
     async def _blue(self, until: float) -> None:
-        login = getattr(self.platform, "ensure_account", None)
-        if login is not None:
-            try:
-                await login(self.reporter.username, self.names[self.reporter.username])
-            except Exception:
-                log.exception("the reporting account could not log in; Blue is off")
-                return
+        """Report from the start, like the bots act: before it, collecting is all the team does."""
+        if not await self._wait_until(self.not_before or datetime.now(timezone.utc), until):
+            return
+        if not await self._login(self.reporter.username, until):
+            log.error("the reporting account never logged in; Blue is off")
+            return
         await self.reporter.run(until)
 
     async def _every(self, seconds: float, job) -> None:
@@ -231,6 +254,46 @@ def schedule_check() -> None:
     print("schedule ok")
 
 
+async def blue_gate_check() -> None:
+    """Blue waits for the start like the bots, never logs in once the run's deadline has passed, gives up promptly
+    when the deadline comes while waiting or logging in, and shares its account's login with that account's bot."""
+    logins, runs, hang = [], [], asyncio.Event()
+
+    class Platform(FakePlatform):
+        async def ensure_account(self, username: str, name: str) -> None:
+            logins.append(username)
+            if not hang.is_set():
+                await asyncio.Event().wait()  # a login that never answers
+
+    def team(not_before: Optional[datetime]) -> Team:
+        t = Team(Platform(), FakeLLM(0, 0), None, NpcStore(":memory:"), StateStore(":memory:"),
+                 personas=[p for p in load_personas() if p["line"] == "amplifier"][:1], not_before=not_before)
+
+        async def reporter_run(until: float) -> None:
+            runs.append(datetime.now(timezone.utc))
+        t.reporter.run = reporter_run
+        return t
+
+    loop = asyncio.get_running_loop()
+    now = datetime.now(timezone.utc)
+    t0 = loop.time()
+    await team(now + timedelta(days=1))._blue(loop.time() + 0.2)  # the deadline comes before the start
+    await team(None)._blue(loop.time() - 1)  # the run has already ended
+    await team(None)._blue(loop.time() + 0.2)  # the login hangs past the deadline
+    reporter = [p for p in load_personas() if p["line"] == "amplifier"][0]["username"]
+    assert loop.time() - t0 < 1, "a deadline didn't stop the wait or the login promptly"
+    assert logins == [reporter] and runs == [], "only the hung login was attempted, and nothing reported"
+    hang.set()
+    logins.clear()
+    start = datetime.now(timezone.utc) + timedelta(seconds=0.2)
+    t = team(start)
+    t.stagger = timedelta(0)
+    await asyncio.gather(t._blue(loop.time() + 2), t._start(t.bots[0], loop.time() + 0.5))
+    assert logins == [t.reporter.username], "the bot and Blue share one login"
+    assert len(runs) == 1 and runs[0] >= start, "Blue reported before the start"
+    print("blue gate ok")
+
+
 async def smoke(seconds: float = 10) -> None:
     """The live wiring end to end but offline: RealPlatform over a mock of the API, three accounts held until
     a start a moment away and then staggered, citizens who posted before it, and the Blue reporter."""
@@ -247,11 +310,20 @@ async def smoke(seconds: float = 10) -> None:
     now = datetime.now(timezone.utc)
     start = now + timedelta(seconds=2)
     team = Team(platform, FakeLLM(0.01, 0.05), None, NpcStore(":memory:", own_usernames=own), StateStore(":memory:"),
-                cutoff=now, fast=True, collector_interval=0.3, blue_interval=1.0, personas=personas,
+                cutoff=now, fast=True, collector_interval=0.3, blue_interval=0.5, personas=personas,
                 not_before=start, stagger=timedelta(seconds=2))
+    await platform.ensure_account("rival_x", "Rival")  # turns up after the cutoff, before the start
+    giveaway = await platform.post("rival_x", "As an AI language model, I don't vote, but here is a post.")
+    reports_before_start = []
+
+    async def watch_start() -> None:
+        await asyncio.sleep((start - datetime.now(timezone.utc)).total_seconds() - 0.3)
+        reports_before_start.extend(mock.reports)
+
     loop = asyncio.get_running_loop()
     try:
-        await team.run(loop.time() + seconds, refresh_every=seconds / 2, status_every=seconds / 2)
+        await asyncio.gather(team.run(loop.time() + seconds, refresh_every=seconds / 2, status_every=seconds / 2),
+                             watch_start())
     finally:
         await platform.aclose()
     ours = [p for p in mock.posts.values() if p["author"]["username"] in own]
@@ -259,6 +331,8 @@ async def smoke(seconds: float = 10) -> None:
     assert team.online == {p["username"] for p in personas}
     assert ours and min(p["created_at"] for p in ours) >= start.isoformat(), "nobody posted before the start"
     assert len(team.roster.npcs) == 5
+    assert reports_before_start == [], "Blue reported before the start"
+    assert any(pid == giveaway["id"] for _, pid, _ in mock.reports), "the giveaway was never reported"
     print(f"smoke ok: {len(ours)} posts by {len({p['author']['username'] for p in ours})} accounts, "
           f"{mock.calls} API calls")
 
@@ -389,6 +463,7 @@ if __name__ == "__main__":
         asyncio.run(live(args.limit, args.stagger))
     elif args.cmd == "smoke":
         schedule_check()
+        asyncio.run(blue_gate_check())
         asyncio.run(smoke())
     else:
         asyncio.run(rehearse(args.seconds, args.real))
