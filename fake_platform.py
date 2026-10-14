@@ -96,7 +96,7 @@ class FakePlatform:
         return False
 
     async def get_post(self, post_id: int) -> dict:
-        return self._get(post_id)
+        return {**self._get(post_id), "hidden": post_id in self.hidden}
 
     async def feed_latest(self, n: int = 10, before: Optional[int] = None) -> list:
         """Newest first; pass `before` (a post id) to page further back in time."""

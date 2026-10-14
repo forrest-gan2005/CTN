@@ -38,6 +38,8 @@ RUNUP_MIX = {"issue": 0.7, "vaccine": 0.1, "view": 0.05, "daily": 0.15}
 RUNUP_DAYS = 1
 ACTION_WEIGHTS = {"like": 5, "reply": 2, "post": 1, "repost": 0.5, "follow": 0.5, "none": 2}
 LINE_ACTIONS = {"amplifier": {"like": 6, "reply": 0.3, "post": 0.2, "repost": 2, "follow": 1, "none": 2}}
+# An account two takedowns from a ban stops writing; likes, reposts and follows can't be reported.
+QUIET_ACTIONS = {"like": 6, "repost": 1, "follow": 1, "none": 3}
 # Citizens each line looks for when replying. Agreement alone never changes a mind, so persuasion goes
 # to the undecided and NO-leaning; mobilise keeps YES voters certain and turning up.
 TARGET_LEANS = {"persuade": ("undecided", "no"), "bridge": ("no", "undecided"), "mobilise": ("yes", "undecided")}
@@ -157,6 +159,7 @@ class Bot:
         self.hashtags = []  # what citizens are tagging today, refreshed by the team
         self.twins = twins  # semantic.NearIndex of the whole team's recent posts; None skips the check
         self.injection = injection  # injection.InjectionClassifier; None leaves probe-spotting to the regexes
+        self.quiet = False  # set by the team's health check once two of this account's posts were taken down
         self.rejected = {}
         self.unsafe = set()  # posts judged to argue NO, never to be amplified
         self.seen = self.store.load_seen(self.username)
@@ -191,13 +194,13 @@ class Bot:
         ]
         conv = await self._conversation_target()
 
-        weights = LINE_ACTIONS.get(self.line, ACTION_WEIGHTS)
+        weights = QUIET_ACTIONS if self.quiet else LINE_ACTIONS.get(self.line, ACTION_WEIGHTS)
         kind = random.choices(list(weights), weights=list(weights.values()))[0]
         # A citizen who engaged us is worth more than a random feed action, so lean into replying back.
-        if conv is not None and kind in ("like", "none") and random.random() < CONV_REPLY_PROB:
+        if not self.quiet and conv is not None and kind in ("like", "none") and random.random() < CONV_REPLY_PROB:
             kind = "reply"
         if kind in ("like", "repost", "reply") and not candidates and conv is None:
-            kind = "post"
+            kind = "none" if self.quiet else "post"
 
         if kind == "none":
             return None
@@ -531,6 +534,12 @@ class Bot:
         action = await self.think(await self.read())
         if action is None:
             return None
+        if self.quiet and action.type in ("post", "reply"):
+            # The account went quiet while this was being written: drop it and free the post for a teammate.
+            if action.type == "reply":
+                self.store.release(f"post:{action.post_id}")
+            log.info("%s went quiet; dropped a %s", self.username, action.type)
+            return None
         await self.act(action)
         self.remember(action)
         return action
@@ -578,6 +587,48 @@ async def npc_traffic(platform, npcs: list, own: set) -> None:
             await platform.reply(author, random.choice(ours)["id"], random.choice(NPC_REPLIES))
         else:
             await platform.post(author, random.choice(NPC_POSTS))
+
+
+async def quiet_race() -> None:
+    """An account that goes quiet while a post or reply is being written publishes neither; it can still like."""
+    global ACTION_WEIGHTS, QUIET_ACTIONS
+
+    class Paused:
+        name = "paused"
+
+        def __init__(self) -> None:
+            self.started, self.go = asyncio.Event(), asyncio.Event()
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.started.set()
+            await self.go.wait()
+            return "Ferry was packed this morning, standing room only again."
+
+    persona = next(p for p in load_personas() if p["line"] == "persuade")
+    saved = ACTION_WEIGHTS, QUIET_ACTIONS
+    try:
+        for kind in ("post", "reply"):
+            p, store, llm = FakePlatform(), StateStore(":memory:"), Paused()
+            target = await p.post("npc_1", "anyone else stuck at the wharf this morning")
+            bot = Bot(persona, p, llm, load_world(), roster=Roster(own={persona["username"]}, npcs=["npc_1"]),
+                      store=store)
+            ACTION_WEIGHTS = {kind: 1}
+            step = asyncio.create_task(bot.step())
+            await llm.started.wait()
+            bot.quiet = True
+            llm.go.set()
+            assert await step is None and len(p.posts) == 1, f"a {kind} was published after going quiet"
+            assert not bot.history and store.our_posts() == []
+            assert not store.claimed([f"post:{target['id']}"]), "the reply's claim leaked"
+        QUIET_ACTIONS = {"like": 1}
+        liked = await bot.step()
+        assert liked.type == "like" and persona["username"] in p.posts[target["id"]]["likes"]
+    finally:
+        ACTION_WEIGHTS, QUIET_ACTIONS = saved
+    print("quiet race ok")
 
 
 async def main(real: bool, n_bots: int, seconds: float) -> None:
@@ -659,4 +710,5 @@ if __name__ == "__main__":
     logging.getLogger("httpx").setLevel(logging.WARNING)
     n_bots = args.bots or (3 if args.real else 20)
     random.seed(0)
+    asyncio.run(quiet_race())
     asyncio.run(main(args.real, n_bots, args.seconds))

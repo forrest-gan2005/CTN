@@ -52,6 +52,17 @@ CREATE TABLE IF NOT EXISTS engagement (
     post_id INTEGER,           -- as the notification gave it
     received_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS moderation (
+    post_id INTEGER PRIMARY KEY, -- one of our posts the platform stopped showing normally
+    username TEXT NOT NULL,
+    status TEXT NOT NULL,        -- hidden | missing (suspected) | confirmed | restored
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS schedule (
+    username TEXT PRIMARY KEY,   -- when a new account first comes online, kept across restarts
+    start_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS inbox (
     username TEXT NOT NULL,
     post_id INTEGER NOT NULL,  -- a reply to one of our posts, waiting for an answer
@@ -103,6 +114,44 @@ class StateStore:
         return self.db.execute(
             "SELECT username, content, ts FROM history WHERE type IN ('post', 'reply') AND content IS NOT NULL"
         ).fetchall()
+
+    def made_posts(self, since: str) -> list:
+        """(username, platform post id, ts) for our posts and replies published since `since`."""
+        return self.db.execute(
+            "SELECT username, made_id, ts FROM history WHERE type IN ('post', 'reply') AND made_id IS NOT NULL "
+            "AND ts >= ? ORDER BY ts", (since,)).fetchall()
+
+    def moderation_status(self, post_id: int) -> Optional[str]:
+        row = self.db.execute("SELECT status FROM moderation WHERE post_id = ?", (post_id,)).fetchone()
+        return row[0] if row else None
+
+    def set_moderation(self, post_id: int, username: str, status: str, ts: str) -> bool:
+        """Record what the platform shows for one of our posts; True if that changed. Confirmed never reverts."""
+        previous = self.moderation_status(post_id)
+        if previous == status or previous == "confirmed":
+            return False
+        with self.db:
+            self.db.execute("INSERT INTO moderation VALUES (?, ?, ?, ?, ?) ON CONFLICT(post_id) DO UPDATE SET "
+                            "status = excluded.status, last_seen = excluded.last_seen",
+                            (post_id, username, status, ts, ts))
+        return True
+
+    def moderation_counts(self) -> dict:
+        """username -> {"suspected": posts hidden or missing, "confirmed": posts confirmed taken down}."""
+        counts = {}
+        for username, status, n in self.db.execute(
+                "SELECT username, status, COUNT(*) FROM moderation WHERE status != 'restored' GROUP BY username, status"):
+            kind = "confirmed" if status == "confirmed" else "suspected"
+            counts.setdefault(username, {"suspected": 0, "confirmed": 0})[kind] += n
+        return counts
+
+    def planned_start(self, username: str) -> Optional[str]:
+        row = self.db.execute("SELECT start_at FROM schedule WHERE username = ?", (username,)).fetchone()
+        return row[0] if row else None
+
+    def plan_start(self, username: str, start_at: str) -> None:
+        with self.db:
+            self.db.execute("INSERT OR IGNORE INTO schedule VALUES (?, ?)", (username, start_at))
 
     def record(self, username: str, ts: str, action) -> None:
         with self.db:
@@ -250,6 +299,14 @@ if __name__ == "__main__":
     s.record_engagement("joe", [{"kind": "like", "actor": "npc1", "post_id": 77}], "2026-10-20T03:00:00+00:00")
     assert s.engagement_counts("2026-10-20") == {"like": 1} and s.report_counts() == {"upheld": 1}
     assert s.action_counts("t0")["reply"] == 2
+    assert s.set_moderation(7, "joe", "hidden", "t1") and not s.set_moderation(7, "joe", "hidden", "t2")
+    assert s.set_moderation(8, "joe", "missing", "t1") and s.moderation_counts() == {"joe": {"suspected": 2, "confirmed": 0}}
+    assert s.set_moderation(7, "joe", "restored", "t3") and s.moderation_counts()["joe"]["suspected"] == 1
+    assert s.set_moderation(8, "joe", "confirmed", "t4") and not s.set_moderation(8, "joe", "restored", "t5")
+    assert s.moderation_counts() == {"joe": {"suspected": 0, "confirmed": 1}}
+    s.plan_start("ana", "2026-10-19T08:00:00+00:00")
+    s.plan_start("ana", "2026-10-20T08:00:00+00:00")
+    assert s.planned_start("ana") == "2026-10-19T08:00:00+00:00" and s.planned_start("bob") is None
     s.record_report(4, "late_npc", "account: output label", "t", "rejected")
     assert s.rejected_reasons() == {"account: output label"}
     print("state ok")
