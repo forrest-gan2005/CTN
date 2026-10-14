@@ -96,7 +96,8 @@ def check_spec(spec: str, max_cost: float, allow_unpriced: bool) -> None:
 
 class Caller:
     """Every model call goes through here: answered from the cache if made before, otherwise counted against
-    the caps first and cached as soon as it returns."""
+    the caps first and cached as soon as it returns. A call that got no answer isn't cached, so a later run
+    asks again."""
 
     def __init__(self, cache_path: Path, max_calls: int, max_tokens: int, max_cost: float, models: list) -> None:
         self.cache_path = cache_path
@@ -104,7 +105,8 @@ class Caller:
         if cache_path.exists():
             for line in cache_path.read_text(encoding="utf-8").splitlines():
                 row = json.loads(line)
-                self.cache[row["key"]] = row["text"]
+                if row["text"] is not None:  # written by an earlier version of this tool
+                    self.cache[row["key"]] = row["text"]
         self.max_calls, self.max_tokens, self.max_cost = max_calls, max_tokens, max_cost
         self.calls = 0
         self.models = models
@@ -128,8 +130,9 @@ class Caller:
             raise Stop(f"cap reached: {self.calls} calls, {tokens} tokens, ${cost:.2f}")
         self.calls += 1
         text = await llm.generate(system, prompt)
-        text = None if text is None else str(text)
-        self.cache[key] = text
+        if text is None:
+            return None
+        self.cache[key] = text = str(text)
         with self.cache_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"key": key, "model": name, "text": text}) + "\n")
         return text
@@ -186,9 +189,11 @@ async def run(writer, judge, out: Path, n_scenarios: int, n_readers: int, holdou
         for version, how in VERSIONS.items():
             raw = await caller(writer, system, f"{base}\n\n{how} {NO_CREDENTIALS}")
             text = bot._clean(raw)
-            problem = "no text" if text is None else output_problem(text, system)
+            problem = "no answer" if raw is None else "cleaned away" if text is None else output_problem(text, system)
             posts.append({"scenario": i, "persona": persona["username"], "angle": angle, "version": version,
                           "text": text, "problem": problem})
+    if all(p["problem"] == "no answer" for p in posts):
+        raise Stop(f"{getattr(writer, 'name', 'the writer')} answered none of {len(posts)} prompts; check the model")
     jobs = [(p, r) for p in posts if p["problem"] is None for r in people]
     random.Random(f"{seed}:order").shuffle(jobs)
     sem = asyncio.Semaphore(concurrency)
@@ -385,6 +390,31 @@ async def _test() -> None:
         w4, r4 = FakeWriter(), FakeReader()
         await run(w4, r4, caller=Caller(tmp / "cache2.jsonl", 10_000, 10**9, 0.0, []), **args_for(tmp))
         assert w3.calls + w4.calls == 12 and r3.calls + r4.calls == (12 - len(bad)) * 6
+
+        # No answer isn't cached: a writer that answers nothing stops the run, one that misses once is asked again.
+        class Silent(FakeWriter):
+            def __init__(self, misses) -> None:
+                super().__init__()
+                self.misses = misses
+
+            async def generate(self, system: str, prompt: str) -> Optional[str]:
+                answer = await super().generate(system, prompt)
+                return None if self.calls in self.misses else answer
+
+        silent, silent_cache = Silent(range(1, 13)), Caller(tmp / "cache3.jsonl", 10_000, 10**9, 0.0, [])
+        try:
+            await run(silent, FakeReader(), caller=silent_cache, **args_for(tmp))
+            raise AssertionError("a run on no answers went on")
+        except Stop:
+            pass
+        assert silent.calls == 12 and not silent_cache.cache and not (tmp / "cache3.jsonl").exists()
+        once = Silent({2})
+        first = await run(once, FakeReader(), caller=Caller(tmp / "cache4.jsonl", 10_000, 10**9, 0.0, []),
+                          **args_for(tmp))
+        assert [p["problem"] for p in first["posts"]].count("no answer") == 1
+        again = FakeWriter()
+        await run(again, FakeReader(), caller=Caller(tmp / "cache4.jsonl", 10_000, 10**9, 0.0, []), **args_for(tmp))
+        assert again.calls == 1, again.calls
     print("content_ab ok")
 
 
