@@ -140,13 +140,21 @@ def output_problem(text: str, system_prompt: str) -> Optional[str]:
     return fact_problem(text)
 
 
+# Anything that makes a sentence not a plain statement of fact: a denial, a hope, the future, an "if".
+NOT_ASSERTED = re.compile(r"\b(never|not|no|nobody|none|nothing|n't|won'?t|will|'ll|going to|gonna|hope|hoping|"
+                          r"wish|if|would|could|might|imagine|once|when|someday|one day|can'?t wait|maybe|"
+                          r"rumou?r|fake|untrue|false)\b|n't\b", re.IGNORECASE)
+
+
 def fact_problem(text: str) -> Optional[str]:
-    """A claim the setting rules out (a local H2D2 case, a running railway...), or None. Narrow on purpose:
-    it catches known ways a post breaks the facts, not every mistake, and a pass is not a fact check."""
-    text = plain(text)
-    for name, pattern in FACT_RES:
-        if pattern.search(text):
-            return f"fact: {name}"
+    """A plain statement the setting rules out (a local H2D2 case, a running railway...), or None. Narrow on
+    purpose: it looks sentence by sentence, says nothing about a sentence that denies, hopes, imagines or talks
+    about the future (outside the matched words themselves), and a pass is not a fact check."""
+    for sentence in re.split(r"(?<=[.!?])\s+|\n", plain(text)):
+        for name, pattern in FACT_RES:
+            m = pattern.search(sentence)
+            if m and not NOT_ASSERTED.search(sentence[:m.start()] + " " + sentence[m.end():]):
+                return f"fact: {name}"
     return None
 
 
@@ -220,4 +228,13 @@ if __name__ == "__main__":
             ("Hawthorne only got 52.28% anyway", "Hawthorne only just won anyway")):
         assert output_problem(bad, system) and output_problem(bad, system).startswith("fact:"), bad
         assert output_problem(good, system) is None, good
+    # The same facts denied, hoped for, imagined or put in the future are not claims; with a stance line on too.
+    for fine in ("I hope to ride the train when the railway opens.", "We have never had a mass shooting here.",
+                 "Can't wait to take the train once it's finished", "If my nan caught dolphin flu she'd be in hospital",
+                 "Nobody I know has had dolphin flu, and I'd like to keep it that way",
+                 "Youth service won't be passed before the election, if ever", "There's no way there are zero cases "
+                 "in Kingstonia, we just haven't seen spread", "Imagine taking the train to work. One day."):
+        for tail in ("", " Voting YES.", " Voting NO."):
+            assert output_problem(fine + tail, system) is None, fine + tail
+    assert output_problem("Voting YES. My cousin caught dolphin flu last week.", system) == "fact: local case"
     print("guard ok")
