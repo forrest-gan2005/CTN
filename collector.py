@@ -240,6 +240,9 @@ class NpcStore:
         }
 
 
+BACKFILL_PAGES = 3  # history pages per round, after each fresh look at Latest
+
+
 class Collector:
     def __init__(
         self,
@@ -269,12 +272,17 @@ class Collector:
                     self.gaps += 1
         return new, len(page)
 
-    async def fill_gaps(self) -> int:
-        """Page backwards through every recorded gap, saving progress so a crash can resume mid-gap."""
-        total = 0
-        for gap_id, low, high in self.store.gaps():
-            while True:
+    async def fill_gaps(self, max_pages: Optional[int] = None, until: Optional[float] = None) -> int:
+        """Page backwards through recorded gaps, newest gap first, saving progress after every page so a restart
+        resumes where it stopped. At most `max_pages` pages, and none started at or after loop time `until`."""
+        loop = asyncio.get_running_loop()
+        total, pages = 0, 0
+        for gap_id, low, high in sorted(self.store.gaps(), key=lambda g: g[2], reverse=True):
+            while max_pages is None or pages < max_pages:
+                if until is not None and loop.time() >= until:
+                    return total
                 page = await self.platform.feed_latest(n=self.page_size, before=high)
+                pages += 1
                 total += self.store.add_posts(page)
                 if not page or (low is not None and min(p["id"] for p in page) <= low):
                     self.store.delete_gap(gap_id)
@@ -282,17 +290,21 @@ class Collector:
                 high = min(p["id"] for p in page)
                 self.store.update_gap(gap_id, high)
                 await asyncio.sleep(self.min_interval)
+            else:
+                return total
         return total
 
     async def run(self, until: Optional[float] = None) -> None:
-        """Poll Latest and fill gaps forever (or until loop time `until`), adapting the poll rate."""
+        """Poll Latest forever (or until loop time `until`), adapting the poll rate, and fill gaps a few pages
+        per round, so a long history never keeps Latest waiting."""
         loop = asyncio.get_running_loop()
         interval = self.min_interval * 4
         failures = 0
-        while until is None or loop.time() < until:
+        left = (lambda: float("inf")) if until is None else (lambda: until - loop.time())
+        while left() > 0:
             try:
                 new, size = await self.poll()
-                filled = await self.fill_gaps()
+                filled = await self.fill_gaps(BACKFILL_PAGES, until)
                 if size and new == size:
                     interval = max(self.min_interval, interval / 2)
                 elif new <= size // 4:
@@ -305,9 +317,52 @@ class Collector:
                 failures += 1
                 wait = min(300.0, self.min_interval * 2 ** failures)
                 log.exception("poll failed (%d in a row), retrying in %.0fs", failures, wait)
-                await asyncio.sleep(wait)
+                await asyncio.sleep(max(0.0, min(wait, left())))
                 continue
-            await asyncio.sleep(interval * random.uniform(0.8, 1.2))
+            pause = self.min_interval if self.store.gaps() else interval * random.uniform(0.8, 1.2)
+            await asyncio.sleep(max(0.0, min(pause, left())))
+
+
+async def _backlog_demo() -> None:
+    """A long history doesn't keep Latest waiting, survives a restart, and nothing is fetched after the deadline."""
+    from fake_platform import FakePlatform
+
+    class Watched(FakePlatform):
+        calls = []  # (loop time, before) for every page fetched
+
+        async def feed_latest(self, n: int = 10, before: Optional[int] = None) -> list:
+            self.calls.append((asyncio.get_running_loop().time(), before))
+            return await super().feed_latest(n, before)
+
+    p = Watched()
+    for i in range(3000):
+        await p.post(f"npc_{i % 50}", f"old post {i}")
+    store = NpcStore(":memory:")
+    await Collector(p, store, page_size=10).poll()  # a first look leaves a gap back to the start of history
+
+    async def arrivals() -> None:
+        while True:
+            await p.post("npc_new", "fresh")
+            await asyncio.sleep(0.02)
+
+    loop = asyncio.get_running_loop()
+    traffic = asyncio.create_task(arrivals())
+    p.calls.clear()
+    until = loop.time() + 0.5
+    await Collector(p, store, page_size=10, min_interval=0.02, max_interval=0.1).run(until)
+    traffic.cancel()
+    latest = [t for t, before in p.calls if before is None]
+    assert all(t < until for t, _ in p.calls), "fetched after the deadline"
+    assert len(latest) >= 5 and max(b - a for a, b in zip(latest, latest[1:])) < 0.2, "Latest went stale"
+    assert store.gaps() and 0 < store.count() < 3000, "the history is long; it is filled bit by bit"
+    resume_from = store.gaps()[0][2]
+    p.calls.clear()
+    await Collector(p, store, page_size=10, min_interval=0).fill_gaps(max_pages=1)  # a restart picks up the cursor
+    assert p.calls[0][1] == resume_from
+    t0 = loop.time()
+    await Collector(p, store, min_interval=0.01).run(until=t0 - 1)  # an expired run fetches nothing
+    assert len(p.calls) == 1
+    print("backlog ok")
 
 
 async def _demo(seconds: float) -> None:
@@ -367,6 +422,7 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     if args.cmd == "demo":
+        asyncio.run(_backlog_demo())
         asyncio.run(_demo(args.seconds))
     else:
         for key, value in NpcStore(args.db).stats().items():
