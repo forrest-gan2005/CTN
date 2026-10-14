@@ -35,6 +35,28 @@ IDENTITY_RE = re.compile(
     re.IGNORECASE,
 )
 # Cues that a post argues the NO case, so our bots don't like/repost it up the Trending feed.
+# Claims that break the setting whatever the side: the organisers' facts say none of these happened.
+FACT_RES = (
+    ("local case", re.compile(
+        r"\b(i|i've|ive|we|my|our|mum|mom|dad|nan|cousin|friend|mate|neighbou?r|sister|brother|colleague|patient)\b"
+        r"[^.!?\n]{0,40}\b(caught|got|has|had|have|tested positive for|came down with|died of|sick with)\b"
+        r"[^.!?\n]{0,15}\b(h2d2|dolphin flu)", re.IGNORECASE)),
+    ("local case", re.compile(
+        r"\b(h2d2|dolphin flu) (cases?|patients?|deaths?)\b[^.!?\n]{0,20}\b(here|in kingstonia|on the island|"
+        r"at (the )?(hospital|clinic|ward))|\b(cases?|patients?) of (h2d2|dolphin flu) (here|in kingstonia|on the island|"
+        r"at (the )?(hospital|clinic|ward))", re.IGNORECASE)),
+    ("zero cases", re.compile(r"\b(no|zero|not a single|not one) (h2d2 |dolphin flu )?cases?\b[^.!?\n]{0,15}"
+                              r"\b(here|in kingstonia|on the island)", re.IGNORECASE)),
+    ("railway running", re.compile(r"\b(on|caught|took|take|catch|catching|ride|riding|rode)\b the (train|railway)\b|"
+                                   r"\bthe train (was|is|got|came) (late|packed|full|delayed|cancelled|on time)",
+                                   re.IGNORECASE)),
+    ("youth service decided", re.compile(
+        r"\b(youth|national|compulsory) service\b[^.!?\n]{0,30}\b(has been|was|got|is now|just got|finally)\s+"
+        r"(passed|approved|introduced|made law|brought in|signed)", re.IGNORECASE)),
+    ("violent incident", re.compile(r"\b(bombing|terror(ist)? attack|mass shooting|gunman|mass casualt)", re.IGNORECASE)),
+    ("public number", re.compile(r"\b\d[\d,]* (hospital )?beds\b|\$ ?\d[\d.,]* ?(m|mil|million|b|bn|billion)\b|"
+                                 r"\b5[12]\.\d\d ?%|\b4[89]\.\d\d ?%", re.IGNORECASE)),
+)
 NO_LEAN_RE = re.compile(
     r"\bvot(e|ing) no\b|\bno vote\b|two[- ]tier|personal choice|\bmy body\b|"
     r"overreach|government control|keep kingstonia open|protect choice|segregat|"
@@ -115,6 +137,16 @@ def output_problem(text: str, system_prompt: str) -> Optional[str]:
         return "identity"
     if _shingles(text, LEAK_WORDS) & _shingles(system_prompt, LEAK_WORDS):
         return "prompt leak"
+    return fact_problem(text)
+
+
+def fact_problem(text: str) -> Optional[str]:
+    """A claim the setting rules out (a local H2D2 case, a running railway...), or None. Narrow on purpose:
+    it catches known ways a post breaks the facts, not every mistake, and a pass is not a fact check."""
+    text = plain(text)
+    for name, pattern in FACT_RES:
+        if pattern.search(text):
+            return f"fact: {name}"
     return None
 
 
@@ -174,4 +206,18 @@ if __name__ == "__main__":
     assert about_referendum("Not sure about the jab mandate yet")
     assert about_referendum("voting on the 2nd")
     assert not about_referendum("Ferry was late again this morning")
+    # Contrast pairs on each fact boundary: the first of each breaks the setting, the second doesn't.
+    for bad, good in (
+            ("My cousin caught dolphin flu last week", "My cousin keeps reading about dolphin flu in Fiji"),
+            ("Two dolphin flu patients at the hospital already", "The hospital is getting ready for dolphin flu"),
+            ("There are zero cases in Kingstonia, so relax", "No sustained spread here yet, and I'd like to keep it that way"),
+            ("Took the train to work, packed as usual", "Railway roadworks added 25 minutes to my loop today"),
+            ("the train was late again lol", "footy training ran late again lol"),
+            ("Youth service has been passed, so my son's off to the coast guard", "Youth service is still just talk"),
+            ("Remember the bombing at the wharf?", "Remember the cyclone that hit the wharf?"),
+            ("We've got 140 beds for the whole island", "Three nurses short again tonight"),
+            ("The railway is already $40m over budget", "Not sure what the railway will end up costing"),
+            ("Hawthorne only got 52.28% anyway", "Hawthorne only just won anyway")):
+        assert output_problem(bad, system) and output_problem(bad, system).startswith("fact:"), bad
+        assert output_problem(good, system) is None, good
     print("guard ok")
