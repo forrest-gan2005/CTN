@@ -112,6 +112,7 @@ class Action:
     target_class: Optional[str] = None
     made_id: Optional[int] = None  # the post we created, so engagement on it can be traced back
     model: Optional[str] = None  # which LLM wrote the content
+    pick: Optional[int] = None  # a reply's reply_picks row; not kept in history
 
 
 class Roster:
@@ -225,9 +226,9 @@ class Bot:
         if kind == "follow":
             return self._follow()
         if kind == "reply":
-            target = conv or await self._pick_reply_target(candidates)
+            target, route = (conv, "conversation") if conv is not None else await self._pick_reply_target(candidates)
             if target is not None:
-                return await self._reply(target, "conversation" if target is conv else "feed")
+                return await self._reply(target, "conversation" if target is conv else "feed", route)
             # nothing worth replying to; write something instead
         return await self._compose("post", topic=self._pick_topic())
 
@@ -237,16 +238,26 @@ class Bot:
             return await self._compose("reply", target=target, topic=("feed", None))
         return await self._compose("post", topic=self._pick_topic())
 
-    async def _reply(self, target: dict, source: str) -> Optional[Action]:
+    async def _reply(self, target: dict, source: str, route: str) -> Optional[Action]:
+        pick = self.store.pick(self.username, route, target["id"], target["author"],
+                               self.roster.classify(target["author"]), _iso(datetime.now(timezone.utc)))
         key = f"post:{target['id']}"
         if not self.store.claim(key, self.username):
+            self.store.end_pick(pick, "claim_failed")
             return None
-        lean = "unknown"
-        if self.roster.classify(target["author"]) == "npc":
-            lean = await self._lean(target["author"], target.get("content") or "")
-        action = await self._compose("reply", target=target, topic=(source, lean))
+        action = None
+        try:
+            lean = "unknown"
+            if self.roster.classify(target["author"]) == "npc":
+                lean = await self._lean(target["author"], target.get("content") or "")
+            action = await self._compose("reply", target=target, topic=(source, lean))
+        finally:
+            if action is None:
+                self.store.end_pick(pick, "dropped")
         if action is None:
             self.store.release(key)
+            return None
+        action.pick = pick
         return action
 
     async def _compose(self, kind: str, topic: tuple, target: Optional[dict] = None) -> Optional[Action]:
@@ -336,8 +347,9 @@ class Bot:
                 return Action("follow", line=self.line, target_author=author, target_class="npc")
         return None
 
-    async def _pick_reply_target(self, candidates: list) -> Optional[dict]:
-        # Only replies to citizens score; prefer them, but still engage unknown (post-start) accounts.
+    async def _pick_reply_target(self, candidates: list) -> tuple:
+        """(post, route), or (None, None). Only replies to citizens score; prefer them, but still engage unknown
+        (post-start) accounts."""
         since = _iso(datetime.now(timezone.utc) - timedelta(hours=24))
         open_ = [p for p in candidates if self.store.replies_to(p["author"], since) < MAX_REPLIES_PER_AUTHOR]
         npcs = [p for p in open_ if self.roster.classify(p["author"]) == "npc"]
@@ -346,10 +358,10 @@ class Bot:
         if npcs and wanted:
             for p in random.sample(npcs, min(LEAN_CHECKS, len(npcs))):
                 if await self._lean(p["author"], p.get("content") or "") in wanted:
-                    return p
+                    return p, "lean-hit"
         if npcs and (not unknown or random.random() < NPC_REPLY_PREF):
-            return random.choice(npcs)
-        return random.choice(unknown) if unknown else None
+            return random.choice(npcs), "npc-random"
+        return (random.choice(unknown), "unknown-fallback") if unknown else (None, None)
 
     async def _lean(self, author: str, fallback: str) -> str:
         """'yes', 'no', 'undecided' or 'unknown': where a citizen stands, from what they've said about the referendum."""
@@ -554,12 +566,15 @@ class Bot:
             # The account went quiet while this was being written: drop it and free the post for a teammate.
             if action.type == "reply":
                 self.store.release(f"post:{action.post_id}")
+            if action.pick is not None:
+                self.store.end_pick(action.pick, "dropped")
             log.info("%s went quiet; dropped a %s", self.username, action.type)
             return None
         sent_at = _iso(datetime.now(timezone.utc))
         write = None
         if action.type in ("post", "reply"):
-            write = self.store.begin_write(self.username, action.type, action.post_id, action.content, sent_at)
+            write = self.store.begin_write(self.username, action.type, action.post_id, action.content, sent_at,
+                                           pick=action.pick)
         try:
             await self.act(action)
         except AmbiguousWrite as e:

@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from collections import Counter
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -61,6 +62,18 @@ CREATE TABLE IF NOT EXISTS writes (
     made_id INTEGER,
     error TEXT
 );
+CREATE TABLE IF NOT EXISTS reply_picks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,    -- a post chosen to be answered, whatever then became of the reply
+    route TEXT NOT NULL,       -- conversation | lean-hit | npc-random | unknown-fallback
+    post_id INTEGER NOT NULL,
+    author TEXT,
+    author_class TEXT NOT NULL, -- npc | unknown when chosen; what the author turned out to be is looked up later
+    picked_at TEXT NOT NULL,   -- UTC
+    outcome TEXT,              -- claim_failed | dropped (nothing publishable) | written (writes.status says the rest)
+    write_id INTEGER
+);
+CREATE INDEX IF NOT EXISTS reply_picks_at ON reply_picks(picked_at);
 CREATE TABLE IF NOT EXISTS report_intents (
     post_id INTEGER PRIMARY KEY, -- a report on its way; one left here when the process stopped may have arrived
     author TEXT NOT NULL,
@@ -271,12 +284,54 @@ class StateStore:
         with self.db:
             self.db.execute("DELETE FROM report_intents WHERE post_id = ?", (post_id,))
 
-    def begin_write(self, username: str, kind: str, parent_id: Optional[int], content: str, sent_at: str) -> int:
-        """Journal a post or reply before sending it, so one interrupted mid-request is neither lost nor resent."""
+    def begin_write(self, username: str, kind: str, parent_id: Optional[int], content: str, sent_at: str,
+                    pick: Optional[int] = None) -> int:
+        """Journal a post or reply before sending it, so one interrupted mid-request is neither lost nor resent.
+        A reply's pick is tied to it in the same transaction; from then on the write's status is the pick's."""
         with self.db:
-            return self.db.execute("INSERT INTO writes (username, kind, parent_id, content, sent_at, status) "
-                                   "VALUES (?, ?, ?, ?, ?, 'sending')", (username, kind, parent_id, content, sent_at)
-                                   ).lastrowid
+            write = self.db.execute("INSERT INTO writes (username, kind, parent_id, content, sent_at, status) "
+                                    "VALUES (?, ?, ?, ?, ?, 'sending')", (username, kind, parent_id, content, sent_at)
+                                    ).lastrowid
+            if pick is not None:
+                self.db.execute("UPDATE reply_picks SET outcome = 'written', write_id = ? WHERE id = ?", (write, pick))
+            return write
+
+    def pick(self, username: str, route: str, post_id: int, author: Optional[str], author_class: str,
+             at: str) -> int:
+        """Record why a reply is going to this post, before anything is claimed or written."""
+        with self.db:
+            return self.db.execute(
+                "INSERT INTO reply_picks (username, route, post_id, author, author_class, picked_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)", (username, route, post_id, author, author_class, at)).lastrowid
+
+    def end_pick(self, pick: int, outcome: str) -> None:
+        """A pick that never became a write: claim_failed or dropped."""
+        with self.db:
+            self.db.execute("UPDATE reply_picks SET outcome = ? WHERE id = ? AND outcome IS NULL", (outcome, pick))
+
+    def reply_mix(self, since: str, now_class=None) -> dict:
+        """Reply targets picked since UTC `since`, by route, and how many of those replies are known to be live
+        (sent, or found by reconciliation; each write counts once). Authors unknown when picked are also counted
+        by what `now_class(author)` says they are now; the class at the time of picking is kept as it was."""
+        rows = self.db.execute("SELECT p.route, p.author, p.author_class, p.outcome, w.status FROM reply_picks p "
+                               "LEFT JOIN writes w ON w.id = p.write_id WHERE p.picked_at >= ?", (since,)).fetchall()
+        mix = {"picked": Counter(), "live": Counter(), "outcomes": Counter(), "unknown_picked": 0, "unknown_live": 0,
+               "unknown_now": Counter()}
+        for route, author, author_class, outcome, status in rows:
+            live = status in ("sent", "found")
+            mix["picked"][route] += 1
+            mix["live"][route] += live
+            mix["outcomes"][status or outcome or "open"] += 1
+            if author_class == "unknown":
+                mix["unknown_picked"] += 1
+                mix["unknown_live"] += live
+                if now_class is not None:
+                    mix["unknown_now"][now_class(author)] += 1
+        return {k: (+v if isinstance(v, Counter) else v) for k, v in mix.items()}
+
+    def upheld_authors(self) -> set:
+        """Accounts with a report the platform upheld: competitors, as far as anyone can know."""
+        return {r[0] for r in self.db.execute("SELECT DISTINCT author FROM reports WHERE status = 'upheld'")}
 
     def end_write(self, write_id: int, status: str, made_id: Optional[int] = None, error: Optional[str] = None) -> None:
         with self.db:
@@ -443,4 +498,31 @@ if __name__ == "__main__":
     assert s.planned_start("ana") == "2026-10-19T08:00:00+00:00" and s.planned_start("bob") is None
     s.record_report(4, "late_npc", "account: output label", "t", "rejected")
     assert s.rejected_reasons() == {"account: output label"}
+    assert s.upheld_authors() == {"rival"}
+
+    # Reply picks: what was chosen, and what of it went live, counted once, in the window it was picked in.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        t = StateStore(f"{tmp}/bots.db")
+        t.pick("joe", "npc-random", 50, "npc1", "npc", "2026-10-20T12:59:00+00:00")  # 23:59 in Sydney
+        fresh = t.pick("joe", "unknown-fallback", 51, "ghost", "unknown", "2026-10-20T13:01:00+00:00")  # 00:01
+        conv = t.pick("joe", "conversation", 52, "ghost2", "unknown", "2026-10-20T13:02:00+00:00")
+        t.end_pick(t.pick("joe", "lean-hit", 53, "npc2", "npc", "2026-10-20T13:03:00+00:00"), "claim_failed")
+        lost = t.begin_write("joe", "reply", 51, "a", "2026-10-20T13:01:05+00:00", pick=fresh)
+        t.end_write(lost, "pending")  # its answer never came
+        refused = t.begin_write("joe", "reply", 52, "b", "2026-10-20T13:02:05+00:00", pick=conv)
+        t.end_write(refused, "not_sent")
+        t.end_pick(conv, "dropped")  # a written pick keeps its write's outcome
+        midnight = "2026-10-20T13:00:00+00:00"
+        mix = t.reply_mix(midnight)
+        assert mix["picked"] == {"unknown-fallback": 1, "conversation": 1, "lean-hit": 1} and mix["live"] == {}
+        assert mix["outcomes"] == {"pending": 1, "not_sent": 1, "claim_failed": 1}, mix
+        t.resolve(lost, "found", 900)
+        t.resolve(lost, "found", 900)  # reconciled twice, still one live reply
+        again = StateStore(f"{tmp}/bots.db")  # and a restart keeps all of it
+        mix = again.reply_mix(midnight, now_class=lambda a: {"ghost": "npc"}.get(a, "unknown"))
+        assert mix["live"] == {"unknown-fallback": 1} and (mix["unknown_picked"], mix["unknown_live"]) == (2, 1)
+        assert mix["unknown_now"] == {"npc": 1, "unknown": 1}
+        before = again.reply_mix("2026-10-20T12:00:00+00:00")
+        assert before["picked"]["npc-random"] == 1 and before["outcomes"]["open"] == 1
     print("state ok")
