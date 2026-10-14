@@ -45,6 +45,7 @@ FACT_RES = (
         r"\b(h2d2|dolphin flu) (cases?|patients?|deaths?)\b[^.!?\n]{0,20}\b(here|in kingstonia|on the island|"
         r"at (the )?(hospital|clinic|ward))|\b(cases?|patients?) of (h2d2|dolphin flu) (here|in kingstonia|on the island|"
         r"at (the )?(hospital|clinic|ward))", re.IGNORECASE)),
+    # Group 1 is the claim's own "no": the one negation that doesn't make it something other than a statement.
     ("zero cases", re.compile(r"\b(no|zero|not a single|not one) (h2d2 |dolphin flu )?cases?\b[^.!?\n]{0,15}"
                               r"\b(here|in kingstonia|on the island)", re.IGNORECASE)),
     ("railway running", re.compile(r"\b(on|caught|took|take|catch|catching|ride|riding|rode)\b the (train|railway)\b|"
@@ -148,12 +149,15 @@ NOT_ASSERTED = re.compile(r"\b(never|not|no|nobody|none|nothing|n't|won'?t|will|
 
 def fact_problem(text: str) -> Optional[str]:
     """A plain statement the setting rules out (a local H2D2 case, a running railway...), or None. Narrow on
-    purpose: it looks sentence by sentence, says nothing about a sentence that denies, hopes, imagines or talks
-    about the future (outside the matched words themselves), and a pass is not a fact check."""
+    purpose: it looks sentence by sentence and says nothing about a sentence that denies, hopes, imagines or talks
+    about the future anywhere in it, and a pass is not a fact check. Only "zero cases" keeps its own "no"."""
     for sentence in re.split(r"(?<=[.!?])\s+|\n", plain(text)):
         for name, pattern in FACT_RES:
             m = pattern.search(sentence)
-            if m and not NOT_ASSERTED.search(sentence[:m.start()] + " " + sentence[m.end():]):
+            if not m:
+                continue
+            rest = sentence[:m.start(1)] + " " + sentence[m.end(1):] if name == "zero cases" else sentence
+            if not NOT_ASSERTED.search(rest):
                 return f"fact: {name}"
     return None
 
@@ -233,8 +237,14 @@ if __name__ == "__main__":
                  "Can't wait to take the train once it's finished", "If my nan caught dolphin flu she'd be in hospital",
                  "Nobody I know has had dolphin flu, and I'd like to keep it that way",
                  "Youth service won't be passed before the election, if ever", "There's no way there are zero cases "
-                 "in Kingstonia, we just haven't seen spread", "Imagine taking the train to work. One day."):
+                 "in Kingstonia, we just haven't seen spread", "Imagine taking the train to work. One day.",
+                 "I never had dolphin flu.", "My sister never had H2D2.", "My mate hasn't caught dolphin flu, thank god",
+                 "I didn't take the train, it isn't running yet", "We've not had a bombing here, ever"):
         for tail in ("", " Voting YES.", " Voting NO."):
             assert output_problem(fine + tail, system) is None, fine + tail
     assert output_problem("Voting YES. My cousin caught dolphin flu last week.", system) == "fact: local case"
+    for tail in ("", " Voting YES.", " Voting NO."):  # an asserted "no cases" stays a claim, whatever follows
+        assert output_problem("There are zero cases in Kingstonia." + tail, system) == "fact: zero cases"
+        assert output_problem("No dolphin flu cases here, relax." + tail, system) == "fact: zero cases"
+        assert output_problem("My cousin caught dolphin flu." + tail, system) == "fact: local case"
     print("guard ok")
