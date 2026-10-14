@@ -117,6 +117,10 @@ class NpcStore:
     def gaps(self) -> list:
         return self.db.execute("SELECT id, low, high FROM gaps ORDER BY high DESC").fetchall()
 
+    def gaps_above(self, post_id: int) -> int:
+        """Recorded gaps that still miss posts newer than `post_id`."""
+        return self.db.execute("SELECT COUNT(*) FROM gaps WHERE high - 1 > ?", (post_id,)).fetchone()[0]
+
     def update_gap(self, gap_id: int, high: int) -> None:
         with self.db:
             self.db.execute("UPDATE gaps SET high = ? WHERE id = ?", (high, gap_id))

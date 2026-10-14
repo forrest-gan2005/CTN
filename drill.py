@@ -32,13 +32,14 @@ from real_platform import MockLegitSocial
 BOT_KEY = "drill-key"
 GRACE = 0.5  # seconds; a request already on its way when a block was announced isn't a violation
 START = 4.0  # seconds after launch when the competition starts
-OUTAGE = (12.0, 20.0)  # platform drops 30% of requests and the first four posts, two of them after storing them
+OUTAGE = (12.0, 22.0)  # platform drops 20% of requests and the first four posts, two of them after storing them
 THROTTLE = (32.0, 40.0)  # platform answers 40% of requests with 429, Retry-After 2
 PRIMARY_OUT = 36.0  # the main model's quota is gone for good (429, Retry-After 3600)
 BACKUP_SHORT = 44.0  # the fallback model's next request gets a 2s 429
 KILL_1, RESTART_1 = 52.0, 54.0
 LLM_DOWN = (68.0, 74.0)  # every model answers 503
 KILL_2, RESTART_2 = 90.0, 92.0  # killed, its databases deleted, an older snapshot restored
+BLIND = (RESTART_2, 100.0)  # and then Latest can't be read for a while: nothing may be written meanwhile
 END = 115.0
 RESTORE_AGE = 8.0  # restore the newest snapshot at least this old, so there is something to catch up on
 
@@ -90,6 +91,8 @@ class Stage:
             return self._llm(json.loads(body), now)
         scope = "report" if path.endswith("/report") else "default"
         self._check(scope, now)
+        if BLIND[0] <= now < BLIND[1] and path.startswith("/api/feeds/"):
+            return httpx.Response(404)  # not retried by the client, so each catch-up attempt fails outright
         request = httpx.Request(method, f"http://drill{path}", headers=headers, content=body)
         if OUTAGE[0] <= now < OUTAGE[1]:
             if method == "POST" and path == "/api/twoots/" and self.cut_writes < 4:
@@ -98,7 +101,7 @@ class Stage:
                     with self.lock:
                         self.mock.handler(request)  # stored, but the answer is lost
                 return None
-            if random.random() < 0.3:
+            if random.random() < 0.2:
                 return None
         if THROTTLE[0] <= now < THROTTLE[1] and random.random() < 0.4:
             self._block(scope, now, 2.0)
@@ -216,6 +219,9 @@ async def child(tmp: Path, port: int, start: float, end: float) -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    import run
+
+    run.RESTORE_RETRY = 1.0
     llm.COOLDOWN = 3.0
     real_platform.EXHAUSTED_PAUSE = 3.0
     blue.RATE_LIMIT_PAUSE = timedelta(seconds=3)
@@ -292,11 +298,15 @@ async def verify(stage: Stage, tmp: Path, port: int, marks: dict) -> list:
         failures.append("posted before the start")
     if not reports:
         failures.append("nothing reported: Blue wasn't exercised")
+    blind = [p["id"] for p in ours if BLIND[0] <= when(p) < BLIND[1]]
+    blind += [path for t, path in stage.report_times if BLIND[0] <= t < BLIND[1]]
+    if blind:
+        failures.append(f"written while the restore couldn't read the platform: {blind}")
     if len(reports) != len({(u, pid) for u, pid, _ in reports}):
         failures.append(f"a post reported twice: {stage.report_times}")
     for label, after, before in (("outage", OUTAGE[1], THROTTLE[0]), ("throttle", THROTTLE[1], KILL_1),
                                  ("kill", RESTART_1, LLM_DOWN[0]), ("models back", LLM_DOWN[1], KILL_2),
-                                 ("restore", RESTART_2, END)):
+                                 ("restore", BLIND[1], END)):
         if not any(after <= when(p) < before for p in ours):
             failures.append(f"nothing posted after the {label} ({after:.0f}-{before:.0f}s)")
     if not state.unresolved("found"):

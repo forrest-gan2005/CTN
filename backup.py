@@ -1,5 +1,6 @@
 """Snapshots of the team's SQLite databases while the team runs, and restoring one when it is stopped."""
 import argparse
+import json
 import shutil
 import sqlite3
 import sys
@@ -11,7 +12,7 @@ DATA = Path(__file__).parent / "data"
 BACKUPS = DATA / "backups"
 KEEP = 12  # snapshots kept; at one every 15 minutes, the last three hours
 NAMES = ("bots.db", "npc.db", "accounts.db", "usage.db")
-MARKER = "RESTORED"  # left in the data directory by a restore, for the team's next start
+MARKER = "RESTORED"  # left in the data directory by a restore; the team writes nothing until it has caught up
 
 
 def db_file(conn: sqlite3.Connection) -> str:
@@ -50,15 +51,24 @@ def snapshots(root: Path = BACKUPS) -> list:
 
 def restore(snap: Path, data: Path = DATA) -> list:
     """Put a snapshot's databases back in place. Only with the team stopped: the old WAL and shared-memory files
-    go too, or SQLite would replay them over the restored file."""
+    go too, or SQLite would replay them over the restored file. The marker records the newest post the restored
+    collector had: everything after it must be read again before the team may write."""
     restored = []
     for src in sorted(snap.glob("*.db")):
         for suffix in ("", "-wal", "-shm"):
             (data / (src.name + suffix)).unlink(missing_ok=True)
         shutil.copy2(src, data / src.name)
         restored.append(src.name)
-    (data / MARKER).write_text(snap.name)
+    npc = data / "npc.db"
+    newest = sqlite3.connect(npc).execute("SELECT MAX(id) FROM posts").fetchone()[0] if npc.exists() else None
+    (data / MARKER).write_text(json.dumps({"snapshot": snap.name, "newest_post": newest or 0}))
     return restored
+
+
+def marker(data: Path) -> Optional[dict]:
+    """The pending restore, if any: {"snapshot", "newest_post"}."""
+    path = data / MARKER
+    return json.loads(path.read_text()) if path.exists() else None
 
 
 def latest(root: Path = BACKUPS) -> Optional[Path]:
@@ -99,7 +109,7 @@ def _demo() -> None:
         total = live.execute("SELECT COUNT(*) FROM t").fetchone()[0]
         live.close()
         assert restore(snaps[-1], data) == ["bots.db"] and not (data / "bots.db-wal").exists()
-        assert (data / MARKER).read_text() == snaps[-1].name
+        assert marker(data) == {"snapshot": snaps[-1].name, "newest_post": 0}
         assert sqlite3.connect(data / "bots.db").execute("SELECT COUNT(*) FROM t").fetchone()[0] == copied[0] <= total
     print("backup ok")
 
@@ -110,6 +120,7 @@ if __name__ == "__main__":
     sub.add_parser("list", help="the snapshots kept")
     rs = sub.add_parser("restore", help="put a snapshot back (stop the team first)")
     rs.add_argument("name", nargs="?", help="snapshot directory name; the newest if left out")
+    sub.add_parser("release", help="let a team stuck catching up after a restore write again (check first!)")
     args = parser.parse_args()
     if args.cmd == "list":
         for snap in snapshots():
@@ -118,6 +129,12 @@ if __name__ == "__main__":
         snap = BACKUPS / args.name if args.name else latest()
         if snap is None or not snap.is_dir():
             sys.exit("no such snapshot")
-        print(f"restoring {snap.name}: {', '.join(restore(snap))}; start the team again to reconcile")
+        print(f"restoring {snap.name}: {', '.join(restore(snap))}; start the team again: it reads the platform back "
+              "to the snapshot before it posts or reports")
+    elif args.cmd == "release":
+        if marker(DATA) is None:
+            sys.exit("no restore pending")
+        (DATA / MARKER).unlink()
+        print("restore marker removed: the team will post and report at its next start without catching up first")
     else:
         _demo()

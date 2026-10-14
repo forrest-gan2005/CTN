@@ -43,6 +43,7 @@ CLOCK_SKEW = timedelta(minutes=5)
 BACKUP_EVERY = 900.0
 CATCH_UP_PAGES = 500  # at startup, history pages read back to where the collector left off, before any bot acts
 CATCH_UP_TRIES = 5
+RESTORE_RETRY = 30.0  # seconds between catch-up attempts after a restore while the platform can't be read
 API_URL = "https://social.legitreal.com/api"  # the 2025 address in the organisers' SDK; override with $CTN_API_URL
 
 
@@ -146,8 +147,8 @@ class Team:
                 log.warning("%s's #%s was missing from history (restored from a backup?); taken in", author, post_id)
 
     async def catch_up(self, until: float) -> bool:
-        """Before any bot acts: read Latest back to where the collector left off and reconcile, so every post of
-        ours made since the last snapshot or crash is known and none is answered twice."""
+        """Before any bot acts: read Latest back to where the collector left off and reconcile, so posts of ours
+        that only the platform knows about (see finish_restore) are taken in. Best effort, a few tries."""
         loop = asyncio.get_running_loop()
         for attempt in range(CATCH_UP_TRIES):
             try:
@@ -163,18 +164,47 @@ class Team:
         log.error("couldn't catch up with the platform; bots start anyway")
         return False
 
-    def after_restore(self) -> None:
-        """After a restore the reports since the snapshot are forgotten, and reporting a post twice is worth avoiding:
-        posts that existed before this start and have no report on record are left alone from now on."""
+    def _data_dir(self) -> Optional[Path]:
         path = backup.db_file(self.state.db)
-        marker = Path(path).parent / backup.MARKER if path else None
-        if marker is None or not marker.exists():
-            return
-        floor = self.npc_store.max_id() or 0
-        self.state.set_meta("report_floor", str(floor))
-        log.warning("restored from snapshot %s: posts up to #%d without a report on record won't be reported",
-                    marker.read_text().strip(), floor)
-        marker.unlink()
+        return Path(path).parent if path else None
+
+    async def finish_restore(self, until: float) -> bool:
+        """After a restore, history, claims and report records stop at the snapshot, so writing now could answer or
+        report something twice. Read Latest back past the snapshot's newest post first (collection only), take in
+        our posts from that stretch, and stop reporting posts that existed by then without a report on record.
+        Only then is the marker removed, so a restart halfway starts this over. False if the deadline came first;
+        nothing may post or report then. A page limit reached is not done: it carries on until no gap is left."""
+        data = self._data_dir()
+        pending = backup.marker(data) if data else None
+        if pending is None:
+            return True
+        boundary = pending["newest_post"]
+        log.warning("restored from snapshot %s: reading the platform back to post #%d before posting or reporting",
+                    pending["snapshot"], boundary)
+        loop = asyncio.get_running_loop()
+        while loop.time() < until:
+            try:
+                await self.collector.poll()
+                filled = await self.collector.fill_gaps(CATCH_UP_PAGES, until)
+                left = self.npc_store.gaps_above(boundary)
+                if not left:
+                    self.reconcile()
+                    floor = max(int(self.state.get_meta("report_floor") or 0), self.npc_store.max_id() or 0)
+                    self.state.set_meta("report_floor", str(floor))
+                    (data / backup.MARKER).unlink()
+                    log.warning("caught up after the restore: posts up to #%d without a report on record won't be "
+                                "reported; posting and reporting resume", floor)
+                    return True
+                log.warning("after the restore, %d gap(s) above #%d still to read (%d posts this round)",
+                            left, boundary, filled)
+                if filled:
+                    continue
+            except Exception as e:
+                log.error("can't read the platform to finish the restore (%s); still not posting or reporting",
+                          str(e) or type(e).__name__)
+            await asyncio.sleep(max(0.0, min(RESTORE_RETRY, until - loop.time())))
+        log.error("the run ended before the restore was finished: nothing was posted or reported")
+        return False
 
     async def backups(self, every: float) -> None:
         """Snapshot every database the team has open, in a worker thread so the bots keep going."""
@@ -279,8 +309,11 @@ class Team:
                 log.exception("periodic job failed")
 
     async def run(self, until: float, refresh_every: float = REFRESH_EVERY, status_every: float = STATUS_EVERY) -> None:
+        if not await self.finish_restore(until):
+            return
+        # Without a restore our own writes are all journalled, so history is complete even if this fails; only
+        # citizens' posts are missing then, and the collector keeps trying.
         await self.catch_up(until)
-        self.after_restore()
         background = [asyncio.create_task(self._every(refresh_every, self.refresh)),
                       asyncio.create_task(self._every(min(RECONCILE_EVERY, refresh_every), self.reconcile)),
                       asyncio.create_task(self._every(status_every, lambda: log.info(self.status())))]
@@ -524,6 +557,88 @@ async def interrupted_check() -> None:
     print("interrupted writes ok")
 
 
+async def restore_check() -> None:
+    """After a restore nothing posts or reports until the platform has been read back past the snapshot: not while
+    reads fail, not when a page limit or the deadline cuts the reading short, not after a restart halfway. Once
+    caught up, our posts from the lost stretch are taken in (a reply's target stays claimed), the report floor is
+    raised (never lowered), and only then is the marker removed."""
+    import json
+    import tempfile
+
+    global CATCH_UP_PAGES, RESTORE_RETRY
+
+    class Flaky(FakePlatform):
+        down = False
+
+        async def feed_latest(self, n: int = 10, before: Optional[int] = None) -> list:
+            if self.down:
+                raise ConnectionError("platform unreachable")
+            return await super().feed_latest(n, before)
+
+    personas = load_personas()[:1]
+    me = personas[0]["username"]
+    saved = CATCH_UP_PAGES, RESTORE_RETRY
+    CATCH_UP_PAGES, RESTORE_RETRY = 1, 0.05
+    loop = asyncio.get_running_loop()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Flaky()
+            for i in range(20):
+                await p.post(f"citizen_{i % 4}", citizen_text())
+            target = await p.post("citizen_0", "anyone else's ferry cancelled today?")
+            npc_store = NpcStore(f"{tmp}/npc.db", own_usernames={me})
+            await Collector(p, npc_store, page_size=50).poll()
+            boundary = npc_store.max_id()
+            # After the snapshot: we answered the citizen, then the platform moved on by a few pages.
+            ours = await p.post(me, "Same here, two hours on the wharf.", parent_id=target["id"])
+            for i in range(30):
+                await p.post(f"citizen_{i % 4}", citizen_text())
+            Path(f"{tmp}/{backup.MARKER}").write_text(json.dumps({"snapshot": "test", "newest_post": boundary}))
+
+            def team() -> Team:
+                t = Team(p, Distinct(0, 0), None, NpcStore(f"{tmp}/npc.db", own_usernames={me}),
+                         StateStore(f"{tmp}/bots.db"), personas=personas, collector_interval=0.01)
+                t.collector.page_size = 5
+                t.started = []
+
+                async def start(bot, until):
+                    t.started.append(("bot", backup.marker(Path(tmp)) is None))
+
+                async def blue(until):
+                    t.started.append(("blue", backup.marker(Path(tmp)) is None))
+
+                t._start, t._blue = start, blue
+                return t
+
+            p.down = True  # reads keep failing
+            first = team()
+            await first.run(loop.time() + 0.3)
+            assert first.started == [] and backup.marker(Path(tmp))["newest_post"] == boundary
+            assert first.state.get_meta("report_floor") is None and first.state.made_ids() == set()
+
+            p.down = False  # readable, but one 5-post page per round and the deadline comes first
+            second = team()
+            second.collector.min_interval = 0.2
+            await second.run(loop.time() + 0.3)
+            assert second.started == [] and backup.marker(Path(tmp)) is not None, "started with a gap left"
+
+            third = team()  # a restart halfway: same boundary, carries on from the saved gap
+            third.state.set_meta("report_floor", "999999")
+
+            async def no_catch_up(until):  # the restore itself must take our posts in, not the routine catch-up
+                return False
+
+            third.catch_up = no_catch_up
+            await third.run(loop.time() + 10)
+            assert backup.marker(Path(tmp)) is None and third.npc_store.gaps_above(boundary) == 0
+            assert sorted(third.started) == [("blue", True), ("bot", True)], third.started
+            assert ours["id"] in third.state.made_ids() and third.state.claimed([f"post:{target['id']}"])
+            assert third.state.get_meta("report_floor") == "999999", "the floor was lowered"
+    finally:
+        CATCH_UP_PAGES, RESTORE_RETRY = saved
+    print("restore gate ok")
+
+
 async def blue_gate_check() -> None:
     """Blue waits for the start like the bots, never logs in once the run's deadline has passed, gives up promptly
     when the deadline comes while waiting or logging in, and shares its account's login with that account's bot."""
@@ -740,6 +855,7 @@ if __name__ == "__main__":
         schedule_check()
         asyncio.run(unresolved_check())
         asyncio.run(interrupted_check())
+        asyncio.run(restore_check())
         asyncio.run(blue_gate_check())
         asyncio.run(smoke())
     else:
