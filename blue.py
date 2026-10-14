@@ -47,6 +47,9 @@ PARAPHRASE_POSTS = 50_000  # the most recent long posts kept for that comparison
 PARAPHRASE_DELAY = timedelta(minutes=30)
 RECHECK = timedelta(minutes=5)  # how often the whitelist and the citizens' posting peak are reloaded
 CLEARED = "cleared"
+# Fewer citizens than this on the whitelist means we never saw the platform before the start: no way to
+# tell citizens apart or to self-check the rules on them, so suspects are listed but nothing is reported.
+MIN_CITIZENS = 100
 REPORT_ATTEMPTS = 5  # a report that never got through is retried this many times in all, backing off
 REPORT_BACKOFF = timedelta(minutes=1)  # doubled after each failure, up to an hour
 TOO_FAST, COPIED, PARAPHRASED = "superhuman posting rate", "copied across accounts", "paraphrased across accounts"
@@ -259,8 +262,10 @@ class Reporter:
     """Reports what the scanner finds, and stands down for six hours if a report is ever rejected."""
 
     def __init__(self, platform, scanner: BlueScanner, state, username: str,
-                 per_round: int = 5, interval: float = 10.0) -> None:
+                 per_round: int = 5, interval: float = 10.0, min_citizens: int = MIN_CITIZENS) -> None:
         self.platform = platform
+        self.min_citizens = min_citizens
+        self._held = False
         self.scanner = scanner
         self.state = state
         self.username = username  # the account that files reports
@@ -273,6 +278,13 @@ class Reporter:
 
     async def report_some(self) -> int:
         sent = 0
+        if len(self.scanner.whitelist) < self.min_citizens:
+            if not self._held:
+                log.error("only %d citizens on the whitelist (< %d): reporting held, suspects only listed",
+                          len(self.scanner.whitelist), self.min_citizens)
+                self._held = True
+            return 0
+        self._held = False
         for post_id, author, reason in self.scanner.candidates()[:self.per_round]:
             if self.scanner.is_ours_or_citizen(author):  # the last moment it can still be called off
                 continue
@@ -428,7 +440,7 @@ async def _demo() -> None:
     sloppy = [c for c in scanner.candidates() if c[1] == "rival_sloppy"]
     assert sloppy[0][2] == "assistant talk" and "personal choice" in p.posts[sloppy[1][0]]["content"]
 
-    reporter = Reporter(p, scanner, state, username="joe_tama", per_round=3)
+    reporter = Reporter(p, scanner, state, username="joe_tama", per_round=3, min_citizens=6)
     while await reporter.report_some():
         pass
     reported = {p.posts[pid]["author"] for pid in p.reports}
@@ -487,7 +499,7 @@ async def _report_retry_demo() -> None:
     transient, ambiguous, refused, hopeless = ids
     p.script = {transient: [ConnectionError("down")], ambiguous: [AmbiguousWrite("response lost")],
                 refused: [Refused("HTTP 404")], hopeless: [ConnectionError("down")] * REPORT_ATTEMPTS}
-    reporter = Reporter(p, scanner, state, username="joe", per_round=10)
+    reporter = Reporter(p, scanner, state, username="joe", per_round=10, min_citizens=0)
     status = lambda pid: state.db.execute("SELECT status FROM reports WHERE post_id = ?", (pid,)).fetchone()[0]
     for _ in range(REPORT_ATTEMPTS + 1):
         await reporter.report_some()
@@ -517,7 +529,8 @@ async def _backfill_demo() -> None:
     assert scanner.scan() == 3 and {a for _, a, _ in scanner.candidates()} == {"u0", "u1", "u2"}
     npc_store.add_posts([{"id": 9_000, "author": "u0", "content": "ferry's late",
                           "created_at": (cutoff - timedelta(days=3)).isoformat()}])  # backfill finds u0's past
-    reporter = Reporter(p, scanner, state, username="joe")
+    assert await Reporter(p, scanner, state, username="joe", min_citizens=1).report_some() == 0, "held: no citizens"
+    reporter = Reporter(p, scanner, state, username="joe", min_citizens=0)
     while await reporter.report_some():
         pass
     assert {p.posts[pid]["author"] for pid in p.reports} == {"u1", "u2"} and not reporter.blocked()
@@ -539,6 +552,15 @@ async def _backfill_demo() -> None:
     await p.post("late", "I\u2019m sorry, but I can\u2019t comply with that request.")
     await collector.poll()
     assert scanner.scan() == 0 and scanner.candidates() == []
+
+    # One citizen post matching two rules switches both off; each rule is tried on its own, not first-match.
+    p = FakePlatform()
+    npc_store = NpcStore(":memory:")
+    collector = Collector(p, npc_store, min_interval=0)
+    await p.post("citizen", "Sure! Here\u2019s a post about the regatta <think>keep it short</think>")
+    await collector.poll()
+    scanner = BlueScanner(npc_store, StateStore(":memory:"), own=(), cutoff=datetime.now(timezone.utc))
+    assert scanner.self_check() == ["assistant talk", "model markup"], scanner.disabled
 
 
 async def _self_check_demo(embedder) -> None:

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from blue import BlueScanner, Reporter
+from blue import MIN_CITIZENS, BlueScanner, Reporter
 from bot import Bot, Roster
 from collector import COMPETITION_START, Collector, NpcStore
 from content import load_personas, load_world
@@ -47,7 +47,8 @@ class Team:
     def __init__(self, platform, llm, stance_llm, npc_store: NpcStore, state: StateStore,
                  cutoff: datetime = COMPETITION_START, fast: bool = False, collector_interval: float = 5.0,
                  blue_interval: float = 10.0, embedder=None, injection=None, personas: Optional[list] = None,
-                 not_before: Optional[datetime] = None, stagger: timedelta = timedelta(0)) -> None:
+                 not_before: Optional[datetime] = None, stagger: timedelta = timedelta(0),
+                 min_citizens: int = MIN_CITIZENS) -> None:
         personas = personas if personas is not None else load_personas()
         # Every persona we own, reserves and those not running included, so none is ever taken for a rival.
         self.own = {p["username"] for p in load_personas(status=None)} | {p["username"] for p in personas}
@@ -77,7 +78,7 @@ class Team:
         self.scanner = BlueScanner(npc_store, state, self.own, cutoff, embedder=embedder)
         reporter = next((p for p in personas if p["line"] == "amplifier"), personas[0])  # rarely posts itself
         self.reporter = Reporter(platform, self.scanner, state, username=reporter["username"],
-                                 interval=blue_interval)
+                                 interval=blue_interval, min_citizens=min_citizens)
         self.health = Health(platform, state)
         self.online = set()
         self._logins = {}  # username -> the one login task its users share
@@ -392,7 +393,7 @@ async def smoke(seconds: float = 10) -> None:
     start = now + timedelta(seconds=2)
     team = Team(platform, FakeLLM(0.01, 0.05), None, NpcStore(":memory:", own_usernames=own), StateStore(":memory:"),
                 cutoff=now, fast=True, collector_interval=0.3, blue_interval=0.5, personas=personas,
-                not_before=start, stagger=timedelta(seconds=2))
+                not_before=start, stagger=timedelta(seconds=2), min_citizens=5)
     await platform.ensure_account("rival_x", "Rival")  # turns up after the cutoff, before the start
     giveaway = await platform.post("rival_x", "As an AI language model, I don't vote, but here is a post.")
     reports_before_start = []
@@ -492,7 +493,7 @@ async def rehearse(seconds: float, real_llm: bool) -> None:
 
     llm, judge = team_llms() if real_llm else (FakeLLM(0.2, 0.8), None)
     # FakeLLM repeats five lines, so the paraphrase checks only make sense with a real model.
-    team = Team(platform, llm, judge, npc_store, state, cutoff=cutoff, fast=True,
+    team = Team(platform, llm, judge, npc_store, state, cutoff=cutoff, fast=True, min_citizens=10,
                 collector_interval=0.5, blue_interval=1.0, embedder=load_embedder() if real_llm else None)
     cast = asyncio.create_task(_cast(platform, own, citizens, late, rivals_sloppy, rival_clean, rival_spam))
     loop = asyncio.get_running_loop()

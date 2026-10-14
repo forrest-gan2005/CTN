@@ -1,3 +1,9 @@
-httpx
-scikit-learn
-sentence-transformers
+# Pinned to what the code was tested with (Python 3.9). On a CUDA machine install the matching torch
+# build first (pytorch.org), then the rest.
+httpx==0.28.1
+numpy==2.0.2
+scikit-learn==1.6.1
+joblib==1.5.3
+torch==2.8.0
+transformers==4.57.6
+sentence-transformers==5.1.2
