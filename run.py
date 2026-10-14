@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import json
 import logging
 import os
 import random
@@ -60,6 +61,10 @@ class Team:
         self.not_before = not_before  # no bot acts before this (the start); the collector starts at once
         self.stagger = stagger  # new accounts come online one by one over this long, not all at the start
         self.embedder = embedder  # None turns every meaning-level check off
+        writes, reports = state.recover()
+        if writes or reports:
+            log.warning("%d posts/replies and %d reports were mid-request when the last run stopped; "
+                        "they may have landed, so they are reconciled, never resent", writes, reports)
         self.twins = None
         if embedder is not None:
             self.twins = NearIndex(embedder, TEAM_RECENT)
@@ -274,6 +279,17 @@ def schedule_check() -> None:
     print("schedule ok")
 
 
+class Distinct(FakeLLM):
+    """FakeLLM's five lines soon trip the similarity check; these never resemble each other."""
+    lines = ["The reef off New Haven looked grey on today's dive.",
+             "Landlord still hasn't fixed the leak, and rent went up again.",
+             "Regatta week was loud, crowded and the best fun all year."]
+
+    async def generate(self, system: str, prompt: str) -> Optional[str]:
+        self.calls += 1
+        return self.lines[(self.calls - 1) % len(self.lines)]
+
+
 async def unresolved_check() -> None:
     """A post whose answer was lost is recorded, sent once only, kept across a restart and settled from what the
     collector sees; one that never landed is marked so after a while, and not resent either."""
@@ -290,16 +306,6 @@ async def unresolved_check() -> None:
                     await super().post(username, content, parent_id)
                 raise AmbiguousWrite("POST /twoots/: ReadTimeout")
             return await super().post(username, content, parent_id)
-
-    class Distinct(FakeLLM):
-        """FakeLLM's five lines soon trip the similarity check; these never resemble each other."""
-        lines = ["The reef off New Haven looked grey on today's dive.",
-                 "Landlord still hasn't fixed the leak, and rent went up again.",
-                 "Regatta week was loud, crowded and the best fun all year."]
-
-        async def generate(self, system: str, prompt: str) -> Optional[str]:
-            self.calls += 1
-            return self.lines[(self.calls - 1) % len(self.lines)]
 
     global UNRESOLVED_GIVE_UP
     saved = bot_module.ACTION_WEIGHTS, UNRESOLVED_GIVE_UP
@@ -334,6 +340,121 @@ async def unresolved_check() -> None:
     finally:
         bot_module.ACTION_WEIGHTS, UNRESOLVED_GIVE_UP = saved
     print("unresolved writes ok")
+
+
+class Cut(FakePlatform):
+    """Our next post or reply is cut off mid-request: before the platform stores it, after (the answer never
+    comes back), or the process is killed while it waits for the answer."""
+    when = None  # None | "before" | "after" | "hang"
+    landed = None  # with "hang": a file the published post is written to, so a parent process sees it
+
+    async def post(self, username: str, content: str, parent_id: Optional[int] = None) -> dict:
+        if self.when == "before":
+            raise asyncio.CancelledError()
+        out = await super().post(username, content, parent_id)
+        if self.when == "after":
+            raise asyncio.CancelledError()
+        if self.when == "hang":
+            Path(self.landed).write_text(json.dumps({"content": content, "parent_id": parent_id}))
+            await asyncio.Event().wait()
+        return out
+
+
+async def _killed_child(tmp: str) -> None:
+    """Runs in a subprocess the parent kills while the post is waiting for its answer."""
+    import bot as bot_module
+
+    bot_module.ACTION_WEIGHTS = {"post": 1}
+    p = Cut()
+    p.when, p.landed = "hang", f"{tmp}/landed.json"
+    persona = load_personas()[0]
+    me = Bot(persona, p, Distinct(0, 0), load_world(), roster=Roster(own={persona["username"]}),
+             store=StateStore(f"{tmp}/bots.db"))
+    await me.step()
+
+
+async def interrupted_check() -> None:
+    """A post or reply cut off mid-request, before or after the platform stored it, or by the process being
+    killed: it is journalled before sending, so it is kept, never resent, and found by the next start's
+    reconciliation; a reply keeps its claim, so no teammate answers that post again."""
+    import subprocess
+    import sys
+    import tempfile
+
+    import bot as bot_module
+
+    personas = load_personas()[:1]
+    me = personas[0]["username"]
+    ours = lambda p: [x for x in p.posts.values() if x["author"] == me]
+    saved = bot_module.ACTION_WEIGHTS
+    try:
+        for kind in ("post", "reply"):
+            for when in ("before", "after"):
+                with tempfile.TemporaryDirectory() as tmp:
+                    p, npc_store = Cut(), NpcStore(":memory:", own_usernames={me})
+                    target = await p.post("npc_1", "anyone else stuck at the wharf this morning")
+                    bot_module.ACTION_WEIGHTS = {kind: 1}
+                    roster = Roster(own={me}, npcs=["npc_1"])
+                    first = Bot(personas[0], p, Distinct(0, 0), load_world(), roster=roster,
+                                store=StateStore(f"{tmp}/bots.db"))
+                    p.when = when
+                    try:
+                        await first.step()
+                        raise AssertionError("the cancellation was swallowed")
+                    except asyncio.CancelledError:
+                        pass
+                    p.when = None
+                    landed = ours(p)
+                    assert len(landed) == (when == "after")
+                    restarted = StateStore(f"{tmp}/bots.db")
+                    history = restarted.load_history(me)
+                    assert len(restarted.unresolved()) == 1 and [h[1] for h in history] == [kind], (kind, when)
+                    assert history[0][9] is None and restarted.made_posts("") == []
+                    if kind == "reply":
+                        assert restarted.claimed([f"post:{target['id']}"]) and target["id"] in restarted.load_seen(me)
+                    await Collector(p, npc_store).poll()
+                    team = Team(p, Distinct(0, 0), None, npc_store, restarted, personas=personas)
+                    team.reconcile()
+                    if when == "after":
+                        assert restarted.unresolved() == [], (kind, when)
+                        assert [pid for _, pid, _ in restarted.made_posts("")] == [landed[0]["id"]]
+                    else:
+                        assert len(restarted.unresolved()) == 1, "given up while the collector may still see it"
+                    again = Bot(personas[0], p, Distinct(0, 0), load_world(), roster=roster, store=restarted)
+                    again.llm.calls = 1  # carry on after the interrupted line
+                    await again.step()
+                    replies = [x for x in ours(p) if x["parent_id"] == target["id"]]
+                    assert len(replies) == (kind == "reply" and when == "after"), "a teammate answered it again"
+                    assert sum(x["content"] == Distinct.lines[0] for x in ours(p)) == (when == "after"), "resent"
+
+        # Killed outright while the post waits for its answer: nothing but the journal row is left.
+        with tempfile.TemporaryDirectory() as tmp:
+            child = subprocess.Popen([sys.executable, "-c", "import asyncio, sys, run; "
+                                      "asyncio.run(run._killed_child(sys.argv[1]))", tmp],
+                                     cwd=Path(__file__).parent, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                for _ in range(600):
+                    if Path(f"{tmp}/landed.json").exists() or child.poll() is not None:
+                        break
+                    await asyncio.sleep(0.1)
+                assert Path(f"{tmp}/landed.json").exists(), "the child never published"
+            finally:
+                child.kill()
+                child.wait()
+            published = json.loads(Path(f"{tmp}/landed.json").read_text())
+            p, npc_store = FakePlatform(), NpcStore(":memory:", own_usernames={me})
+            post_id = (await p.post(me, published["content"]))["id"]  # what the platform shows after the restart
+            store = StateStore(f"{tmp}/bots.db")
+            assert store.unresolved("sending") and store.load_history(me) == [], "the child got past sending"
+            await Collector(p, npc_store).poll()
+            team = Team(p, Distinct(0, 0), None, npc_store, store, personas=personas)  # starting up recovers it
+            assert store.unresolved("sending") == []
+            team.reconcile()
+            assert store.unresolved() == [] and [pid for _, pid, _ in store.made_posts("")] == [post_id]
+            assert [(h[1], h[3]) for h in store.load_history(me)] == [("post", published["content"])]
+    finally:
+        bot_module.ACTION_WEIGHTS = saved
+    print("interrupted writes ok")
 
 
 async def blue_gate_check() -> None:
@@ -551,6 +672,7 @@ if __name__ == "__main__":
     elif args.cmd == "smoke":
         schedule_check()
         asyncio.run(unresolved_check())
+        asyncio.run(interrupted_check())
         asyncio.run(blue_gate_check())
         asyncio.run(smoke())
     else:

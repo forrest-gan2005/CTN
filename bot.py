@@ -9,7 +9,7 @@ from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
 from content import load_personas, load_vaccine_angles, load_world
-from fake_platform import AmbiguousWrite, FakePlatform
+from fake_platform import AmbiguousWrite, FakePlatform, RateLimited
 from guard import about_referendum, judge_stance, leans_no, looks_like_probe, output_problem, plain, wrap_external
 from llm import FakeLLM, team_llms
 from rhythm import UniformPacer
@@ -137,6 +137,16 @@ def topic_mix(line: str, day: date) -> dict:
 
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def _never_sent(e: BaseException) -> bool:
+    """The platform refused a write without publishing it: a rate limit, no such post, or another 4xx."""
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    return isinstance(e, (RateLimited, KeyError)) or (isinstance(status, int) and 400 <= status < 500)
+
+
+def _describe(e: BaseException) -> str:
+    return str(e) or type(e).__name__  # a timeout or a cancellation has no message
 
 
 class Bot:
@@ -515,9 +525,9 @@ class Bot:
         elif action.type == "follow":
             await self.platform.follow(self.username, action.target_author)
         elif action.type == "reply":
-            action.made_id = (await self.platform.reply(self.username, action.post_id, action.content))["id"]
+            action.made_id = (await self.platform.reply(self.username, action.post_id, action.content)).get("id")
         elif action.type == "post":
-            action.made_id = (await self.platform.post(self.username, action.content))["id"]
+            action.made_id = (await self.platform.post(self.username, action.content)).get("id")
         else:
             raise ValueError(f"unknown action type: {action.type}")
 
@@ -546,14 +556,35 @@ class Bot:
             log.info("%s went quiet; dropped a %s", self.username, action.type)
             return None
         sent_at = _iso(datetime.now(timezone.utc))
+        write = None
+        if action.type in ("post", "reply"):
+            write = self.store.begin_write(self.username, action.type, action.post_id, action.content, sent_at)
         try:
             await self.act(action)
         except AmbiguousWrite as e:
-            # It may be live: keep it in history (without an id until the team finds it) and never resend it.
-            self.store.add_unresolved(self.username, action.type, action.post_id, action.content, sent_at, str(e))
-            log.warning("%s: %s may or may not have been published (%s)", self.username, action.type, e)
+            self._maybe_live(action, write, str(e))
+            return action
+        except BaseException as e:  # including cancellation mid-request
+            if write is not None:
+                if _never_sent(e):
+                    self.store.end_write(write, "not_sent", error=_describe(e))
+                else:
+                    self._maybe_live(action, write, _describe(e))
+            raise
+        if write is not None:
+            if action.made_id is None:
+                self._maybe_live(action, write, "published without an id")
+                return action
+            self.store.end_write(write, "sent", action.made_id)
         self.remember(action)
         return action
+
+    def _maybe_live(self, action: Action, write: Optional[int], why: str) -> None:
+        """It may be live: keep it in history (without an id until the team finds it) and never resend it."""
+        if write is not None:
+            self.store.end_write(write, "pending", error=why)
+        log.warning("%s: %s may or may not have been published (%s)", self.username, action.type, why)
+        self.remember(action)
 
     async def run(self, until: float, pacer) -> None:
         """Step whenever the pacer says, until loop time `until`."""

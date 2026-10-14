@@ -48,16 +48,22 @@ CREATE TABLE IF NOT EXISTS reports (
     attempts INTEGER NOT NULL DEFAULT 1,
     next_try TEXT              -- for errors: not before this
 );
-CREATE TABLE IF NOT EXISTS unresolved (
+CREATE TABLE IF NOT EXISTS writes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL,    -- a post or reply that may or may not have been published: never resent
+    username TEXT NOT NULL,    -- a post or reply, journalled before it is sent; one that may be live is never resent
     kind TEXT NOT NULL,
     parent_id INTEGER,
     content TEXT NOT NULL,
     sent_at TEXT NOT NULL,
-    status TEXT NOT NULL,      -- pending | found | not_found
+    status TEXT NOT NULL,      -- sending | sent | not_sent | pending (may or may not be live) | found | not_found
     made_id INTEGER,
     error TEXT
+);
+CREATE TABLE IF NOT EXISTS report_intents (
+    post_id INTEGER PRIMARY KEY, -- a report on its way; one left here when the process stopped may have arrived
+    author TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS engagement (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -244,29 +250,68 @@ class StateStore:
         return {r[0] for r in self.db.execute("SELECT DISTINCT reason FROM reports WHERE status = 'rejected'")}
 
     def reported(self, now: str = "9999") -> set:
-        """Posts not to report (again) now: everything except failures that never arrived and are due a retry."""
+        """Posts not to report (again) now: everything except failures that never arrived and are due a retry,
+        including reports on their way."""
         return {r[0] for r in self.db.execute(
-            "SELECT post_id FROM reports WHERE status != 'error' OR next_try > ?", (now,))}
+            "SELECT post_id FROM reports WHERE status != 'error' OR next_try > ? "
+            "UNION SELECT post_id FROM report_intents", (now,))}
 
-    def add_unresolved(self, username: str, kind: str, parent_id: Optional[int], content: str, sent_at: str,
-                       error: str) -> None:
+    def begin_report(self, post_id: int, author: str, reason: str, at: str) -> None:
         with self.db:
-            self.db.execute("INSERT INTO unresolved (username, kind, parent_id, content, sent_at, status, error) "
-                            "VALUES (?, ?, ?, ?, ?, 'pending', ?)", (username, kind, parent_id, content, sent_at, error))
+            self.db.execute("INSERT OR REPLACE INTO report_intents VALUES (?, ?, ?, ?)", (post_id, author, reason, at))
+
+    def end_report(self, post_id: int) -> None:
+        """The report's request came back, one way or another; its outcome is recorded separately."""
+        with self.db:
+            self.db.execute("DELETE FROM report_intents WHERE post_id = ?", (post_id,))
+
+    def begin_write(self, username: str, kind: str, parent_id: Optional[int], content: str, sent_at: str) -> int:
+        """Journal a post or reply before sending it, so one interrupted mid-request is neither lost nor resent."""
+        with self.db:
+            return self.db.execute("INSERT INTO writes (username, kind, parent_id, content, sent_at, status) "
+                                   "VALUES (?, ?, ?, ?, ?, 'sending')", (username, kind, parent_id, content, sent_at)
+                                   ).lastrowid
+
+    def end_write(self, write_id: int, status: str, made_id: Optional[int] = None, error: Optional[str] = None) -> None:
+        with self.db:
+            self.db.execute("UPDATE writes SET status = ?, made_id = ?, error = ? WHERE id = ?",
+                            (status, made_id, error, write_id))
+
+    def recover(self) -> tuple:
+        """At startup: writes and reports still on their way when the last process stopped may have landed.
+        Writes become pending, to be reconciled; reports become unknown. Neither is resent.
+        Returns how many of each."""
+        with self.db:
+            writes = self.db.execute("UPDATE writes SET status = 'pending', error = 'interrupted' "
+                                     "WHERE status = 'sending'").rowcount
+            reports = self.db.execute(
+                "INSERT INTO reports (post_id, author, reason, reported_at, status) "
+                "SELECT post_id, author, reason, at, 'unknown' FROM report_intents WHERE true "
+                "ON CONFLICT(post_id) DO UPDATE SET status = 'unknown', reported_at = excluded.reported_at, "
+                "next_try = NULL WHERE status = 'error'").rowcount  # an outcome recorded before the stop stands
+            self.db.execute("DELETE FROM report_intents")
+        return writes, reports
 
     def unresolved(self, status: str = "pending") -> list:
-        """(id, username, kind, parent_id, content, sent_at) of writes whose outcome we don't know yet."""
-        return self.db.execute("SELECT id, username, kind, parent_id, content, sent_at FROM unresolved "
+        """(id, username, kind, parent_id, content, sent_at) of writes in this state; pending means we don't
+        know whether it was published."""
+        return self.db.execute("SELECT id, username, kind, parent_id, content, sent_at FROM writes "
                                "WHERE status = ? ORDER BY id", (status,)).fetchall()
 
-    def resolve(self, unresolved_id: int, status: str, made_id: Optional[int] = None) -> None:
-        """Settle an unresolved write; once found, its post id also goes into history, so it is watched."""
+    def resolve(self, write_id: int, status: str, made_id: Optional[int] = None) -> None:
+        """Settle a write whose outcome was unknown. A found one gets its post id in history, so it is watched;
+        if the process died before history was written, the history row is added now."""
         with self.db:
-            self.db.execute("UPDATE unresolved SET status = ?, made_id = ? WHERE id = ?", (status, made_id, unresolved_id))
+            self.db.execute("UPDATE writes SET status = ?, made_id = ? WHERE id = ?", (status, made_id, write_id))
             if made_id is not None:
-                self.db.execute("UPDATE history SET made_id = ? WHERE id = (SELECT h.id FROM history h JOIN unresolved u "
-                                "ON h.username = u.username AND h.content = u.content AND h.ts >= u.sent_at "
-                                "WHERE u.id = ? AND h.made_id IS NULL ORDER BY h.id LIMIT 1)", (made_id, unresolved_id))
+                linked = self.db.execute(
+                    "UPDATE history SET made_id = ? WHERE id = (SELECT h.id FROM history h JOIN writes w "
+                    "ON h.username = w.username AND h.content = w.content AND h.ts >= w.sent_at "
+                    "WHERE w.id = ? AND h.made_id IS NULL ORDER BY h.id LIMIT 1)", (made_id, write_id)).rowcount
+                if not linked:
+                    self.db.execute("INSERT INTO history (username, ts, type, post_id, content, made_id) "
+                                    "SELECT username, sent_at, kind, parent_id, content, ? FROM writes WHERE id = ?",
+                                    (made_id, write_id))
 
     def ingest_notifications(self, username: str, notes: list, replies: list, received_at: str) -> int:
         """Store notifications as engagement feedback and queue the replies to answer, all in one transaction;

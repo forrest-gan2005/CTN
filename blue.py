@@ -289,8 +289,13 @@ class Reporter:
         for post_id, author, reason in self.scanner.candidates()[:self.per_round]:
             if self.scanner.is_ours_or_citizen(author):  # the last moment it can still be called off
                 continue
+            # Stored first: if the process stops mid-request, the next start marks the report unknown, never resends it.
+            self.state.begin_report(post_id, author, reason, _now())
             try:
                 upheld = await self.platform.report(self.username, post_id)
+            except asyncio.CancelledError:
+                self.state.record_report(post_id, author, reason, _now(), "unknown")
+                raise
             except ReportingSuspended as e:
                 self.blocked_until = datetime.now(timezone.utc) + REPORT_SUSPENSION
                 log.warning("reporting suspended (%s); standing down until %s", e, self.blocked_until)
@@ -321,16 +326,19 @@ class Reporter:
                     log.warning("report on #%s didn't get through (%s); retrying after %s", post_id,
                                 str(e) or type(e).__name__, retry)
                 continue
-            status = {True: "upheld", False: "rejected"}.get(upheld, "sent")
-            self.state.record_report(post_id, author, reason, _now(), status)
-            sent += 1
-            log.info("reported #%s by %s (%s): %s", post_id, author, reason, status)
-            if status == "rejected":
-                # A citizen after all: our rule misfired. Never touch this account again, and wait out the ban.
-                self.state.update_suspect(author, CLEARED)
-                self.blocked_until = datetime.now(timezone.utc) + REPORT_SUSPENSION
-                self.scanner.disable(rule_of(reason), f"report on #{post_id} by {author} was rejected")
-                break
+            else:
+                status = {True: "upheld", False: "rejected"}.get(upheld, "sent")
+                self.state.record_report(post_id, author, reason, _now(), status)
+                sent += 1
+                log.info("reported #%s by %s (%s): %s", post_id, author, reason, status)
+                if status == "rejected":
+                    # A citizen after all: our rule misfired. Never touch this account again, and wait out the ban.
+                    self.state.update_suspect(author, CLEARED)
+                    self.blocked_until = datetime.now(timezone.utc) + REPORT_SUSPENSION
+                    self.scanner.disable(rule_of(reason), f"report on #{post_id} by {author} was rejected")
+                    break
+            finally:
+                self.state.end_report(post_id)
         return sent
 
     async def run(self, until: Optional[float] = None) -> None:
@@ -472,6 +480,7 @@ async def _demo() -> None:
     await _backfill_demo()
     await _report_retry_demo()
     await _report_429_demo()
+    await _report_interrupt_demo()
     print("blue ok")
 
 
@@ -562,6 +571,59 @@ async def _report_retry_demo() -> None:
     assert [status(i) for i in ids] == ["upheld", "unknown", "failed", "failed"], [status(i) for i in ids]
     assert p.reports == {transient: ["joe"]}, "only the transient one reached the platform, once"
     assert state.report_attempts(hopeless) == REPORT_ATTEMPTS and scanner.candidates() == []
+
+
+async def _report_interrupt_demo() -> None:
+    """A report cut off mid-request may have arrived: cancelled, it is recorded unknown at once; if the process
+    dies instead, the next start finds its intent and marks it unknown. Either way it is never resent, and an
+    outcome recorded before the stop stands."""
+    from collector import Collector, NpcStore
+    from fake_platform import FakePlatform
+    from state import StateStore
+
+    class Stuck(FakePlatform):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.started, self.calls = asyncio.Event(), []
+
+        async def report(self, username: str, post_id: int) -> bool:
+            self.calls.append(post_id)
+            self.started.set()
+            await asyncio.Event().wait()  # the answer never comes
+            return True
+
+    p = Stuck(competitors={"rival"})
+    npc_store = NpcStore(":memory:")
+    cutoff = datetime.now(timezone.utc)
+    target = (await p.post("rival", "As an AI language model, I support the mandate"))["id"]
+    await Collector(p, npc_store, min_interval=0).poll()
+    state = StateStore(":memory:")
+    scanner = BlueScanner(npc_store, state, own=(), cutoff=cutoff)
+    scanner.scan()
+    reporter = Reporter(p, scanner, state, username="joe", min_citizens=0)
+    task = asyncio.ensure_future(reporter.report_some())
+    await p.started.wait()
+    assert state.reported() == {target}, "in flight, so not offered again"
+    task.cancel()
+    try:
+        await task
+        raise AssertionError("cancellation was swallowed")
+    except asyncio.CancelledError:
+        pass
+    status = lambda pid: state.db.execute("SELECT status FROM reports WHERE post_id = ?", (pid,)).fetchone()[0]
+    assert status(target) == "unknown" and state.db.execute("SELECT COUNT(*) FROM report_intents").fetchone()[0] == 0
+    assert await reporter.report_some() == 0 and p.calls == [target], "resent after cancellation"
+
+    # A process killed mid-request leaves only the intent behind.
+    state.begin_report(901, "rival", "assistant talk", "2026-10-20T00:00:00+00:00")  # fresh
+    state.record_report(902, "rival", "assistant talk", "2026-10-20T00:00:00+00:00", "error", "2000-01-01")
+    state.begin_report(902, "rival", "assistant talk", "2026-10-20T00:05:00+00:00")  # a retry
+    state.record_report(903, "rival", "assistant talk", "2026-10-20T00:00:00+00:00", "upheld")
+    state.begin_report(903, "rival", "assistant talk", "2026-10-20T00:00:00+00:00")  # died after recording
+    assert {901, 902, 903} <= state.reported()
+    assert state.recover() == (0, 2)
+    assert [status(i) for i in (901, 902, 903)] == ["unknown", "unknown", "upheld"]
+    assert {901, 902, 903} <= state.reported() and state.recover() == (0, 0)
 
 
 async def _backfill_demo() -> None:
