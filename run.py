@@ -13,7 +13,7 @@ from bot import Bot, Roster
 from collector import COMPETITION_START, Collector, NpcStore
 from content import load_personas, load_world
 from examples import NpcExamples
-from fake_platform import FakePlatform
+from fake_platform import AmbiguousWrite, FakePlatform
 from health import Health
 from llm import FakeLLM, game_day_start, ledger, load_env, team_llms
 from real_platform import AccountStore, MockLegitSocial, RealPlatform
@@ -35,6 +35,9 @@ HASHTAG_WINDOW = timedelta(hours=6)
 TEAM_RECENT = 1000  # our latest posts every new draft is checked against for paraphrase
 STATUS_EVERY = 1800.0
 LOGIN_RETRY = 60.0  # seconds between login attempts
+RECONCILE_EVERY = 300.0
+UNRESOLVED_GIVE_UP = timedelta(minutes=30)  # the collector reads Latest every few seconds, so by then it would show
+CLOCK_SKEW = timedelta(minutes=5)
 API_URL = "https://social.legitreal.com/api"  # the 2025 address in the organisers' SDK; override with $CTN_API_URL
 
 
@@ -106,6 +109,20 @@ class Team:
         log.info("refreshed: %d citizens, %d example posts (%s), hashtags %s",
                  len(self.roster.npcs), len(examples.posts), examples.mode or "too few", hashtags)
 
+    def reconcile(self) -> None:
+        """Settle posts and replies that may or may not have been published, from what the collector saw since:
+        found ones get their id (so health watches them); ones that never appeared are marked, not resent."""
+        now = datetime.now(timezone.utc)
+        for uid, username, kind, parent_id, content, sent_at in self.state.unresolved():
+            sent = datetime.fromisoformat(sent_at)
+            post_id = self.npc_store.find_post(username, content, sent - CLOCK_SKEW, parent_id)
+            if post_id is not None:
+                self.state.resolve(uid, "found", post_id)
+                log.info("%s's unresolved %s was published as #%s", username, kind, post_id)
+            elif now - sent > UNRESOLVED_GIVE_UP:
+                self.state.resolve(uid, "not_found")
+                log.warning("%s's unresolved %s never appeared; it is not resent", username, kind)
+
     def status(self) -> str:
         """One line on how the last hour went, for the log."""
         hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
@@ -115,7 +132,8 @@ class Team:
         return (f"status: {len(self.online)}/{len(self.bots)} bots online; last hour actions "
                 f"{self.state.action_counts(hour_ago)}, engagement {self.state.engagement_counts(hour_ago)}; "
                 f"reports {self.state.report_counts()}; takedowns {self.state.moderation_counts()}; quiet {quiet}; "
-                f"Blue rules off {sorted(self.scanner.disabled)}; {self.npc_store.count()} posts collected; "
+                f"Blue rules off {sorted(self.scanner.disabled)}; unresolved writes {len(self.state.unresolved())}; "
+                f"{self.npc_store.count()} posts collected; "
                 f"LLM calls today: {spend or 'none'}")
 
     def start_time(self, bot: Bot, now: datetime) -> datetime:
@@ -193,6 +211,7 @@ class Team:
 
     async def run(self, until: float, refresh_every: float = REFRESH_EVERY, status_every: float = STATUS_EVERY) -> None:
         background = [asyncio.create_task(self._every(refresh_every, self.refresh)),
+                      asyncio.create_task(self._every(min(RECONCILE_EVERY, refresh_every), self.reconcile)),
                       asyncio.create_task(self._every(status_every, lambda: log.info(self.status())))]
         try:
             await asyncio.gather(
@@ -252,6 +271,57 @@ def schedule_check() -> None:
         assert team.start_time(new, now + timedelta(hours=2)) == slot, "a restart must keep the slot"
         assert team.start_time(veteran, now) == base
     print("schedule ok")
+
+
+async def unresolved_check() -> None:
+    """A post whose answer was lost is recorded, sent once only, kept across a restart and settled from what the
+    collector sees; one that never landed is marked so after a while, and not resent either."""
+    import tempfile
+
+    import bot as bot_module
+
+    class Lossy(FakePlatform):
+        failures = []  # for our next posts: "landed" (stored, answer lost) or "lost" (never stored)
+
+        async def post(self, username: str, content: str, parent_id: Optional[int] = None) -> dict:
+            if self.failures:
+                if self.failures.pop(0) == "landed":
+                    await super().post(username, content, parent_id)
+                raise AmbiguousWrite("POST /twoots/: ReadTimeout")
+            return await super().post(username, content, parent_id)
+
+    global UNRESOLVED_GIVE_UP
+    saved = bot_module.ACTION_WEIGHTS, UNRESOLVED_GIVE_UP
+    bot_module.ACTION_WEIGHTS = {"post": 1}
+    personas = load_personas()[:1]
+    me = personas[0]["username"]
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            p, npc_store = Lossy(), NpcStore(":memory:", own_usernames={me})
+            team = Team(p, FakeLLM(0, 0), None, npc_store, StateStore(f"{tmp}/bots.db"), personas=personas)
+            p.failures = ["landed"]
+            action = await team.bots[0].step()
+            assert action.type == "post" and action.made_id is None
+            assert len([x for x in p.posts.values() if x["author"] == me]) == 1, "posted once, never resent"
+            restarted = StateStore(f"{tmp}/bots.db")
+            assert len(restarted.unresolved()) == 1 and restarted.made_posts("") == []
+            await Collector(p, npc_store).poll()
+            team = Team(p, FakeLLM(0, 0), None, npc_store, restarted, personas=personas)
+            team.reconcile()
+            found = [x["id"] for x in p.posts.values() if x["author"] == me]
+            assert restarted.unresolved() == [] and [pid for _, pid, _ in restarted.made_posts("")] == found
+            p.failures = ["lost"]
+            await team.bots[0].step()
+            assert len(restarted.unresolved()) == 1
+            team.reconcile()
+            assert len(restarted.unresolved()) == 1, "not given up while the collector may still see it"
+            UNRESOLVED_GIVE_UP = timedelta(0)
+            team.reconcile()
+            assert restarted.unresolved() == [] and len(restarted.unresolved("not_found")) == 1
+            assert len([x for x in p.posts.values() if x["author"] == me]) == 1
+    finally:
+        bot_module.ACTION_WEIGHTS, UNRESOLVED_GIVE_UP = saved
+    print("unresolved writes ok")
 
 
 async def blue_gate_check() -> None:
@@ -428,6 +498,9 @@ async def rehearse(seconds: float, real_llm: bool) -> None:
         counts[key] = counts.get(key, 0) + 1
     reported = {platform.posts[pid]["author"] for pid in platform.reports}
     sloppy_posters = {p["author"] for p in platform.posts.values() if p["content"] in SLOPPY}
+    # A giveaway in the last seconds may not have been collected and scanned before the run ended.
+    settled = (datetime.now(timezone.utc) - timedelta(seconds=3)).isoformat()
+    early_sloppy = {p["author"] for p in platform.posts.values() if p["content"] in SLOPPY and p["created_at"] < settled}
     print(f"\n{len(team.bots)} bots, {len(actions)} actions: {dict(sorted(counts.items()))}")
     print(f"collected {npc_store.count()}/{len(platform.posts)} posts; {len(team.roster.npcs)} citizens whitelisted")
     print(f"blue: {len(platform.reports)} reports, {len(platform.hidden)} upheld, accounts hit {sorted(reported)}")
@@ -436,7 +509,7 @@ async def rehearse(seconds: float, real_llm: bool) -> None:
     leans = {a.angle for a in actions if a.type == "reply" and a.angle}
     print(f"reply targets by lean: {sorted(leans)}; lines active: {sorted({b.line for b in team.bots})}")
     assert platform.reporting_blocked_until is None, "a citizen was reported"
-    assert reported == sloppy_posters | {rival_spam}, (reported, sloppy_posters)
+    assert early_sloppy | {rival_spam} <= reported <= sloppy_posters | {rival_spam}, (reported, sloppy_posters)
     touched = [a.post_id for a in actions if a.type in ("like", "reply", "repost")]
     assert len(touched) == len(set(touched)), "two of our accounts acted on the same post"
     assert all(a.target_author not in own for a in actions if a.target_author)
@@ -463,6 +536,7 @@ if __name__ == "__main__":
         asyncio.run(live(args.limit, args.stagger))
     elif args.cmd == "smoke":
         schedule_check()
+        asyncio.run(unresolved_check())
         asyncio.run(blue_gate_check())
         asyncio.run(smoke())
     else:

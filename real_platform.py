@@ -1,14 +1,17 @@
 import asyncio
+import email.utils
 import logging
+import random
 import secrets
 import sqlite3
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 import httpx
 
-from fake_platform import ReportingSuspended
+from fake_platform import AmbiguousWrite, RateLimited, ReportingSuspended
 
 log = logging.getLogger("platform")
 
@@ -16,6 +19,33 @@ DEFAULT_ACCOUNTS_DB = Path(__file__).parent / "data" / "accounts.db"
 LIST_KEYS = ("data", "items", "results", "posts", "twoots", "notifications")
 MAX_RETRIES = 4
 MAX_CONCURRENT = 8
+MAX_RATE_WAIT = 300.0  # seconds a request will wait out a rate limit; longer and it fails at once instead
+JITTER = 1.0  # seconds, only ever added to a server-given wait
+# Requests that never reached the server: safe to repeat even when they create something.
+NOT_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+
+
+def retry_after(resp: httpx.Response, now: datetime) -> Optional[float]:
+    """Seconds the server asked us to wait, from delay-seconds or an HTTP-date (RFC 9110 10.2.3);
+    None when the header is missing or malformed."""
+    value = (resp.headers.get("retry-after") or "").strip()
+    if value.isdigit():
+        return float(value)
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - now).total_seconds())
+
+
+def _scope(path: str) -> str:
+    """Rate limits are shared by every request in a scope. Their real scope is unknown until launch, so all
+    requests share one (the cautious choice), except reports: a reporting ban mustn't stall the bots."""
+    return "report" if path.rstrip("/").endswith("/report") else "default"
 NOTIFICATION_KINDS = {"comment": "reply", "mention": "reply", "reply": "reply", "like": "like",
                       "repost": "repost", "follow": "follow"}
 
@@ -132,6 +162,9 @@ class RealPlatform:
         self.accounts = accounts or AccountStore()
         self.max_concurrent = max_concurrent
         self._sem: Optional[asyncio.Semaphore] = None  # created inside the running loop (Python 3.9)
+        self.blocked_until = {}  # rate-limit scope -> monotonic time before which nothing in it is sent
+        self.clock = time.monotonic  # replaced by a fake clock in tests
+        self.sleep = asyncio.sleep
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -155,7 +188,8 @@ class RealPlatform:
         (await self._call("POST", "/users/me", username, json={"display_name": display_name, "bio": bio})).raise_for_status()
 
     async def post(self, username: str, content: str, parent_id: Optional[int] = None) -> dict:
-        resp = await self._call("POST", "/twoots/", username, json={"content": content, "parent_id": parent_id})
+        resp = await self._call("POST", "/twoots/", username, json={"content": content, "parent_id": parent_id},
+                                idempotent=False)
         resp.raise_for_status()
         return normalise_post(_unwrap(resp.json()))
 
@@ -220,7 +254,8 @@ class RealPlatform:
 
     async def report(self, username: str, post_id: int, reason: str = "inauthentic") -> None:
         """File a report; the moderator rules later, so the outcome isn't known here."""
-        resp = await self._call("POST", f"/twoots/{post_id}/report", username, json={"reason": reason})
+        resp = await self._call("POST", f"/twoots/{post_id}/report", username, json={"reason": reason},
+                                idempotent=False)
         if resp.status_code in (403, 429) and any(w in resp.text.lower() for w in ("suspend", "block", "banned")):
             raise ReportingSuspended(resp.text[:200])
         resp.raise_for_status()
@@ -251,33 +286,60 @@ class RealPlatform:
             return {"Cookie": f"{kind.split(':', 1)[1]}={value}"}
         return {"Authorization": f"Bearer {value}"}
 
-    async def _call(self, method: str, path: str, username: str, **kwargs) -> httpx.Response:
-        """An authenticated request; logs in again once if the session has expired."""
-        resp = await self._send(method, path, headers=self._auth_headers(username), **kwargs)
+    async def _call(self, method: str, path: str, username: str, idempotent: bool = True,
+                    **kwargs) -> httpx.Response:
+        """An authenticated request; logs in again once if the session has expired (a 401 created nothing)."""
+        resp = await self._send(method, path, idempotent, headers=self._auth_headers(username), **kwargs)
         if resp.status_code == 401:
             await self.ensure_account(username, username)
-            resp = await self._send(method, path, headers=self._auth_headers(username), **kwargs)
+            resp = await self._send(method, path, idempotent, headers=self._auth_headers(username), **kwargs)
         return resp
 
-    async def _send(self, method: str, path: str, **kwargs) -> httpx.Response:
-        """One request, retried with backoff on rate limits, server errors and dropped connections."""
+    async def _send(self, method: str, path: str, idempotent: bool = True, **kwargs) -> httpx.Response:
+        """One request, retried on rate limits, server errors and dropped connections.
+
+        A rate limit is waited out in full (never retried early), for every request in its scope; one longer than
+        MAX_RATE_WAIT raises RateLimited instead. A request that isn't idempotent (it creates a post or a report)
+        is only repeated when it can't have reached the server; otherwise it raises AmbiguousWrite.
+        """
         if self._sem is None:
             self._sem = asyncio.Semaphore(self.max_concurrent)
+        scope = _scope(path)
+        resp, error = None, None
         for attempt in range(MAX_RETRIES):
+            wait = self.blocked_until.get(scope, 0.0) - self.clock()
+            if wait > MAX_RATE_WAIT:
+                raise RateLimited(wait)
+            if wait > 0:
+                await self.sleep(wait + random.uniform(0, JITTER))
+            delay = 2.0 ** attempt
             try:
                 async with self._sem:
-                    resp = await self.client.request(method, path, **kwargs)
+                    resp, error = await self.client.request(method, path, **kwargs), None
+            except NOT_SENT as e:
+                error = e
             except httpx.TransportError as e:
-                if attempt == MAX_RETRIES - 1:
-                    raise
-                log.warning("%s %s failed (%s), retrying", method, path, e)
-                await asyncio.sleep(2 ** attempt)
-                continue
-            if resp.status_code != 429 and resp.status_code < 500:
-                return resp
-            wait = float(resp.headers.get("retry-after") or 2 ** attempt)
-            log.warning("%s %s -> %d, waiting %.0fs", method, path, resp.status_code, wait)
-            await asyncio.sleep(min(wait, 60))
+                if not idempotent:
+                    raise AmbiguousWrite(f"{method} {path}: {e or type(e).__name__}") from e
+                error = e
+            else:
+                if resp.status_code == 429:
+                    server_wait = retry_after(resp, datetime.now(timezone.utc))
+                    wait = delay if server_wait is None else server_wait
+                    self.blocked_until[scope] = max(self.blocked_until.get(scope, 0.0), self.clock() + wait)
+                    if wait > MAX_RATE_WAIT:
+                        raise RateLimited(wait)
+                    delay = 0.0  # the scope's block above is the wait
+                elif resp.status_code >= 500 and not idempotent:
+                    raise AmbiguousWrite(f"{method} {path}: HTTP {resp.status_code}")
+                elif resp.status_code < 500:
+                    return resp
+            log.warning("%s %s failed (%s), attempt %d", method, path,
+                        error or f"HTTP {resp.status_code}", attempt + 1)
+            if attempt < MAX_RETRIES - 1 and delay:
+                await self.sleep(delay)
+        if error is not None:
+            raise error
         return resp
 
 
@@ -391,5 +453,146 @@ async def _demo() -> None:
     print(f"real platform ok ({mock.calls} HTTP calls)")
 
 
+async def _retry_demo() -> None:
+    """Rate limits are honoured in full and shared; writes that may have landed are never sent twice."""
+    class Clock:
+        def __init__(self) -> None:
+            self.now, self.sleeps = 0.0, []
+
+        def __call__(self) -> float:
+            return self.now
+
+        async def sleep(self, seconds: float) -> None:
+            self.sleeps.append(seconds)
+            self.now += seconds
+            await asyncio.sleep(0)
+
+    def platform(handler) -> tuple:
+        clock = Clock()
+        p = RealPlatform("https://legit.test/api", accounts=AccountStore(":memory:"),
+                         transport=httpx.MockTransport(handler))
+        p.clock, p.sleep = clock, clock.sleep
+        p.accounts.password("joe")
+        p.accounts.save_token("joe", "t", "Bearer")
+        return p, clock
+
+    def scripted(*answers):
+        """A handler replying with each answer in turn (an exception is raised), noting when each request came."""
+        seen = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(clock_of[0]())
+            answer = answers[min(len(seen), len(answers)) - 1]
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        return handler, seen
+
+    ok = httpx.Response(200, json={"data": {"id": 1, "author": "joe", "content": "x"}})
+    future = email.utils.format_datetime(datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=90),
+                                         usegmt=True)
+    past = "Wed, 21 Oct 2015 07:28:00 GMT"
+    cases = [  # (Retry-After, shortest allowed wait before the retry, longest: jitter adds up to JITTER)
+        ("120", 120, 121), (future, 85, 92), (past, 0, 0), (None, 1, 2), ("soon", 1, 2),
+    ]
+    for header, low, high in cases:
+        clock_of = [None]
+        handler, seen = scripted(httpx.Response(429, headers={"retry-after": header} if header else {}), ok)
+        p, clock = platform(handler)
+        clock_of[0] = clock
+        await p.get_post(1)
+        assert len(seen) == 2 and low <= seen[1] <= high, (header, seen)
+
+    clock_of = [None]  # a long limit fails at once, for every request in its scope, but not for reports
+    handler, seen = scripted(httpx.Response(429, headers={"retry-after": "600"}), ok)
+    p, clock = platform(handler)
+    clock_of[0] = clock
+    for _ in range(2):
+        try:
+            await p.get_post(1)
+            raise AssertionError("expected RateLimited")
+        except RateLimited:
+            pass
+    assert len(seen) == 1 and clock.sleeps == []
+    await p.report("joe", 5)  # the reports scope isn't blocked
+    clock.now = 601
+    await p.get_post(1)
+    assert len(seen) == 3
+
+    clock_of = [None]  # a concurrent caller waits for the scope's block instead of hitting the server early
+    handler, seen = scripted(httpx.Response(429, headers={"retry-after": "120"}), ok, ok)
+    p, clock = platform(handler)
+    clock_of[0] = clock
+    first = asyncio.create_task(p.get_post(1))
+    await asyncio.sleep(0)
+    await asyncio.gather(first, p.get_post(2))
+    assert all(t >= 120 for t in seen[1:]), seen
+
+    clock_of = [None]  # cancelling a caller that is waiting out a block sends nothing
+    handler, seen = scripted(httpx.Response(429, headers={"retry-after": "120"}), ok)
+    p, clock = platform(handler)
+    clock_of[0] = clock
+    gate = asyncio.Event()
+
+    async def stuck(seconds: float) -> None:
+        await gate.wait()
+    p.sleep = stuck
+    task = asyncio.create_task(p.get_post(1))
+    await asyncio.sleep(0.01)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert len(seen) == 1
+
+    clock_of = [None]  # no pointless sleep after the last attempt
+    handler, seen = scripted(httpx.Response(503))
+    p, clock = platform(handler)
+    clock_of[0] = clock
+    try:
+        await p.get_post(1)
+    except httpx.HTTPStatusError:
+        pass
+    assert len(seen) == MAX_RETRIES and clock.sleeps == [1.0, 2.0, 4.0], clock.sleeps
+
+    # Writes: committed, then the answer is lost -> AmbiguousWrite and exactly one post on the server.
+    for failure in (httpx.ReadTimeout("response lost"), httpx.RemoteProtocolError("connection dropped"), "500"):
+        mock = MockLegitSocial(bot_key="k")
+
+        def committed_then_fails(request: httpx.Request, mock=mock, failure=failure) -> httpx.Response:
+            resp = mock.handler(request)
+            if request.url.path.endswith("/twoots/"):
+                if failure == "500":
+                    return httpx.Response(500)
+                raise failure
+            return resp
+        p = RealPlatform("https://legit.test/api", bot_key="k", accounts=AccountStore(":memory:"),
+                         transport=httpx.MockTransport(committed_then_fails))
+        p.sleep = Clock().sleep
+        await p.ensure_account("joe", "Joe")
+        try:
+            await p.post("joe", "hello")
+            raise AssertionError("expected AmbiguousWrite")
+        except AmbiguousWrite:
+            pass
+        assert len(mock.posts) == 1, (failure, len(mock.posts))
+
+    mock, attempts = MockLegitSocial(bot_key="k"), []  # a connection never made is safe to retry
+
+    def refused_once(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/twoots/") and not attempts:
+            attempts.append(1)
+            raise httpx.ConnectError("connection refused")
+        return mock.handler(request)
+    p = RealPlatform("https://legit.test/api", bot_key="k", accounts=AccountStore(":memory:"),
+                     transport=httpx.MockTransport(refused_once))
+    p.sleep = Clock().sleep
+    await p.ensure_account("joe", "Joe")
+    assert (await p.post("joe", "hello"))["id"] == 1 and len(mock.posts) == 1
+    print("retries ok")
+
+
 if __name__ == "__main__":
     asyncio.run(_demo())
+    asyncio.run(_retry_demo())

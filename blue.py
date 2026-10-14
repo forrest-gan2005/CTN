@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 from collector import COMPETITION_START
-from fake_platform import REPORT_SUSPENSION, ReportingSuspended
+from fake_platform import REPORT_SUSPENSION, AmbiguousWrite, RateLimited, ReportingSuspended
 from guard import leans_no, plain
 from semantic import PARAPHRASE, NearIndex
 
@@ -47,6 +47,8 @@ PARAPHRASE_POSTS = 50_000  # the most recent long posts kept for that comparison
 PARAPHRASE_DELAY = timedelta(minutes=30)
 RECHECK = timedelta(minutes=5)  # how often the whitelist and the citizens' posting peak are reloaded
 CLEARED = "cleared"
+REPORT_ATTEMPTS = 5  # a report that never got through is retried this many times in all, backing off
+REPORT_BACKOFF = timedelta(minutes=1)  # doubled after each failure, up to an hour
 TOO_FAST, COPIED, PARAPHRASED = "superhuman posting rate", "copied across accounts", "paraphrased across accounts"
 SELF_CHECK_EVERY = timedelta(hours=1)
 SELF_CHECK_POSTS = 20_000  # newest citizen posts every rule is tried on
@@ -241,7 +243,7 @@ class BlueScanner:
         self._recheck()
         suspects = {a: v for a, v in self.state.suspects().items()
                     if v[0] != CLEARED and v[0] not in self.disabled and not self.is_ours_or_citizen(a)}
-        done = self.state.reported()
+        done = self.state.reported(_now())
         rows = []
         for post_id, author, content in self.npc_store.posts_by(suspects):
             if post_id in done:
@@ -280,9 +282,27 @@ class Reporter:
                 self.blocked_until = datetime.now(timezone.utc) + REPORT_SUSPENSION
                 log.warning("reporting suspended (%s); standing down until %s", e, self.blocked_until)
                 break
+            except RateLimited as e:
+                self.blocked_until = datetime.now(timezone.utc) + timedelta(seconds=e.wait)
+                log.warning("reporting rate-limited; standing down until %s", self.blocked_until)
+                break
+            except AmbiguousWrite as e:
+                # It may have arrived: never resend; the status line shows how many are in this state.
+                self.state.record_report(post_id, author, reason, _now(), "unknown")
+                log.warning("report on #%s may or may not have arrived (%s); not resending", post_id, e)
+                continue
             except Exception as e:
-                log.warning("report on #%s failed: %s", post_id, e)
-                self.state.record_report(post_id, author, reason, _now(), "error")
+                code = getattr(getattr(e, "response", None), "status_code", None)
+                attempts = self.state.report_attempts(post_id) + 1
+                if code is not None and 400 <= code < 500 or attempts >= REPORT_ATTEMPTS:
+                    self.state.record_report(post_id, author, reason, _now(), "failed")  # refused, or never got through
+                    log.warning("report on #%s failed for good (%s)", post_id, str(e) or type(e).__name__)
+                else:
+                    retry = datetime.now(timezone.utc) + min(REPORT_BACKOFF * 2 ** (attempts - 1), timedelta(hours=1))
+                    self.state.record_report(post_id, author, reason, _now(), "error",
+                                             retry.isoformat(timespec="seconds"))
+                    log.warning("report on #%s didn't get through (%s); retrying after %s", post_id,
+                                str(e) or type(e).__name__, retry)
                 continue
             status = {True: "upheld", False: "rejected"}.get(upheld, "sent")
             self.state.record_report(post_id, author, reason, _now(), status)
@@ -433,7 +453,48 @@ async def _demo() -> None:
     assert await reporter.report_some() == 0 and reporter.blocked()
     await _self_check_demo(embedder)
     await _backfill_demo()
+    await _report_retry_demo()
     print("blue ok")
+
+
+async def _report_retry_demo() -> None:
+    """A report that never got through is retried after a backoff and lands once; one that may have arrived is
+    never resent; one the platform refused, or that keeps failing, is given up."""
+    from collector import Collector, NpcStore
+    from fake_platform import FakePlatform
+    from state import StateStore
+
+    class Refused(Exception):
+        response = type("Response", (), {"status_code": 404})()
+
+    class Flaky(FakePlatform):
+        script = {}  # post_id -> exceptions to raise, in order, before reporting works
+
+        async def report(self, username: str, post_id: int) -> bool:
+            if self.script.get(post_id):
+                raise self.script[post_id].pop(0)
+            return await super().report(username, post_id)
+
+    p = Flaky(competitors={"rival"})
+    npc_store = NpcStore(":memory:")
+    collector = Collector(p, npc_store, min_interval=0)
+    cutoff = datetime.now(timezone.utc)
+    ids = [(await p.post("rival", f"As an AI language model, post {i}"))["id"] for i in range(4)]
+    await collector.poll()
+    state = StateStore(":memory:")
+    scanner = BlueScanner(npc_store, state, own=(), cutoff=cutoff)
+    scanner.scan()
+    transient, ambiguous, refused, hopeless = ids
+    p.script = {transient: [ConnectionError("down")], ambiguous: [AmbiguousWrite("response lost")],
+                refused: [Refused("HTTP 404")], hopeless: [ConnectionError("down")] * REPORT_ATTEMPTS}
+    reporter = Reporter(p, scanner, state, username="joe", per_round=10)
+    status = lambda pid: state.db.execute("SELECT status FROM reports WHERE post_id = ?", (pid,)).fetchone()[0]
+    for _ in range(REPORT_ATTEMPTS + 1):
+        await reporter.report_some()
+        state.db.execute("UPDATE reports SET next_try = '2000-01-01' WHERE status = 'error'")  # time passes
+    assert [status(i) for i in ids] == ["upheld", "unknown", "failed", "failed"], [status(i) for i in ids]
+    assert p.reports == {transient: ["joe"]}, "only the transient one reached the platform, once"
+    assert state.report_attempts(hopeless) == REPORT_ATTEMPTS and scanner.candidates() == []
 
 
 async def _backfill_demo() -> None:

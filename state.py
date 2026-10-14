@@ -43,7 +43,21 @@ CREATE TABLE IF NOT EXISTS reports (
     author TEXT NOT NULL,
     reason TEXT NOT NULL,
     reported_at TEXT NOT NULL,
-    status TEXT NOT NULL       -- sent | upheld | rejected | error
+    status TEXT NOT NULL,      -- sent (accepted, verdict pending) | upheld | rejected | unknown (may or may not
+                               -- have arrived; never resent) | error (never arrived; retried) | failed (gave up)
+    attempts INTEGER NOT NULL DEFAULT 1,
+    next_try TEXT              -- for errors: not before this
+);
+CREATE TABLE IF NOT EXISTS unresolved (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,    -- a post or reply that may or may not have been published: never resent
+    kind TEXT NOT NULL,
+    parent_id INTEGER,
+    content TEXT NOT NULL,
+    sent_at TEXT NOT NULL,
+    status TEXT NOT NULL,      -- pending | found | not_found
+    made_id INTEGER,
+    error TEXT
 );
 CREATE TABLE IF NOT EXISTS engagement (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -211,16 +225,48 @@ class StateStore:
         """author -> (reason, post_id)."""
         return {a: (r, p) for a, r, p in self.db.execute("SELECT author, reason, post_id FROM suspects")}
 
-    def record_report(self, post_id: int, author: str, reason: str, at: str, status: str) -> None:
+    def record_report(self, post_id: int, author: str, reason: str, at: str, status: str,
+                      next_try: Optional[str] = None) -> int:
+        """Record a report's outcome; returns how many times it has been attempted."""
+        row = self.db.execute("SELECT attempts FROM reports WHERE post_id = ?", (post_id,)).fetchone()
+        attempts = (row[0] + 1) if row and status in ("error", "failed") else (row[0] if row else 1)
         with self.db:
-            self.db.execute("INSERT OR REPLACE INTO reports VALUES (?, ?, ?, ?, ?)",
-                            (post_id, author, reason, at, status))
+            self.db.execute("INSERT OR REPLACE INTO reports VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (post_id, author, reason, at, status, attempts, next_try))
+        return attempts
+
+    def report_attempts(self, post_id: int) -> int:
+        row = self.db.execute("SELECT attempts FROM reports WHERE post_id = ? AND status IN ('error', 'failed')",
+                              (post_id,)).fetchone()
+        return row[0] if row else 0
 
     def rejected_reasons(self) -> set:
         return {r[0] for r in self.db.execute("SELECT DISTINCT reason FROM reports WHERE status = 'rejected'")}
 
-    def reported(self) -> set:
-        return {r[0] for r in self.db.execute("SELECT post_id FROM reports")}
+    def reported(self, now: str = "9999") -> set:
+        """Posts not to report (again) now: everything except failures that never arrived and are due a retry."""
+        return {r[0] for r in self.db.execute(
+            "SELECT post_id FROM reports WHERE status != 'error' OR next_try > ?", (now,))}
+
+    def add_unresolved(self, username: str, kind: str, parent_id: Optional[int], content: str, sent_at: str,
+                       error: str) -> None:
+        with self.db:
+            self.db.execute("INSERT INTO unresolved (username, kind, parent_id, content, sent_at, status, error) "
+                            "VALUES (?, ?, ?, ?, ?, 'pending', ?)", (username, kind, parent_id, content, sent_at, error))
+
+    def unresolved(self, status: str = "pending") -> list:
+        """(id, username, kind, parent_id, content, sent_at) of writes whose outcome we don't know yet."""
+        return self.db.execute("SELECT id, username, kind, parent_id, content, sent_at FROM unresolved "
+                               "WHERE status = ? ORDER BY id", (status,)).fetchall()
+
+    def resolve(self, unresolved_id: int, status: str, made_id: Optional[int] = None) -> None:
+        """Settle an unresolved write; once found, its post id also goes into history, so it is watched."""
+        with self.db:
+            self.db.execute("UPDATE unresolved SET status = ?, made_id = ? WHERE id = ?", (status, made_id, unresolved_id))
+            if made_id is not None:
+                self.db.execute("UPDATE history SET made_id = ? WHERE id = (SELECT h.id FROM history h JOIN unresolved u "
+                                "ON h.username = u.username AND h.content = u.content AND h.ts >= u.sent_at "
+                                "WHERE u.id = ? AND h.made_id IS NULL ORDER BY h.id LIMIT 1)", (made_id, unresolved_id))
 
     def ingest_notifications(self, username: str, notes: list, replies: list, received_at: str) -> int:
         """Store notifications as engagement feedback and queue the replies to answer, all in one transaction;

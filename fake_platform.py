@@ -6,6 +6,18 @@ from typing import Optional
 REPORT_SUSPENSION = timedelta(hours=6)
 
 
+class RateLimited(Exception):
+    """The platform asked us to wait longer than a request is allowed to."""
+
+    def __init__(self, wait: float) -> None:
+        super().__init__(f"rate-limited for another {wait:.0f}s")
+        self.wait = wait
+
+
+class AmbiguousWrite(Exception):
+    """A request that creates something may or may not have taken effect, so it is never resent blindly."""
+
+
 class ReportingSuspended(Exception):
     """The team reported a genuine citizen's post and can't report anything for six hours."""
 

@@ -131,6 +131,12 @@ class NpcStore:
         rows = self.db.execute(f"SELECT author FROM authors a WHERE {PRE_START} ORDER BY author", (c, c))
         return [r[0] for r in rows]
 
+    def find_post(self, author: str, content: str, since: datetime, parent_id: Optional[int]) -> Optional[int]:
+        row = self.db.execute("SELECT id FROM posts WHERE author = ? AND content = ? AND created_at >= ? "
+                              "AND parent_id IS ? ORDER BY id LIMIT 1", (author, content, _iso(since), parent_id))
+        found = row.fetchone()
+        return found[0] if found else None
+
     def is_citizen(self, author: str, cutoff: datetime = COMPETITION_START) -> bool:
         c = _iso(cutoff)
         return self.db.execute(f"SELECT 1 FROM authors a WHERE a.author = ? AND {PRE_START}", (author, c, c)).fetchone() is not None

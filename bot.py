@@ -9,7 +9,7 @@ from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
 from content import load_personas, load_vaccine_angles, load_world
-from fake_platform import FakePlatform
+from fake_platform import AmbiguousWrite, FakePlatform
 from guard import about_referendum, judge_stance, leans_no, looks_like_probe, output_problem, plain, wrap_external
 from llm import FakeLLM, team_llms
 from rhythm import UniformPacer
@@ -545,7 +545,13 @@ class Bot:
                 self.store.release(f"post:{action.post_id}")
             log.info("%s went quiet; dropped a %s", self.username, action.type)
             return None
-        await self.act(action)
+        sent_at = _iso(datetime.now(timezone.utc))
+        try:
+            await self.act(action)
+        except AmbiguousWrite as e:
+            # It may be live: keep it in history (without an id until the team finds it) and never resend it.
+            self.store.add_unresolved(self.username, action.type, action.post_id, action.content, sent_at, str(e))
+            log.warning("%s: %s may or may not have been published (%s)", self.username, action.type, e)
         self.remember(action)
         return action
 
