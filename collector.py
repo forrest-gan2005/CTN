@@ -131,6 +131,10 @@ class NpcStore:
         rows = self.db.execute(f"SELECT author FROM authors a WHERE {PRE_START} ORDER BY author", (c, c))
         return [r[0] for r in rows]
 
+    def is_citizen(self, author: str, cutoff: datetime = COMPETITION_START) -> bool:
+        c = _iso(cutoff)
+        return self.db.execute(f"SELECT 1 FROM authors a WHERE a.author = ? AND {PRE_START}", (author, c, c)).fetchone() is not None
+
     def npc_posts(self, cutoff: datetime = COMPETITION_START, limit: Optional[int] = None) -> list:
         """(author, content, created_at, parent_id) by whitelisted citizens, oldest first; `limit` keeps the newest."""
         c = _iso(cutoff)

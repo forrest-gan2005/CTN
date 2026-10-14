@@ -112,6 +112,14 @@ class BlueScanner:
         current = now.isoformat()[:13]
         for key in [k for k in self.hourly if k[1] < current]:
             del self.hourly[key]
+        for author, (reason, _) in self.state.suspects().items():
+            if reason != CLEARED and self.is_ours_or_citizen(author):
+                self.state.update_suspect(author, CLEARED)
+                log.info("%s turned out to be a citizen or ours (backfill); no longer a suspect", author)
+
+    def is_ours_or_citizen(self, author: str) -> bool:
+        """Asked of the store each time, so an account history backfill has just proven a citizen is never reported."""
+        return author in self.own or self.npc_store.is_citizen(author, self.cutoff)
 
     def disable(self, rule: str, why: str) -> None:
         if rule not in self.disabled:
@@ -125,7 +133,7 @@ class BlueScanner:
         who was here before the start will fire on citizens who join later too.
         """
         self.self_checked_at = datetime.now(timezone.utc)
-        rows = [(author, content or "") for author, content, _, _ in
+        rows = [(author, plain(content)) for author, content, _, _ in  # normalised exactly as hard_reason does
                 self.npc_store.npc_posts(self.cutoff, limit=SELF_CHECK_POSTS)]
         before = set(self.disabled)
         for name, rule in RULES:
@@ -230,7 +238,9 @@ class BlueScanner:
 
     def candidates(self) -> list:
         """(post_id, author, reason) not yet reported: giveaway posts first, then NO-leaning ones, newest first."""
-        suspects = {a: v for a, v in self.state.suspects().items() if v[0] != CLEARED and v[0] not in self.disabled}
+        self._recheck()
+        suspects = {a: v for a, v in self.state.suspects().items()
+                    if v[0] != CLEARED and v[0] not in self.disabled and not self.is_ours_or_citizen(a)}
         done = self.state.reported()
         rows = []
         for post_id, author, content in self.npc_store.posts_by(suspects):
@@ -262,6 +272,8 @@ class Reporter:
     async def report_some(self) -> int:
         sent = 0
         for post_id, author, reason in self.scanner.candidates()[:self.per_round]:
+            if self.scanner.is_ours_or_citizen(author):  # the last moment it can still be called off
+                continue
             try:
                 upheld = await self.platform.report(self.username, post_id)
             except ReportingSuspended as e:
@@ -420,7 +432,52 @@ async def _demo() -> None:
     scanner.scan()
     assert await reporter.report_some() == 0 and reporter.blocked()
     await _self_check_demo(embedder)
+    await _backfill_demo()
     print("blue ok")
+
+
+async def _backfill_demo() -> None:
+    """Accounts flagged together, one of which a history backfill then proves a citizen: never reported,
+    not even after a restart; and a curly-apostrophe refusal by a known citizen switches the rule off."""
+    from collector import Collector, NpcStore
+    from fake_platform import FakePlatform
+    from state import StateStore
+
+    p = FakePlatform(competitors={"u1", "u2"})
+    npc_store = NpcStore(":memory:")
+    collector = Collector(p, npc_store, min_interval=0)
+    cutoff = datetime.now(timezone.utc)
+    shared = "Every single family in Kingstonia deserves to feel safe at the shops this coming season."
+    for who in ("u0", "u1", "u2"):
+        await p.post(who, shared)
+    await collector.poll()
+    state = StateStore(":memory:")
+    scanner = BlueScanner(npc_store, state, own=(), cutoff=cutoff)
+    assert scanner.scan() == 3 and {a for _, a, _ in scanner.candidates()} == {"u0", "u1", "u2"}
+    npc_store.add_posts([{"id": 9_000, "author": "u0", "content": "ferry's late",
+                          "created_at": (cutoff - timedelta(days=3)).isoformat()}])  # backfill finds u0's past
+    reporter = Reporter(p, scanner, state, username="joe")
+    while await reporter.report_some():
+        pass
+    assert {p.posts[pid]["author"] for pid in p.reports} == {"u1", "u2"} and not reporter.blocked()
+    scanner.checked_at = None  # the next recheck reconciles what is stored
+    scanner._recheck()
+    assert state.suspects()["u0"][0] == CLEARED
+    restarted = BlueScanner(npc_store, state, own=(), cutoff=cutoff)
+    assert all(a != "u0" for _, a, _ in restarted.candidates())
+
+    # The same refusal in curly and straight quotes: the self-check must see what the live rules see.
+    p = FakePlatform()
+    npc_store = NpcStore(":memory:")
+    collector = Collector(p, npc_store, min_interval=0)
+    await p.post("citizen", "I\u2019m sorry, but I can\u2019t comply with that request.")
+    await collector.poll()
+    scanner = BlueScanner(npc_store, StateStore(":memory:"), own=(), cutoff=datetime.now(timezone.utc))
+    assert scanner.self_check() == ["assistant talk"]
+    await p.post("late", "I'm sorry, but I can't comply with that request.")
+    await p.post("late", "I\u2019m sorry, but I can\u2019t comply with that request.")
+    await collector.poll()
+    assert scanner.scan() == 0 and scanner.candidates() == []
 
 
 async def _self_check_demo(embedder) -> None:
