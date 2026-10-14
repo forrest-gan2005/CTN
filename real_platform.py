@@ -286,6 +286,21 @@ class RealPlatform:
             return {"Cookie": f"{kind.split(':', 1)[1]}={value}"}
         return {"Authorization": f"Bearer {value}"}
 
+    async def _dispatch(self, scope: str, method: str, path: str, **kwargs) -> httpx.Response:
+        """Send once the scope's rate-limit block allows it. Checked again after getting a connection slot and
+        after every wait, since another request may hit a limit (or extend one) meanwhile; a blocked request
+        gives its slot back while it waits."""
+        while True:
+            wait = self.blocked_until.get(scope, 0.0) - self.clock()
+            if wait > MAX_RATE_WAIT:
+                raise RateLimited(wait)
+            if wait > 0:
+                await self.sleep(wait + random.uniform(0, JITTER))
+                continue
+            async with self._sem:
+                if self.blocked_until.get(scope, 0.0) <= self.clock():
+                    return await self.client.request(method, path, **kwargs)
+
     async def _call(self, method: str, path: str, username: str, idempotent: bool = True,
                     **kwargs) -> httpx.Response:
         """An authenticated request; logs in again once if the session has expired (a 401 created nothing)."""
@@ -307,15 +322,9 @@ class RealPlatform:
         scope = _scope(path)
         resp, error = None, None
         for attempt in range(MAX_RETRIES):
-            wait = self.blocked_until.get(scope, 0.0) - self.clock()
-            if wait > MAX_RATE_WAIT:
-                raise RateLimited(wait)
-            if wait > 0:
-                await self.sleep(wait + random.uniform(0, JITTER))
             delay = 2.0 ** attempt
             try:
-                async with self._sem:
-                    resp, error = await self.client.request(method, path, **kwargs), None
+                resp, error = await self._dispatch(scope, method, path, **kwargs), None
             except NOT_SENT as e:
                 error = e
             except httpx.TransportError as e:
@@ -527,6 +536,35 @@ async def _retry_demo() -> None:
     await asyncio.sleep(0)
     await asyncio.gather(first, p.get_post(2))
     assert all(t >= 120 for t in seen[1:]), seen
+
+    # A caller queued for a connection slot when another request hits a limit must not slip through it.
+    gate, parked, sent = asyncio.Event(), asyncio.Event(), []
+
+    async def held(request: httpx.Request) -> httpx.Response:
+        sent.append((request.url.path, clock.now))
+        if request.url.path.endswith("/1/") and len(sent) == 1:
+            await gate.wait()
+            return httpx.Response(429, headers={"retry-after": "120"})
+        return ok
+
+    clock = Clock()
+    p = RealPlatform("https://legit.test/api", accounts=AccountStore(":memory:"), transport=httpx.MockTransport(held),
+                     max_concurrent=1)
+
+    async def parked_sleep(seconds: float) -> None:  # time stands still until the test moves it
+        await parked.wait()
+    p.clock, p.sleep = clock, parked_sleep
+    first = asyncio.create_task(p.get_post(1))
+    await asyncio.sleep(0.01)
+    second = asyncio.create_task(p.get_post(2))
+    await asyncio.sleep(0.01)
+    gate.set()
+    await asyncio.sleep(0.05)
+    assert sent == [("/api/twoots/1/", 0.0)], f"a request went out inside the block: {sent}"
+    clock.now = 121.0
+    parked.set()
+    await asyncio.gather(first, second)
+    assert all(t >= 120 for _, t in sent[1:]) and len(sent) == 3, sent
 
     clock_of = [None]  # cancelling a caller that is waiting out a block sends nothing
     handler, seen = scripted(httpx.Response(429, headers={"retry-after": "120"}), ok)
