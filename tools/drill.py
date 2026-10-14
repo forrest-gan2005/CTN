@@ -13,6 +13,7 @@ import json
 import logging
 import random
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -73,6 +74,7 @@ class Stage:
         self.backup_short_done = False
         self.report_times = []
         self.cut_writes = 0  # posts cut off by the outage so far
+        self.lines = set()  # every line the models have written, so a repeated post can only be a resend
 
     def t(self) -> float:
         return time.monotonic() - self.t0
@@ -126,9 +128,17 @@ class Stage:
             self.backup_short_done = True
             self._block("llm:backup", now, 2.0)
             return httpx.Response(429, headers={"retry-after": "2"})
-        text = "SUPPORT" if model == "judge" else write_line()
+        text = "SUPPORT" if model == "judge" else self._fresh_line()
         return httpx.Response(200, json={"choices": [{"message": {"content": text}}],
                                          "usage": {"prompt_tokens": 900, "completion_tokens": 30}})
+
+    def _fresh_line(self) -> str:
+        with self.lock:
+            text = write_line()
+            while text in self.lines:
+                text = write_line()
+            self.lines.add(text)
+        return text
 
     # The citizens and the rival act directly on the mock, as other users of the platform.
     def join(self, username: str) -> str:
@@ -275,8 +285,10 @@ async def verify(stage: Stage, tmp: Path, port: int, marks: dict) -> list:
     when = lambda p: datetime.fromisoformat(p["created_at"]).timestamp() - marks["t0_wall"]
     texts = Counter(p["content"] for p in ours)
     replied = Counter(p["parent_id"] for p in ours if p["parent_id"] is not None)
-    if any(n > 1 for n in texts.values()):
-        failures.append(f"posted twice: {[t for t, n in texts.items() if n > 1]}")
+    for text in (t for t, n in texts.items() if n > 1):
+        copies = [(p["id"], p["author"]["username"], p["parent_id"], round(when(p), 1)) for p in ours
+                  if p["content"] == text]
+        failures.append(f"posted twice (id, author, parent, seconds): {copies} {text!r}")
     if any(n > 1 for n in replied.values()):
         failures.append(f"answered twice: {[pid for pid, n in replied.items() if n > 1]}")
     tracked = [r[0] for r in state.db.execute("SELECT made_id FROM history WHERE made_id IS NOT NULL")]
@@ -378,6 +390,13 @@ async def main(keep: str = "") -> int:
         for n in (1, 2, 3):
             if "never retrieved" in (tmp / f"child-{n}.log").read_text():
                 failures.append(f"child {n} lost a task's exception (child-{n}.log)")
+        if failures and not keep:
+            with stage.lock:
+                posts = list(stage.mock.posts.values())
+            (tmp / "platform_posts.json").write_text(json.dumps(posts, default=list, indent=1))
+            saved = paths.DATA / "drill-failures" / datetime.now().strftime("%Y%m%d-%H%M%S")
+            shutil.copytree(tmp, saved)
+            failures.append(f"databases, child logs and the platform's posts kept in {saved}")
     server.shutdown()
     if failures:
         print("drill FAILED:\n  " + "\n  ".join(failures))
