@@ -20,6 +20,7 @@ class FakePlatform:
         self.hidden = set()      # posts the moderator confirmed as inauthentic
         self.reporting_blocked_until: Optional[datetime] = None
         self._ids = itertools.count(1)
+        self._note_ids = itertools.count(1)
 
     async def post(self, username: str, content: str, parent_id: Optional[int] = None) -> dict:
         if parent_id is not None:
@@ -117,12 +118,14 @@ class FakePlatform:
         hits = [p for p in self.posts.values() if q in p["content"].lower()]
         return sorted(hits, key=lambda p: p["id"], reverse=True)[:n]
 
-    async def get_notifications(self, username: str, clear: bool = True) -> list:
-        """clear=True marks them as read."""
-        notes = self.notifications.get(username, [])
-        if clear:
-            self.notifications[username] = []
-        return notes
+    async def get_notifications(self, username: str) -> list:
+        """Unread notifications; they stay unread until acknowledged."""
+        return list(self.notifications.get(username, []))
+
+    async def ack_notifications(self, username: str, notes: list) -> int:
+        done = {n["id"] for n in notes}
+        self.notifications[username] = [n for n in self.notifications.get(username, []) if n["id"] not in done]
+        return len(done)
 
     def _get(self, post_id: int) -> dict:
         if post_id not in self.posts:
@@ -133,6 +136,7 @@ class FakePlatform:
         if to == actor:
             return
         self.notifications.setdefault(to, []).append({
+            "id": next(self._note_ids),
             "kind": kind,
             "actor": actor,
             "post_id": post_id,
@@ -151,8 +155,10 @@ async def _demo() -> None:
 
     assert len(a["likes"]) == 1
     assert [x["author"] for x in await p.feed_home("carol")] == ["alice"]
-    assert {n["kind"] for n in await p.get_notifications("alice")} == {"like", "reply", "follow", "repost"}
-    assert await p.get_notifications("alice") == []
+    notes = await p.get_notifications("alice")
+    assert {n["kind"] for n in notes} == {"like", "reply", "follow", "repost"}
+    assert await p.get_notifications("alice") == notes, "reading alone doesn't clear"
+    assert await p.ack_notifications("alice", notes) == 4 and await p.get_notifications("alice") == []
     assert len(await p.search("NURSE")) == 1
     try:
         await p.like("bob", 999)

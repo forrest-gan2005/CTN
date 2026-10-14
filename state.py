@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from pathlib import Path
 from typing import Iterable, Optional
@@ -47,10 +48,13 @@ CREATE TABLE IF NOT EXISTS reports (
 CREATE TABLE IF NOT EXISTS engagement (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL,    -- our account that was engaged
+    note_key TEXT NOT NULL,    -- the platform's notification id, so a redelivered one isn't counted twice
     kind TEXT NOT NULL,        -- like | repost | reply | follow | ...
     actor TEXT,
     post_id INTEGER,           -- as the notification gave it
-    received_at TEXT NOT NULL
+    received_at TEXT NOT NULL,
+    raw TEXT,                  -- the notification as received, for replay and debugging
+    UNIQUE (username, note_key)
 );
 CREATE TABLE IF NOT EXISTS moderation (
     post_id INTEGER PRIMARY KEY, -- one of our posts the platform stopped showing normally
@@ -74,6 +78,13 @@ CREATE TABLE IF NOT EXISTS inbox (
 
 # Columns returned by load_history, in order, matching Action's fields.
 HISTORY_COLS = "ts, type, post_id, content, line, topic_kind, angle, target_author, target_class, made_id, model"
+
+
+def note_key(note: dict) -> str:
+    """A notification's identity: the platform's id, or its contents when it has none."""
+    if note.get("id") is not None:
+        return str(note["id"])
+    return "|".join(str(note.get(k)) for k in ("kind", "actor", "post_id", "created_at"))
 
 
 class StateStore:
@@ -211,13 +222,19 @@ class StateStore:
     def reported(self) -> set:
         return {r[0] for r in self.db.execute("SELECT post_id FROM reports")}
 
-    def record_engagement(self, username: str, notes: list, received_at: str) -> None:
-        """Every notification, kept as the feedback for judging which tactics earn engagement."""
+    def ingest_notifications(self, username: str, notes: list, replies: list, received_at: str) -> int:
+        """Store notifications as engagement feedback and queue the replies to answer, all in one transaction;
+        a notification seen before is ignored. Returns how many were new."""
+        rows = [(username, note_key(n), n.get("kind") or "?", n.get("actor"), n.get("post_id"), received_at,
+                 json.dumps(n, default=str, ensure_ascii=False)) for n in notes]
         with self.db:
-            self.db.executemany(
-                "INSERT INTO engagement (username, kind, actor, post_id, received_at) VALUES (?, ?, ?, ?, ?)",
-                [(username, n.get("kind") or "?", n.get("actor"), n.get("post_id"), received_at) for n in notes],
-            )
+            before = self.db.total_changes
+            self.db.executemany("INSERT OR IGNORE INTO engagement (username, note_key, kind, actor, post_id, "
+                                "received_at, raw) VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+            new = self.db.total_changes - before
+            self.db.executemany("INSERT OR IGNORE INTO inbox VALUES (?, ?, ?, ?)",
+                                [(username, n["post_id"], n.get("actor"), received_at) for n in replies])
+        return new
 
     def action_counts(self, since: str) -> dict:
         rows = self.db.execute("SELECT type, COUNT(*) FROM history WHERE ts >= ? GROUP BY type", (since,))
@@ -229,13 +246,6 @@ class StateStore:
 
     def report_counts(self) -> dict:
         return dict(self.db.execute("SELECT status, COUNT(*) FROM reports GROUP BY status").fetchall())
-
-    def add_inbox(self, username: str, notes: list, received_at: str) -> None:
-        with self.db:
-            self.db.executemany(
-                "INSERT OR IGNORE INTO inbox VALUES (?, ?, ?, ?)",
-                [(username, n["post_id"], n.get("actor"), received_at) for n in notes],
-            )
 
     def inbox(self, username: str) -> list:
         """Waiting replies as (post_id, actor, received_at), oldest first."""
@@ -286,8 +296,10 @@ if __name__ == "__main__":
     s.release("post:5")
     assert s.claim("post:5", "rosa")
 
-    s.add_inbox("joe", [{"post_id": 11, "actor": "npc1"}], "2026-10-20T01:00:00+00:00")
-    s.add_inbox("joe", [{"post_id": 10, "actor": "npc2"}, {"post_id": 11, "actor": "npc1"}], "2026-10-20T02:00:00+00:00")
+    r11, r10 = ({"id": 1, "kind": "reply", "post_id": 11, "actor": "npc1"},
+                {"id": 2, "kind": "reply", "post_id": 10, "actor": "npc2"})
+    assert s.ingest_notifications("joe", [r11], [r11], "2026-10-20T01:00:00+00:00") == 1
+    assert s.ingest_notifications("joe", [r10, r11], [r10, r11], "2026-10-20T02:00:00+00:00") == 1
     assert [r[0] for r in s.inbox("joe")] == [11, 10]
     s.drop_inbox("joe", 11)
     assert [r[0] for r in s.inbox("joe")] == [10] and s.inbox("rosa") == []
@@ -296,8 +308,10 @@ if __name__ == "__main__":
     s.record_report(3, "rival", "assistant talk", "t", "sent")
     s.record_report(3, "rival", "assistant talk", "t", "upheld")
     assert s.reported() == {3}
-    s.record_engagement("joe", [{"kind": "like", "actor": "npc1", "post_id": 77}], "2026-10-20T03:00:00+00:00")
-    assert s.engagement_counts("2026-10-20") == {"like": 1} and s.report_counts() == {"upheld": 1}
+    like = {"kind": "like", "actor": "npc1", "post_id": 77, "created_at": "t"}  # no id: keyed by its contents
+    assert s.ingest_notifications("joe", [like], [], "2026-10-20T03:00:00+00:00") == 1
+    assert s.ingest_notifications("joe", [like], [], "2026-10-20T04:00:00+00:00") == 0
+    assert s.engagement_counts("2026-10-20") == {"like": 1, "reply": 2} and s.report_counts() == {"upheld": 1}
     assert s.action_counts("t0")["reply"] == 2
     assert s.set_moderation(7, "joe", "hidden", "t1") and not s.set_moderation(7, "joe", "hidden", "t2")
     assert s.set_moderation(8, "joe", "missing", "t1") and s.moderation_counts() == {"joe": {"suspected": 2, "confirmed": 0}}

@@ -168,12 +168,17 @@ class Bot:
 
     async def read(self) -> dict:
         notes = await self.platform.get_notifications(self.username)
-        now = _iso(datetime.now(timezone.utc))
-        self.store.record_engagement(self.username, notes, now)
         replies = [n for n in notes if n.get("kind") == "reply" and n.get("post_id") is not None
                    and self.roster.classify(n.get("actor")) != "own"]
-        # Notifications are gone once read, so keep replies until answered or stale.
-        self.store.add_inbox(self.username, replies, now)
+        # Stored (replies kept until answered or stale) before they are acknowledged: a failure in between
+        # leaves them unread, to come back next time and be recognised by their id rather than counted again.
+        self.store.ingest_notifications(self.username, notes, replies, _iso(datetime.now(timezone.utc)))
+        if notes:
+            try:
+                await self.platform.ack_notifications(self.username, notes)
+            except Exception as e:
+                log.warning("%s: couldn't acknowledge notifications (%s); they'll be read again", self.username,
+                            str(e) or type(e).__name__)
         feed = self.feed() if self.feed is not None else await self.platform.feed_latest(n=10)
         return {"feed": feed}
 
@@ -631,6 +636,66 @@ async def quiet_race() -> None:
     print("quiet race ok")
 
 
+async def notification_durability() -> None:
+    """Replies to us survive a failure before storing, between storing and acknowledging, and halfway through
+    acknowledging, without being counted twice when they come back."""
+    import httpx
+    from real_platform import AccountStore, MockLegitSocial, RealPlatform
+
+    class FlakyStore(StateStore):
+        fail_ingest = False
+
+        def ingest_notifications(self, *args) -> int:
+            if self.fail_ingest:
+                raise RuntimeError("disk full")
+            return super().ingest_notifications(*args)
+
+    mock = MockLegitSocial(bot_key="k")
+    fail_ack = set()  # notification ids whose mark-read times out
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        parts = request.url.path.split("/")
+        if parts[-1] == "mark-read" and int(parts[-2]) in fail_ack:
+            raise httpx.ReadTimeout("mark-read timed out")
+        return mock.handler(request)
+
+    p = RealPlatform("https://legit.test/api", bot_key="k", accounts=AccountStore(":memory:"),
+                     transport=httpx.MockTransport(handler))
+    persona = next(x for x in load_personas() if x["line"] == "persuade")
+    me = persona["username"]
+    for who in (me, "npc_1", "npc_2"):
+        await p.ensure_account(who, who)
+    mine = await p.post(me, "rain again")
+    await p.reply("npc_1", mine["id"], "same here")
+    await p.reply("npc_2", mine["id"], "and here")
+    store = FlakyStore(":memory:")
+    bot = Bot(persona, p, FakeLLM(0, 0), load_world(), roster=Roster(own={me}, npcs=["npc_1", "npc_2"]), store=store)
+    bot.feed = lambda: []
+    unread = lambda: [n for n in mock.notifications[me] if not n["read"]]
+
+    store.fail_ingest = True  # 1. fails before anything is stored: nothing acknowledged either
+    try:
+        await bot.read()
+        raise AssertionError("read should have failed")
+    except RuntimeError:
+        pass
+    assert len(unread()) == 2 and store.engagement_counts("") == {}
+    store.fail_ingest = False
+    real_ack, p.ack_notifications = p.ack_notifications, None  # 2. stored, then acknowledging blows up
+    await bot.read()
+    assert len(unread()) == 2 and store.engagement_counts("") == {"reply": 2}
+    p.ack_notifications = real_ack
+    fail_ack.add(unread()[1]["id"])  # 3. the second acknowledgement times out
+    await bot.read()
+    assert len(unread()) == 1 and store.engagement_counts("") == {"reply": 2}
+    fail_ack.clear()
+    await bot.read()
+    assert unread() == [] and store.engagement_counts("") == {"reply": 2}
+    assert sorted(a for _, a, _ in store.inbox(me)) == ["npc_1", "npc_2"]
+    await p.aclose()
+    print("notification durability ok")
+
+
 async def main(real: bool, n_bots: int, seconds: float) -> None:
     llm, judge = team_llms() if real else (FakeLLM(), None)
     p = FakePlatform()
@@ -711,4 +776,5 @@ if __name__ == "__main__":
     n_bots = args.bots or (3 if args.real else 20)
     random.seed(0)
     asyncio.run(quiet_race())
+    asyncio.run(notification_durability())
     asyncio.run(main(args.real, n_bots, args.seconds))

@@ -197,16 +197,26 @@ class RealPlatform:
             posts = [p for p in posts if p["id"] is not None and p["id"] < before]
         return sorted(posts, key=lambda p: p["id"] or 0, reverse=True)[:n]
 
-    async def get_notifications(self, username: str, clear: bool = True) -> list:
-        """Unread notifications; clear=True marks each one read."""
+    async def get_notifications(self, username: str) -> list:
+        """Unread notifications. They stay unread until ack_notifications, which callers run once they have
+        stored them, so a failure in between loses nothing."""
         resp = await self._call("GET", "/notifications/unread", username)
         resp.raise_for_status()
-        notes = [normalise_notification(n) for n in _unwrap(resp.json()) or [] if isinstance(n, dict)]
-        if clear:
-            for n in notes:
-                if n["id"] is not None:
-                    await self._call("POST", f"/notifications/{n['id']}/mark-read", username, json={})
-        return notes
+        return [normalise_notification(n) for n in _unwrap(resp.json()) or [] if isinstance(n, dict)]
+
+    async def ack_notifications(self, username: str, notes: list) -> int:
+        """Mark notifications read, each on its own: one that fails stays unread and comes back next time."""
+        done = 0
+        for n in notes:
+            if n["id"] is None:
+                continue
+            try:
+                resp = await self._call("POST", f"/notifications/{n['id']}/mark-read", username, json={})
+                resp.raise_for_status()
+                done += 1
+            except Exception as e:
+                log.warning("couldn't mark %s's notification %s read: %s", username, n["id"], str(e) or type(e).__name__)
+        return done
 
     async def report(self, username: str, post_id: int, reason: str = "inauthentic") -> None:
         """File a report; the moderator rules later, so the outcome isn't known here."""
@@ -360,7 +370,7 @@ async def _demo() -> None:
     assert reply["parent_id"] == mine["id"]
     notes = await p.get_notifications("joe_tama")
     assert [(n["kind"], n["actor"], n["post_id"]) for n in notes] == [("reply", "npc_1", reply["id"])]
-    assert await p.get_notifications("joe_tama") == []
+    assert await p.ack_notifications("joe_tama", notes) == 1 and await p.get_notifications("joe_tama") == []
 
     mock.rate_limit_next = 2
     for i in range(3):
