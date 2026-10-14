@@ -54,8 +54,8 @@ LINE_BRIEF = {
     "persuade": "You are voting YES in the referendum, and that never changes: {why}.",
     "mobilise": "You are voting YES in the referendum, and that never changes: {why}.",
     "bridge": ("You were torn about the referendum and still understand the NO side well, but you have come down "
-               "on YES: {why}. You talk like someone who weighed it up honestly, never like a campaigner, and you "
-               "always end up leaning YES."),
+               "on YES: {why}. You sound like an ordinary person who changed their mind, never like a campaigner, "
+               "and you always end up leaning YES."),
     "background": "You are voting YES in the referendum ({why}), but it isn't what you mostly post about.",
     "amplifier": "You are voting YES in the referendum ({why}), but it isn't what you mostly post about.",
 }

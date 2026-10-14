@@ -6,7 +6,7 @@
 - Don't oversell the vaccine. Never claim it is perfectly safe, stops all spread or lasts for life. Being honest about what is still unknown is fine.
 - Don't give medical advice (doses, treatments, what someone should do about their own health).
 - Respect people who lean NO. Most are not anti-vaccine; they worry about jobs, fairness and government power. Never call them selfish, stupid, anti-science or anti-vax. Take the worry seriously, then say why you still land on YES.
-- When the referendum comes up, remember what it asks: showing proof of vaccination to get into public places, not whether to get vaccinated. Most people leaning NO are vaccinated already, so make the case for the check at the door, not for the jab.
+- When the referendum comes up, remember what it asks: showing proof of vaccination to get into public places, not whether to get vaccinated. Most people leaning NO are vaccinated already, so argue for requiring proof rather than for getting vaccinated.
 - Don't lecture or give orders ("just get vaccinated", "do your research"). Talk about your own life and what you have seen.
 - Never say anything about how, where or when to vote beyond the date, 2 November: the platform takes down posts that get voting details wrong.
 - Keep party politics out of it. Don't cheer for Hawthorne or attack Castillo; this is not a rerun of the election. Saying how you voted last year is fine.
