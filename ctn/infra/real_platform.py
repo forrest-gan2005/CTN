@@ -7,6 +7,8 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import base64
+import json
 from typing import Any, Optional
 
 import httpx
@@ -17,7 +19,11 @@ from ctn.infra.fake_platform import AmbiguousWrite, RateLimited, ReportingSuspen
 log = logging.getLogger("platform")
 
 DEFAULT_ACCOUNTS_DB = paths.DATA / "accounts.db"
-LIST_KEYS = ("data", "items", "results", "posts", "twoots", "notifications")
+PAGE = 100  # items asked for per page; the server may send fewer
+MAX_BODY = 500  # characters the platform accepts in a post
+RELIST_AT = 20  # unknown authors in one page above which the whole account list is fetched again
+REPOST_PAGES = 5  # pages of nothing but reposts read through before a feed call gives up
+NEIGHBOURS = 20  # older post ids tried when paging back from a post that is gone
 MAX_RETRIES = 4
 MAX_CONCURRENT = 8
 MAX_RATE_WAIT = 300.0  # seconds a request will wait out a rate limit; longer and it fails at once instead
@@ -48,63 +54,34 @@ def _scope(path: str) -> str:
     """Rate limits are shared by every request in a scope. Their real scope is unknown until launch, so all
     requests share one (the cautious choice), except reports: a reporting ban mustn't stall the bots."""
     return "report" if path.rstrip("/").endswith("/report") else "default"
-NOTIFICATION_KINDS = {"comment": "reply", "mention": "reply", "reply": "reply", "like": "like",
-                      "repost": "repost", "follow": "follow"}
+def iso(value: Optional[str]) -> Optional[str]:
+    """The API's UTC times end in "Z", which Python 3.9 can't parse; everything we store uses "+00:00"."""
+    return value[:-1] + "+00:00" if isinstance(value, str) and value.endswith("Z") else value
 
 
-def _unwrap(payload: Any) -> Any:
-    """Responses wrap their content as {"data": ...}; lists sometimes sit under another key."""
-    while isinstance(payload, dict):
-        key = next((k for k in LIST_KEYS if k in payload), None)
-        if key is None:
-            return payload
-        payload = payload[key]
-    return payload
-
-
-def _name(value: Any) -> Optional[str]:
-    if isinstance(value, dict):
-        value = value.get("username") or value.get("handle") or value.get("name")
-    return str(value).lstrip("@") if value is not None else None
-
-
-def _id(value: Any) -> Optional[int]:
-    if isinstance(value, dict):
-        value = value.get("id")
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def normalise_post(raw: dict) -> dict:
-    """An API twoot in the shape the rest of the code uses, keeping every original field."""
+def normalise_post(raw: dict, names: dict) -> dict:
+    """An API post in the shape the rest of the code uses (id, author username, content, parent_id), keeping
+    every original field. `names` maps account ids to usernames."""
     return {
         **raw,
-        "id": _id(raw.get("id")),
-        "author": _name(raw.get("author") or raw.get("user") or raw.get("username")),
-        "content": raw.get("content") or raw.get("text") or "",
-        "parent_id": _id(raw.get("parent_id") or raw.get("parent")),
-        "created_at": raw.get("created_at") or raw.get("createdAt") or raw.get("timestamp"),
+        "id": raw.get("post_id"),
+        "author": names.get(raw.get("author_id")),
+        "content": raw.get("body") or "",
+        "parent_id": raw.get("reply_to_post_id"),
+        "created_at": iso(raw.get("created_at")),
     }
 
 
-def normalise_notification(raw: dict) -> dict:
-    kind = str(raw.get("kind") or raw.get("type") or raw.get("event") or "").lower()
-    twoot = raw.get("twoot") or raw.get("post") or {}
-    post_id = _id(raw.get("twoot_id") or raw.get("post_id") or raw.get("reply_id") or twoot)
-    return {
-        **raw,
-        "id": _id(raw.get("id")),
-        "kind": NOTIFICATION_KINDS.get(kind, kind),
-        "actor": _name(raw.get("actor") or raw.get("from_user") or raw.get("user")
-                       or (twoot.get("author") if isinstance(twoot, dict) else None)),
-        "post_id": post_id,
-    }
+def cursor_for(post_id: int, created_at: str) -> str:
+    """The page cursor that continues after this post in a newest-first list, in the format the server issues:
+    unpadded base64url of {"t": created_at, "i": post_id}."""
+    raw = json.dumps({"t": created_at, "i": post_id}, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
 class AccountStore:
-    """Passwords and session tokens for our platform accounts. Lives in data/, never committed."""
+    """Passwords, session tokens and account ids for our platform accounts. Lives in data/, never committed.
+    A password can't be changed once an account is registered, so losing this file loses the accounts."""
 
     def __init__(self, path=DEFAULT_ACCOUNTS_DB) -> None:
         if str(path) != ":memory:":
@@ -112,6 +89,8 @@ class AccountStore:
         self.db = sqlite3.connect(str(path))
         self.db.execute("CREATE TABLE IF NOT EXISTS accounts (username TEXT PRIMARY KEY, password TEXT NOT NULL, "
                         "token TEXT, token_type TEXT)")
+        if "account_id" not in {r[1] for r in self.db.execute("PRAGMA table_info(accounts)")}:
+            self.db.execute("ALTER TABLE accounts ADD COLUMN account_id INTEGER")
 
     def password(self, username: str) -> str:
         row = self.db.execute("SELECT password FROM accounts WHERE username = ?", (username,)).fetchone()
@@ -126,167 +105,265 @@ class AccountStore:
         row = self.db.execute("SELECT token, token_type FROM accounts WHERE username = ?", (username,)).fetchone()
         return row if row and row[0] else None
 
-    def save_token(self, username: str, token: Optional[str], token_type: Optional[str]) -> None:
+    def save_token(self, username: str, token: Optional[str], token_type: Optional[str],
+                   account_id: Optional[int] = None) -> None:
         with self.db:
-            self.db.execute("UPDATE accounts SET token = ?, token_type = ? WHERE username = ?",
-                            (token, token_type, username))
+            self.db.execute("UPDATE accounts SET token = ?, token_type = ?, account_id = COALESCE(?, account_id) "
+                            "WHERE username = ?", (token, token_type, account_id, username))
 
-
-def _token_from(resp: httpx.Response) -> tuple:
-    """(token, type) from a login/register response: a bearer token in the body, or a session cookie."""
-    try:
-        body = resp.json()
-    except ValueError:
-        body = {}
-    data = body.get("data") if isinstance(body.get("data"), dict) else body
-    token = data.get("access_token") or data.get("token") if isinstance(data, dict) else None
-    if token:
-        return token, data.get("token_type") or "Bearer"
-    for name in ("session", "access_token", "token"):
-        if name in resp.cookies:
-            return resp.cookies[name], f"Cookie:{name}"
-    for name, value in resp.cookies.items():
-        return value, f"Cookie:{name}"
-    raise RuntimeError(f"login gave no token or session cookie (HTTP {resp.status_code})")
+    def ids(self) -> dict:
+        """username -> account id, for the accounts that have logged in at least once."""
+        return dict(self.db.execute("SELECT username, account_id FROM accounts WHERE account_id IS NOT NULL"))
 
 
 class RealPlatform:
-    """Legit Social through its HTTP API, mirroring FakePlatform's methods.
+    """Legit Real (2026) through its HTTP API, mirroring FakePlatform's methods.
 
-    Endpoints follow the organisers' twooter SDK (1.1.0, built for 2025). Field names in responses
-    are read leniently because the 2026 shapes are only confirmed once the platform opens.
+    Endpoints and fields were read from the platform's public web client in October 2026 (notes in
+    data/platform2026/API_NOTES.md), before any documentation: check them against the docs once published.
+    Posts name their author by account id, so usernames are looked up and cached. There is no notifications
+    endpoint: a reply to one of our posts, seen in any page we read, becomes a notification for its author.
     """
 
-    def __init__(self, base_url: str, bot_key: Optional[str] = None, accounts: Optional[AccountStore] = None,
+    def __init__(self, base_url: str, team_key: Optional[str] = None, accounts: Optional[AccountStore] = None,
                  transport: Optional[httpx.AsyncBaseTransport] = None, max_concurrent: int = MAX_CONCURRENT) -> None:
         self.client = httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=30, transport=transport)
-        self.bot_key = bot_key
+        self.team_key = team_key
         self.accounts = accounts or AccountStore()
         self.max_concurrent = max_concurrent
         self._sem: Optional[asyncio.Semaphore] = None  # created inside the running loop (Python 3.9)
         self.blocked_until = {}  # rate-limit scope -> monotonic time before which nothing in it is sent
         self.clock = time.monotonic  # replaced by a fake clock in tests
         self.sleep = asyncio.sleep
+        self.ids = self.accounts.ids()  # username -> account id
+        self.names = {i: u for u, i in self.ids.items()}  # account id -> username
+        self.created = {}  # post id -> created_at exactly as the server wrote it, for page cursors
+        self.roots = {}  # post id -> the post its thread starts from
+        self.ours = {}  # post id -> which of our accounts wrote it
+        self.inbox = {}  # username -> {reply id: notification}
+        self.noted = set()  # replies made into a notification already, however often they turn up again
+        self.after = {}  # oldest post id a recent-feed call returned -> the server's cursor to carry on from it
 
     async def aclose(self) -> None:
         await self.client.aclose()
 
+    def adopt(self, post_id: int, username: str) -> None:
+        """One of our posts from before a restart: replies to it are notifications again."""
+        self.ours[post_id] = username
+
     async def ensure_account(self, username: str, display_name: str) -> None:
-        """Log in, registering the account with the team's bot key the first time."""
+        """Log in, registering the account onto the team with its team code the first time."""
         password = self.accounts.password(username)
-        resp = await self._send("POST", "/auth/login", json={"username": username, "password": password})
-        if resp.status_code in (401, 403, 404) and self.bot_key:
-            resp = await self._send("POST", "/auth/register-bot", json={
-                "username": username, "display_name": display_name, "password": password,
-                "competition_bot_key": self.bot_key,
-            })
-            if resp.status_code == 409:
-                resp = await self._send("POST", "/auth/login", json={"username": username, "password": password})
+        login = {"username": username, "password": password}
+        resp = await self._send("POST", "/auth/login", json=login)
+        if resp.status_code in (400, 401, 403, 404) and self.team_key:
+            try:
+                resp = await self._send("POST", "/auth/register", idempotent=False, json={
+                    **login, "display_name": display_name or None, "team_key": self.team_key})
+            except AmbiguousWrite:
+                resp = None  # it may exist now: logging in tells
+            if resp is None or resp.status_code == 409:
+                resp = await self._send("POST", "/auth/login", json=login)
         resp.raise_for_status()
-        self.accounts.save_token(username, *_token_from(resp))
+        body = resp.json()
+        account = body.get("account") or {}
+        if not body.get("token"):
+            raise RuntimeError(f"login gave no token (HTTP {resp.status_code})")
+        self._know(account)
+        self.accounts.save_token(username, body["token"], "Bearer", account.get("account_id"))
         log.info("logged in as %s", username)
 
-    async def update_profile(self, username: str, display_name: str, bio: str) -> None:
-        (await self._call("POST", "/users/me", username, json={"display_name": display_name, "bio": bio})).raise_for_status()
-
     async def post(self, username: str, content: str, parent_id: Optional[int] = None) -> dict:
-        resp = await self._call("POST", "/twoots/", username, json={"content": content, "parent_id": parent_id},
-                                idempotent=False)
+        body = {"kind": "post", "body": content, "visibility": "public"}
+        if parent_id is not None:
+            root = self.roots.get(parent_id)
+            if root is None:
+                root = (await self.get_post(parent_id))["root_post_id"] or parent_id
+            body.update(kind="reply", reply_to_post_id=parent_id, root_post_id=root)
+        resp = await self._call("POST", "/posts", username, json=body, idempotent=False)
         resp.raise_for_status()
-        return normalise_post(_unwrap(resp.json()))
+        post = (await self._posts([resp.json()]))[0]
+        self.ours[post["id"]] = username
+        return post
 
     async def reply(self, username: str, parent_id: int, content: str) -> dict:
         return await self.post(username, content, parent_id=parent_id)
 
     async def like(self, username: str, post_id: int) -> bool:
-        return await self._toggle("POST", f"/twoots/{post_id}/like", username)
+        """True if this is a new like; False if it was liked already."""
+        return await self._toggle("POST", f"/posts/{post_id}/like", username)
 
     async def repost(self, username: str, post_id: int) -> bool:
-        return await self._toggle("POST", f"/twoots/{post_id}/repost", username)
-
-    async def follow(self, username: str, target: str) -> bool:
-        return await self._toggle("POST", f"/users/@{target}/follow", username)
-
-    async def unfollow(self, username: str, target: str) -> bool:
-        return await self._toggle("DELETE", f"/users/@{target}/follow", username)
-
-    async def get_post(self, post_id: int) -> dict:
-        resp = await self._send("GET", f"/twoots/{post_id}/")
+        """A repost is a post of its own pointing at the original."""
+        resp = await self._call("POST", "/posts", username, idempotent=False,
+                                json={"kind": "repost", "body": None, "visibility": "public",
+                                      "repost_of_post_id": post_id})
+        if resp.status_code == 409:
+            return False
         if resp.status_code == 404:
             raise KeyError(f"post {post_id} does not exist")
         resp.raise_for_status()
-        return normalise_post(_unwrap(resp.json()))
+        return True
 
-    async def feed(self, key: str, username: Optional[str] = None, at: Optional[str] = None) -> list:
-        """A named feed: latest, trending, home or explore (the last two need an account)."""
-        params = {"at": at} if at else None
-        resp = await (self._call("GET", f"/feeds/{key}", username, params=params) if username
-                      else self._send("GET", f"/feeds/{key}", params=params))
+    async def follow(self, username: str, target: str) -> bool:
+        return await self._toggle("POST", f"/accounts/{await self.account_id(target)}/follow", username)
+
+    async def unfollow(self, username: str, target: str) -> bool:
+        return await self._toggle("DELETE", f"/accounts/{await self.account_id(target)}/follow", username)
+
+    async def get_post(self, post_id: int) -> dict:
+        resp = await self._send("GET", f"/posts/{post_id}")
+        if resp.status_code == 404:  # also what a hidden post answers
+            raise KeyError(f"post {post_id} does not exist")
         resp.raise_for_status()
-        return [normalise_post(p) for p in _unwrap(resp.json()) or [] if isinstance(p, dict)]
+        return (await self._posts([resp.json()]))[0]
 
     async def feed_latest(self, n: int = 10, before: Optional[int] = None) -> list:
-        """Newest first; `before` (a post id) pages back, using that post's time as the feed's `at`."""
-        at = (await self.get_post(before))["created_at"] if before is not None else None
-        posts = await self.feed("latest", at=at)
+        """Newest first, without reposts; `before` (a post id) pages back from that post."""
+        params = {"sort": "recent", "limit": min(max(n, 1), PAGE)}
+        found, cursor = [], None
         if before is not None:
-            posts = [p for p in posts if p["id"] is not None and p["id"] < before]
-        return sorted(posts, key=lambda p: p["id"] or 0, reverse=True)[:n]
+            params["cursor"], found = await self._cursor_before(before)
+            found = [p for p in found if p.get("kind") != "repost"]
+        for _ in range(REPOST_PAGES):
+            resp = await self._send("GET", "/posts", params=params)
+            resp.raise_for_status()
+            page = resp.json()
+            fresh = [p for p in await self._posts(page.get("items") or []) if p.get("kind") != "repost"]
+            found += fresh
+            cursor = page.get("next_cursor")
+            if fresh or not cursor:
+                break
+            params["cursor"] = cursor
+        if before is not None:
+            found = [p for p in found if p["id"] < before]
+        if found and cursor:
+            self.after[min(p["id"] for p in found)] = cursor
+        return sorted((p for p in found if p["author"] is not None), key=lambda p: p["id"], reverse=True)[:n]
 
     async def get_notifications(self, username: str) -> list:
-        """Unread notifications. They stay unread until ack_notifications, which callers run once they have
-        stored them, so a failure in between loses nothing."""
-        resp = await self._call("GET", "/notifications/unread", username)
-        resp.raise_for_status()
-        return [normalise_notification(n) for n in _unwrap(resp.json()) or [] if isinstance(n, dict)]
+        """Replies to this account's posts seen since they were last acknowledged. They stay until
+        ack_notifications, which callers run once they have stored them."""
+        return list(self.inbox.get(username, {}).values())
 
     async def ack_notifications(self, username: str, notes: list) -> int:
-        """Mark notifications read, each on its own: one that fails stays unread and comes back next time."""
-        done = 0
-        for n in notes:
-            if n["id"] is None:
-                continue
-            try:
-                resp = await self._call("POST", f"/notifications/{n['id']}/mark-read", username, json={})
-                resp.raise_for_status()
-                done += 1
-            except Exception as e:
-                log.warning("couldn't mark %s's notification %s read: %s", username, n["id"], str(e) or type(e).__name__)
-        return done
+        box = self.inbox.get(username, {})
+        return sum(box.pop(n["id"], None) is not None for n in notes)
 
-    async def report(self, username: str, post_id: int, reason: str = "inauthentic") -> None:
+    async def report(self, username: str, post_id: int, reason: str = "inauthentic", detail: str = "") -> None:
         """File a report; the moderator rules later, so the outcome isn't known here."""
-        resp = await self._call("POST", f"/twoots/{post_id}/report", username, json={"reason": reason},
-                                idempotent=False)
+        resp = await self._call("POST", f"/posts/{post_id}/report", username,
+                                json={"reason": reason, "detail": detail}, idempotent=False)
         if resp.status_code in (403, 429) and any(w in resp.text.lower() for w in ("suspend", "block", "banned")):
             raise ReportingSuspended(resp.text[:200])
         resp.raise_for_status()
 
     async def trending_tags(self) -> list:
-        resp = await self._send("GET", "/tags/trending")
+        resp = await self._send("GET", "/tags/popular")
         resp.raise_for_status()
-        return _unwrap(resp.json()) or []
+        body = resp.json()
+        return body.get("items", []) if isinstance(body, dict) else body
 
-    async def search(self, query: str) -> list:
-        resp = await self._send("GET", "/search", params={"query": query})
-        resp.raise_for_status()
-        return [normalise_post(p) for p in _unwrap(resp.json()) or [] if isinstance(p, dict)]
+    async def account_id(self, username: str) -> int:
+        if username not in self.ids:
+            resp = await self._send("GET", "/accounts", params={"q": username, "limit": 8})
+            resp.raise_for_status()
+            for account in resp.json().get("items") or []:
+                self._know(account)
+        if username not in self.ids:
+            raise KeyError(f"no account {username}")
+        return self.ids[username]
+
+    def _know(self, account: dict) -> None:
+        if account.get("account_id") is not None and account.get("username"):
+            self.names[account["account_id"]] = account["username"]
+            self.ids[account["username"]] = account["account_id"]
+
+    async def _list_accounts(self) -> None:
+        cursor = None
+        for _ in range(500):
+            resp = await self._send("GET", "/accounts", params={"limit": PAGE, **({"cursor": cursor} if cursor else {})})
+            resp.raise_for_status()
+            page = resp.json()
+            for account in page.get("items") or []:
+                self._know(account)
+            cursor = page.get("next_cursor")
+            if not cursor:
+                return
+
+    async def _resolve(self, ids: set) -> None:
+        """Learn the usernames behind these account ids: all at once from the account list if there are many,
+        else one by one. An account that no longer exists stays unknown."""
+        missing = {i for i in ids if i is not None and i not in self.names}
+        if len(missing) > RELIST_AT:
+            await self._list_accounts()
+            missing = {i for i in missing if i not in self.names}
+        for account_id in missing:
+            resp = await self._send("GET", f"/accounts/{account_id}")
+            if resp.status_code == 404:
+                continue
+            resp.raise_for_status()
+            self._know(resp.json())
+
+    async def _posts(self, items: list) -> list:
+        """Normalise API posts, remembering what paging and replying need, and turning replies to our posts
+        into notifications."""
+        items = [i for i in items if isinstance(i, dict) and i.get("post_id") is not None]
+        await self._resolve({i.get("author_id") for i in items})
+        posts = []
+        for raw in items:
+            post = normalise_post(raw, self.names)
+            self.created[post["id"]] = raw.get("created_at")
+            self.roots[post["id"]] = raw.get("root_post_id") or post["id"]
+            self._notice(post["id"], post["author"], post["parent_id"])
+            posts.append(post)
+        return posts
+
+    def recall(self, replies: list) -> None:
+        """Replies the collector stored, (id, author, parent_id): after a restart, ones that never reached a bot
+        become notifications again (a bot skips any it has answered)."""
+        for post_id, author, parent_id in replies:
+            self._notice(post_id, author, parent_id)
+
+    def _notice(self, post_id: int, author: Optional[str], parent_id: Optional[int]) -> None:
+        owner = self.ours.get(parent_id)
+        if owner is not None and author not in (None, owner) and post_id not in self.noted:
+            self.noted.add(post_id)
+            self.inbox.setdefault(owner, {})[post_id] = {
+                "id": post_id, "kind": "reply", "actor": author, "post_id": post_id}
+
+    async def _cursor_before(self, post_id: int) -> tuple:
+        """(cursor, posts) to read on from just below this post: the server's cursor from the page that ended at it,
+        else one written in the server's format from its creation time (as after a restart). If the post is gone
+        (hidden or deleted), from the nearest older one that isn't, which then comes back too since the cursor
+        starts after it. The format is undocumented, so a server-issued cursor is always preferred."""
+        if post_id in self.after:
+            return self.after[post_id], []
+        for candidate in range(post_id, max(0, post_id - NEIGHBOURS), -1):
+            extra = []
+            if not self.created.get(candidate):
+                try:
+                    extra = [await self.get_post(candidate)]
+                except KeyError:
+                    continue
+            return cursor_for(candidate, self.created[candidate]), extra if candidate != post_id else []
+        raise KeyError(f"can't page back from post {post_id}: it and the {NEIGHBOURS - 1} before it are gone")
 
     async def _toggle(self, method: str, path: str, username: str) -> bool:
-        resp = await self._call(method, path, username, json={} if method == "POST" else None)
-        if resp.status_code == 409:
-            return False  # already liked / reposted / followed
+        """True when this call made the like or follow (HTTP 201), False when it was there already."""
+        resp = await self._call(method, path, username)
+        if resp.status_code == 404 and method == "POST":
+            raise KeyError(path)
+        if resp.status_code in (404, 409):
+            return False
         resp.raise_for_status()
-        return True
+        return resp.status_code == 201 if method == "POST" else True
 
     def _auth_headers(self, username: str) -> dict:
         token = self.accounts.token(username)
         if token is None:
             raise RuntimeError(f"{username} isn't logged in; call ensure_account first")
-        value, kind = token
-        if kind and kind.startswith("Cookie:"):
-            return {"Cookie": f"{kind.split(':', 1)[1]}={value}"}
-        return {"Authorization": f"Bearer {value}"}
+        return {"Authorization": f"Bearer {token[0]}"}
 
     async def _dispatch(self, scope: str, method: str, path: str, **kwargs) -> httpx.Response:
         """Send once the scope's rate-limit block allows it. Checked again after getting a connection slot and
@@ -360,112 +437,245 @@ class RealPlatform:
 
 
 class MockLegitSocial:
-    """An in-memory stand-in for the HTTP API, shaped like the twooter SDK expects, for offline tests."""
+    """An in-memory stand-in for the 2026 HTTP API, shaped as the web client expects, for offline tests.
 
-    def __init__(self, bot_key: str) -> None:
-        self.bot_key = bot_key
+    Posts are kept as {"id", "author": {"id", "username"}, "content", "parent_id", "created_at" (+00:00), ...}
+    and sent in the API's shape (post_id, author_id, body, ..., created_at ending in "Z")."""
+
+    def __init__(self, team_key: str) -> None:
+        self.team_key = team_key
         self.users = {}  # username -> password
+        self.accounts = {}  # account id -> account
         self.tokens = {}  # token -> username
         self.posts = {}
-        self.notifications = {}  # username -> list
-        self.reports = []
+        self.hidden = set()  # post ids that answer 404, as moderated posts do
+        self.likes, self.follows = set(), set()
+        self.reports = []  # (username, post id, reason)
         self.calls = 0
         self.rate_limit_next = 0
 
+    def add_user(self, username: str, display_name: Optional[str] = None) -> str:
+        """An account made outside the API (a citizen); returns a session token for it."""
+        self.users.setdefault(username, secrets.token_hex(4))
+        if username not in self._ids():
+            account_id = len(self.accounts) + 1
+            self.accounts[account_id] = {"account_id": account_id, "username": username,
+                                         "display_name": display_name, "avatar_url": None, "verified": False,
+                                         "created_at": _now().replace("+00:00", "Z")}
+        token = secrets.token_hex(8)
+        self.tokens[token] = username
+        return token
+
     def handler(self, request: httpx.Request) -> httpx.Response:
-        import json
+        import re
         self.calls += 1
         if self.rate_limit_next:
             self.rate_limit_next -= 1
             return httpx.Response(429, headers={"retry-after": "0"})
-        path = request.url.path.removeprefix("/api")
-        body = json.loads(request.content or b"{}") if request.method == "POST" else {}
+        path, method, query = request.url.path.removeprefix("/api").rstrip("/"), request.method, request.url.params
+        body = json.loads(request.content) if request.content else {}
         user = self.tokens.get(request.headers.get("authorization", "").removeprefix("Bearer "))
-        if path == "/auth/login":
-            if self.users.get(body["username"]) != body["password"]:
-                return httpx.Response(404 if body["username"] not in self.users else 401)
-            return self._login(body["username"])
-        if path == "/auth/register-bot":
-            if body.get("competition_bot_key") != self.bot_key:
-                return httpx.Response(403)
-            if body["username"] in self.users:
-                return httpx.Response(409)
+        error = lambda status, text: httpx.Response(status, json={"error": text})
+        if path == "/auth/login" and method == "POST":
+            if self.users.get(body.get("username")) != body.get("password"):
+                return error(401, "invalid username or password")
+            return self._session(body["username"], 200)
+        if path == "/auth/register" and method == "POST":
+            if body.get("team_key") != self.team_key:
+                return error(403, "unknown team key")
+            if body.get("username") in self.users:
+                return error(409, "username taken")
+            self.add_user(body["username"], body.get("display_name"))
             self.users[body["username"]] = body["password"]
-            return self._login(body["username"])
-        if path == "/feeds/latest":
-            at = request.url.params.get("at")
-            posts = [p for p in self.posts.values() if at is None or p["created_at"] <= at]
-            return httpx.Response(200, json={"data": sorted(posts, key=lambda p: p["id"], reverse=True)[:20]})
-        if path.startswith("/twoots/") and request.method == "GET":
-            post = self.posts.get(int(path.split("/")[2]))
-            return httpx.Response(200, json={"data": post}) if post else httpx.Response(404)
+            return self._session(body["username"], 201)
+        if path == "/posts" and method == "GET":
+            if query.get("sort") not in ("recent", "trending", "home"):
+                return error(400, "sort must be recent, trending or home")
+            posts = sorted((p for i, p in self.posts.items() if i not in self.hidden),
+                           key=lambda p: (p["created_at"], p["id"]), reverse=True)
+            if query.get("cursor"):
+                at = json.loads(base64.urlsafe_b64decode(query["cursor"] + "=" * (-len(query["cursor"]) % 4)))
+                posts = [p for p in posts if (p["created_at"], p["id"]) < (iso(at["t"]), at["i"])]
+            limit = int(query.get("limit", 20))
+            page = [self._wire(p) for p in posts[:limit]]
+            more = len(posts) > limit
+            return httpx.Response(200, json={"items": page, "next_cursor": cursor_for(
+                page[-1]["post_id"], page[-1]["created_at"]) if more else None})
+        if path == "/accounts" and method == "GET":
+            found = [a for i, a in sorted(self.accounts.items()) if query.get("q", "") in a["username"]]
+            if query.get("cursor"):
+                after = json.loads(base64.urlsafe_b64decode(query["cursor"] + "=" * (-len(query["cursor"]) % 4)))["i"]
+                found = [a for a in found if a["account_id"] > after]
+            limit = int(query.get("limit", 20))
+            more = len(found) > limit
+            next_cursor = base64.urlsafe_b64encode(json.dumps({"i": found[limit - 1]["account_id"]}).encode()
+                                                   ).decode().rstrip("=") if more else None
+            return httpx.Response(200, json={"items": found[:limit], "next_cursor": next_cursor})
+        match = re.fullmatch(r"/(posts|accounts)/(\d+)", path)
+        if match and method == "GET":
+            kind, key = match.group(1), int(match.group(2))
+            if kind == "accounts":
+                return httpx.Response(200, json=self.accounts[key]) if key in self.accounts else error(404, "not found")
+            if key not in self.posts or key in self.hidden:
+                return error(404, "not found")
+            return httpx.Response(200, json=self._wire(self.posts[key]))
         if user is None:
-            return httpx.Response(401)
-        if path == "/twoots/":
-            pid = len(self.posts) + 1
-            post = {"id": pid, "content": body["content"], "parent_id": body.get("parent_id"),
-                    "author": {"id": 100 + pid, "username": user},
-                    "created_at": datetime.now(timezone.utc).isoformat(timespec="microseconds")}
-            self.posts[pid] = post
-            parent = self.posts.get(body.get("parent_id"))
-            if parent:
-                self.notifications.setdefault(parent["author"]["username"], []).append(
-                    {"id": len(self.reports) + pid, "type": "comment", "actor": {"username": user},
-                     "twoot": post, "read": False})
-            return httpx.Response(201, json={"data": post})
-        if path.endswith("/like") or path.endswith("/repost") or path.endswith("/follow"):
-            return httpx.Response(200, json={"data": True})
-        if path.endswith("/report"):
-            self.reports.append((user, int(path.split("/")[2]), body["reason"]))
-            return httpx.Response(200, json={"data": True})
-        if path == "/notifications/unread":
-            return httpx.Response(200, json={"data": [n for n in self.notifications.get(user, []) if not n["read"]]})
-        if path.startswith("/notifications/") and path.endswith("/mark-read"):
-            for n in self.notifications.get(user, []):
-                if n["id"] == int(path.split("/")[2]):
-                    n["read"] = True
-            return httpx.Response(200, json={"data": True})
-        return httpx.Response(404)
+            return error(401, "sign in first")
+        if path == "/posts" and method == "POST":
+            return self._create(user, body, error)
+        match = re.fullmatch(r"/(posts|accounts)/(\d+)/(like|follow|report)", path)
+        if match:
+            kind, key, verb = match.group(1), int(match.group(2)), match.group(3)
+            if key not in (self.accounts if kind == "accounts" else self.posts):
+                return error(404, "not found")
+            if verb == "report":
+                if body.get("reason") not in ("hate_speech", "illegal_content", "inauthentic"):
+                    return error(400, "unknown reason")
+                self.reports.append((user, key, body["reason"]))
+                return httpx.Response(201, json={})
+            done = self.likes if verb == "like" else self.follows
+            if method == "DELETE":
+                done.discard((user, key))
+                return httpx.Response(204)
+            if (user, key) in done:
+                return httpx.Response(200, json={})
+            done.add((user, key))
+            return httpx.Response(201, json={})
+        return error(404, "not found")
 
-    def _login(self, username: str) -> httpx.Response:
+    def _create(self, user: str, body: dict, error) -> httpx.Response:
+        kind, text = body.get("kind"), body.get("body")
+        if kind in ("post", "reply") and not 1 <= len(text or "") <= MAX_BODY:
+            return error(400, "body must be 1-500 characters")
+        parent = body.get("reply_to_post_id") if kind == "reply" else None
+        original = body.get("repost_of_post_id") if kind == "repost" else None
+        if parent is not None and parent not in self.posts or original is not None and original not in self.posts:
+            return error(404, "not found")
+        if original is not None and any(p["author"]["username"] == user and p.get("repost_of") == original
+                                        for p in self.posts.values()):
+            return error(409, "already reposted")
+        pid = len(self.posts) + 1
+        post = {"id": pid, "kind": kind, "content": text or "", "parent_id": parent, "root_id": body.get("root_post_id"),
+                "repost_of": original, "author": {"id": self._ids()[user], "username": user}, "created_at": _now()}
+        self.posts[pid] = post
+        return httpx.Response(201, json=self._wire(post))
+
+    def _wire(self, post: dict) -> dict:
+        return {"post_id": post["id"], "author_id": post["author"]["id"], "kind": post.get("kind", "post"),
+                "body": None if post.get("kind") == "repost" else post["content"],
+                "reply_to_post_id": post["parent_id"], "root_post_id": post.get("root_id"),
+                "repost_of_post_id": post.get("repost_of"), "visibility": "public", "embed": None,
+                "created_at": post["created_at"].replace("+00:00", "Z"), "edited_at": None}
+
+    def _ids(self) -> dict:
+        return {a["username"]: i for i, a in self.accounts.items()}
+
+    def _session(self, username: str, status: int) -> httpx.Response:
         token = secrets.token_hex(8)
         self.tokens[token] = username
-        return httpx.Response(200, json={"data": {"access_token": token, "token_type": "Bearer"}})
+        expires = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat().replace("+00:00", "Z")
+        return httpx.Response(status, json={"token": token, "expires_at": expires,
+                                            "account": self.accounts[self._ids()[username]]})
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 async def _demo() -> None:
-    mock = MockLegitSocial(bot_key="team-key")
-    p = RealPlatform("https://legit.test/api", bot_key="team-key", accounts=AccountStore(":memory:"),
-                     transport=httpx.MockTransport(mock.handler))
+    mock = MockLegitSocial(team_key="K7Q2WXRM4TPV9HZD")
+    transport = httpx.MockTransport(mock.handler)
+    p = RealPlatform("https://legit.test/api", team_key=mock.team_key, accounts=AccountStore(":memory:"),
+                     transport=transport)
     await p.ensure_account("joe_tama", "Joe Tama")
     await p.ensure_account("npc_1", "Npc One")
     assert set(mock.users) == {"joe_tama", "npc_1"}
     p.accounts.save_token("joe_tama", "expired", "Bearer")  # forces a silent re-login
 
     mine = await p.post("joe_tama", "milk went up again")
-    assert mine["author"] == "joe_tama" and mine["id"] == 1
+    assert mine["author"] == "joe_tama" and mine["id"] == 1 and mine["created_at"].endswith("+00:00")
     reply = await p.reply("npc_1", mine["id"], "same at our shop")
-    assert reply["parent_id"] == mine["id"]
+    deeper = await p.reply("joe_tama", reply["id"], "and bread")
+    assert reply["parent_id"] == mine["id"] and mock.posts[reply["id"]]["root_id"] == mine["id"]
+    assert mock.posts[deeper["id"]]["root_id"] == mine["id"], "a reply to a reply names the thread's first post"
     notes = await p.get_notifications("joe_tama")
     assert [(n["kind"], n["actor"], n["post_id"]) for n in notes] == [("reply", "npc_1", reply["id"])]
     assert await p.ack_notifications("joe_tama", notes) == 1 and await p.get_notifications("joe_tama") == []
 
+    stranger = mock.add_user("stranger")  # replies through the API without us: we only see it in the feed
+    mock.handler(httpx.Request("POST", "https://legit.test/api/posts", headers={"authorization": f"Bearer {stranger}"},
+                               json={"kind": "reply", "body": "who asked", "visibility": "public",
+                                     "reply_to_post_id": mine["id"], "root_post_id": mine["id"]}))
+    await p.feed_latest(n=5)
+    assert [n["actor"] for n in await p.get_notifications("joe_tama")] == ["stranger"], "authors are looked up"
+    restarted = RealPlatform("https://legit.test/api", team_key=mock.team_key, accounts=p.accounts, transport=transport)
+    restarted.recall([(4, "stranger", mine["id"])])
+    assert restarted.inbox == {}, "a reply to a post not known as ours is nobody's notification"
+    restarted.adopt(mine["id"], "joe_tama")
+    restarted.recall([(4, "stranger", mine["id"]), (4, "stranger", mine["id"])])
+    assert list(restarted.inbox["joe_tama"]) == [4], "a stored reply comes back once"
+    await restarted.feed_latest(n=5)
+    assert {n["actor"] for n in await restarted.get_notifications("joe_tama")} == {"stranger", "npc_1"}, \
+        "after a restart replies come back; the bot's store knows which it has had"
+
     mock.rate_limit_next = 2
-    for i in range(3):
-        await p.post("npc_1", f"post {i}")
-    latest = await p.feed_latest(n=3)
-    assert [x["id"] for x in latest] == [5, 4, 3]
-    assert [x["id"] for x in await p.feed_latest(n=10, before=3)] == [2, 1]
-    assert (await p.get_post(2))["content"] == "same at our shop"
+    made = [(await p.post("npc_1", f"post {i}"))["id"] for i in range(3)]
+    assert await p.repost("joe_tama", made[0]) and not await p.repost("joe_tama", made[0])
+    newest = await p.feed_latest(n=3)  # the newest is the repost: a page can come back short
+    assert [x["id"] for x in newest] == [made[2], made[1]], "reposts aren't posts to read"
+    older = [x["id"] for x in await p.feed_latest(n=10, before=made[1])]
+    assert older == [5, 4, 3, 2, 1] and made[1] in p.after, "paged on with the server's cursor"
+    assert made[1] not in restarted.after
+    assert [x["id"] for x in await restarted.feed_latest(n=10, before=made[1])] == older, "or one written like it"
+    mock.hidden.add(made[1])
+    blind = RealPlatform("https://legit.test/api", team_key=mock.team_key, accounts=p.accounts, transport=transport)
+    assert [x["id"] for x in await blind.feed_latest(n=10, before=made[1])] == older, "from below a hidden post too"
+    mock.hidden.discard(made[1])
+    for who, target in (("npc_1", made[1]), ("joe_tama", made[2]), ("npc_1", made[2])):
+        await p.repost(who, target)
+    assert [x["id"] for x in await p.feed_latest(n=2)] == made[::-1][:2], "a page of reposts is read through"
+
+    assert (await p.get_post(reply["id"]))["content"] == "same at our shop"
+    mock.hidden.add(reply["id"])
+    for missing in (99, reply["id"]):
+        try:
+            await p.get_post(missing)
+            raise AssertionError(f"post {missing} should raise KeyError")
+        except KeyError:
+            pass
+    assert await p.like("joe_tama", 2) and not await p.like("joe_tama", 2)
+    assert await p.follow("joe_tama", "npc_1") and not await p.follow("joe_tama", "npc_1")
+    assert await p.unfollow("joe_tama", "npc_1")
     try:
-        await p.get_post(99)
-        raise AssertionError("missing post should raise KeyError")
+        await p.follow("joe_tama", "nobody_here")
+        raise AssertionError("following an unknown account should raise KeyError")
     except KeyError:
         pass
-    assert await p.like("joe_tama", 2) and await p.follow("joe_tama", "npc_1")
     await p.report("joe_tama", 5)
     assert mock.reports == [("joe_tama", 5, "inauthentic")]
-    await p.aclose()
+
+    stranger_team = RealPlatform("https://legit.test/api", team_key="WRONGWRONGWRONG2", accounts=AccountStore(":memory:"),
+                                 transport=transport)
+    try:
+        await stranger_team.ensure_account("intruder", "Intruder")
+        raise AssertionError("a wrong team key registered an account")
+    except httpx.HTTPStatusError as e:
+        assert e.response.status_code == 403
+
+    lost = []  # the registration lands but its answer is lost: logging in finds the account
+
+    def lose_register(request: httpx.Request) -> httpx.Response:
+        resp = mock.handler(request)
+        if request.url.path.endswith("/auth/register") and not lost:
+            lost.append(1)
+            raise httpx.ReadTimeout("answer lost")
+        return resp
+    q = RealPlatform("https://legit.test/api", team_key=mock.team_key, accounts=AccountStore(":memory:"),
+                     transport=httpx.MockTransport(lose_register))
+    await q.ensure_account("kai_lind", "Kai")
+    assert "kai_lind" in mock.users and q.accounts.token("kai_lind")
+    for client in (p, restarted, blind, stranger_team, q):
+        await client.aclose()
     print(f"real platform ok ({mock.calls} HTTP calls)")
 
 
@@ -490,6 +700,7 @@ async def _retry_demo() -> None:
         p.clock, p.sleep = clock, clock.sleep
         p.accounts.password("joe")
         p.accounts.save_token("joe", "t", "Bearer")
+        p.names[7] = "joe"  # no account lookups in these scripts
         return p, clock
 
     def scripted(*answers):
@@ -504,7 +715,8 @@ async def _retry_demo() -> None:
             return answer
         return handler, seen
 
-    ok = httpx.Response(200, json={"data": {"id": 1, "author": "joe", "content": "x"}})
+    ok = httpx.Response(200, json={"post_id": 1, "author_id": 7, "kind": "post", "body": "x",
+                                   "created_at": "2026-10-19T06:00:00.000000Z"})
     future = email.utils.format_datetime(datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=90),
                                          usegmt=True)
     past = "Wed, 21 Oct 2015 07:28:00 GMT"
@@ -549,7 +761,7 @@ async def _retry_demo() -> None:
 
     async def held(request: httpx.Request) -> httpx.Response:
         sent.append((request.url.path, clock.now))
-        if request.url.path.endswith("/1/") and len(sent) == 1:
+        if request.url.path.endswith("/posts/1") and len(sent) == 1:
             await gate.wait()
             return httpx.Response(429, headers={"retry-after": "120"})
         return ok
@@ -557,6 +769,7 @@ async def _retry_demo() -> None:
     clock = Clock()
     p = RealPlatform("https://legit.test/api", accounts=AccountStore(":memory:"), transport=httpx.MockTransport(held),
                      max_concurrent=1)
+    p.names[7] = "joe"
 
     async def parked_sleep(seconds: float) -> None:  # time stands still until the test moves it
         await parked.wait()
@@ -567,7 +780,7 @@ async def _retry_demo() -> None:
     await asyncio.sleep(0.01)
     gate.set()
     await asyncio.sleep(0.05)
-    assert sent == [("/api/twoots/1/", 0.0)], f"a request went out inside the block: {sent}"
+    assert sent == [("/api/posts/1", 0.0)], f"a request went out inside the block: {sent}"
     clock.now = 121.0
     parked.set()
     await asyncio.gather(first, second)
@@ -603,16 +816,16 @@ async def _retry_demo() -> None:
 
     # Writes: committed, then the answer is lost -> AmbiguousWrite and exactly one post on the server.
     for failure in (httpx.ReadTimeout("response lost"), httpx.RemoteProtocolError("connection dropped"), "500"):
-        mock = MockLegitSocial(bot_key="k")
+        mock = MockLegitSocial(team_key="k")
 
         def committed_then_fails(request: httpx.Request, mock=mock, failure=failure) -> httpx.Response:
             resp = mock.handler(request)
-            if request.url.path.endswith("/twoots/"):
+            if request.url.path.endswith("/posts") and request.method == "POST":
                 if failure == "500":
                     return httpx.Response(500)
                 raise failure
             return resp
-        p = RealPlatform("https://legit.test/api", bot_key="k", accounts=AccountStore(":memory:"),
+        p = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"),
                          transport=httpx.MockTransport(committed_then_fails))
         p.sleep = Clock().sleep
         await p.ensure_account("joe", "Joe")
@@ -623,14 +836,14 @@ async def _retry_demo() -> None:
             pass
         assert len(mock.posts) == 1, (failure, len(mock.posts))
 
-    mock, attempts = MockLegitSocial(bot_key="k"), []  # a connection never made is safe to retry
+    mock, attempts = MockLegitSocial(team_key="k"), []  # a connection never made is safe to retry
 
     def refused_once(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/twoots/") and not attempts:
+        if request.url.path.endswith("/posts") and request.method == "POST" and not attempts:
             attempts.append(1)
             raise httpx.ConnectError("connection refused")
         return mock.handler(request)
-    p = RealPlatform("https://legit.test/api", bot_key="k", accounts=AccountStore(":memory:"),
+    p = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"),
                      transport=httpx.MockTransport(refused_once))
     p.sleep = Clock().sleep
     await p.ensure_account("joe", "Joe")

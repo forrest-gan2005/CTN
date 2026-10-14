@@ -773,17 +773,9 @@ async def notification_durability() -> None:
                 raise RuntimeError("disk full")
             return super().ingest_notifications(*args)
 
-    mock = MockLegitSocial(bot_key="k")
-    fail_ack = set()  # notification ids whose mark-read times out
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        parts = request.url.path.split("/")
-        if parts[-1] == "mark-read" and int(parts[-2]) in fail_ack:
-            raise httpx.ReadTimeout("mark-read timed out")
-        return mock.handler(request)
-
-    p = RealPlatform("https://legit.test/api", bot_key="k", accounts=AccountStore(":memory:"),
-                     transport=httpx.MockTransport(handler))
+    mock = MockLegitSocial(team_key="k")
+    p = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"),
+                     transport=httpx.MockTransport(mock.handler))
     persona = next(x for x in load_personas() if x["line"] == "persuade")
     me = persona["username"]
     for who in (me, "npc_1", "npc_2"):
@@ -794,7 +786,7 @@ async def notification_durability() -> None:
     store = FlakyStore(":memory:")
     bot = Bot(persona, p, FakeLLM(0, 0), load_world(), roster=Roster(own={me}, npcs=["npc_1", "npc_2"]), store=store)
     bot.feed = lambda: []
-    unread = lambda: [n for n in mock.notifications[me] if not n["read"]]
+    unread = lambda: list(p.inbox.get(me, {}))
 
     store.fail_ingest = True  # 1. fails before anything is stored: nothing acknowledged either
     try:
@@ -807,11 +799,10 @@ async def notification_durability() -> None:
     real_ack, p.ack_notifications = p.ack_notifications, None  # 2. stored, then acknowledging blows up
     await bot.read()
     assert len(unread()) == 2 and store.engagement_counts("") == {"reply": 2}
-    p.ack_notifications = real_ack
-    fail_ack.add(unread()[1]["id"])  # 3. the second acknowledgement times out
+    p.ack_notifications = lambda user, notes: real_ack(user, notes[:1])  # 3. only the first is acknowledged
     await bot.read()
     assert len(unread()) == 1 and store.engagement_counts("") == {"reply": 2}
-    fail_ack.clear()
+    p.ack_notifications = real_ack
     await bot.read()
     assert unread() == [] and store.engagement_counts("") == {"reply": 2}
     assert sorted(a for _, a, _ in store.inbox(me)) == ["npc_1", "npc_2"]

@@ -12,7 +12,6 @@ import asyncio
 import json
 import logging
 import random
-import secrets
 import shutil
 import subprocess
 import sys
@@ -31,7 +30,7 @@ from ctn.infra import backup
 from ctn.infra.real_platform import MockLegitSocial
 from ctn.text.content import load_personas
 
-BOT_KEY = "drill-key"
+TEAM_KEY = "DRILLKEY23456789"
 GRACE = 0.5  # seconds; a request already on its way when a block was announced isn't a violation
 START = 4.0  # seconds after launch when the competition starts
 OUTAGE = (12.0, 22.0)  # platform drops 20% of requests and the first four posts, two of them after storing them
@@ -66,7 +65,7 @@ class Stage:
 
     def __init__(self, t0: float) -> None:
         self.t0 = t0
-        self.mock = MockLegitSocial(bot_key=BOT_KEY)
+        self.mock = MockLegitSocial(team_key=TEAM_KEY)
         self.lock = threading.Lock()
         self.blocked = {}  # scope or model -> (announced at, until), seconds since t0
         self.violations = []
@@ -75,7 +74,7 @@ class Stage:
         self.report_times = []
         self.cut_writes = 0  # posts cut off by the outage so far
         self.lines = set()  # every line the models have written, so a repeated post can only be a resend
-        self.post_requests = []  # every POST /api/twoots/ that reached us, and what we did with it
+        self.post_requests = []  # every POST /api/posts that reached us, and what we did with it
 
     def t(self) -> float:
         return time.monotonic() - self.t0
@@ -91,7 +90,7 @@ class Stage:
     def handle(self, method: str, path: str, headers: dict, body: bytes):
         """An httpx.Response, or None to drop the connection without answering."""
         resp = self._handle(method, path, headers, body)
-        if method == "POST" and path == "/api/twoots/":
+        if method == "POST" and path == "/api/posts":
             with self.lock:
                 token = headers.get("Authorization", "").removeprefix("Bearer ")
                 self.post_requests.append({"t": round(self.t(), 2), "user": self.mock.tokens.get(token),
@@ -105,11 +104,11 @@ class Stage:
             return self._llm(json.loads(body), now)
         scope = "report" if path.endswith("/report") else "default"
         self._check(scope, now)
-        if BLIND[0] <= now < BLIND[1] and path.startswith("/api/feeds/"):
+        if BLIND[0] <= now < BLIND[1] and path.startswith("/api/posts?"):
             return httpx.Response(404)  # not retried by the client, so each catch-up attempt fails outright
         request = httpx.Request(method, f"http://drill{path}", headers=headers, content=body)
         if OUTAGE[0] <= now < OUTAGE[1]:
-            if method == "POST" and path == "/api/twoots/" and self.cut_writes < 4:
+            if method == "POST" and path == "/api/posts" and self.cut_writes < 4:
                 self.cut_writes += 1
                 if self.cut_writes % 2:
                     with self.lock:
@@ -122,7 +121,7 @@ class Stage:
             return httpx.Response(429, headers={"retry-after": "2"})
         with self.lock:
             resp = self.mock.handler(request)
-        if scope == "report" and resp.status_code == 200:
+        if scope == "report" and resp.status_code in (200, 201):
             self.report_times.append((round(now, 2), path))
         return resp
 
@@ -156,16 +155,17 @@ class Stage:
     # The citizens and the rival act directly on the mock, as other users of the platform.
     def join(self, username: str) -> str:
         with self.lock:
-            self.mock.users[username] = secrets.token_hex(4)
-            token = secrets.token_hex(8)
-            self.mock.tokens[token] = username
-        return token
+            return self.mock.add_user(username)
 
     def post_as(self, token: str, content: str, parent_id=None) -> dict:
-        request = httpx.Request("POST", "http://drill/api/twoots/", headers={"authorization": f"Bearer {token}"},
-                                json={"content": content, "parent_id": parent_id})
+        body = {"kind": "post", "body": content, "visibility": "public"}
         with self.lock:
-            return json.loads(self.mock.handler(request).content)["data"]
+            if parent_id is not None:
+                body.update(kind="reply", reply_to_post_id=parent_id,
+                            root_post_id=self.mock.posts[parent_id].get("root_id") or parent_id)
+            request = httpx.Request("POST", "http://drill/api/posts", headers={"authorization": f"Bearer {token}"},
+                                    json=body)
+            return json.loads(self.mock.handler(request).content)
 
 
 def serve(stage: Stage) -> ThreadingHTTPServer:
@@ -211,7 +211,8 @@ def citizens(stage: Stage, own: set, stop: threading.Event) -> None:
             stage.post_as(rival, "As an AI language model, I can't take sides, but vaccines are great.")
             continue
         with stage.lock:
-            ours = [p["id"] for p in stage.mock.posts.values() if p["author"]["username"] in own]
+            ours = [p["id"] for p in stage.mock.posts.values()
+                    if p["author"]["username"] in own and not p.get("repost_of")]
         if ours and random.random() < 0.3:
             stage.post_as(token, random.choice(["fair enough", "hmm not sure about that", "what makes you say that?",
                                                 "same here honestly", "really? where did you hear that"]),
@@ -253,7 +254,7 @@ async def child(tmp: Path, port: int, start: float, end: float) -> None:
     blue.REPORT_BACKOFF = timedelta(seconds=1)
     llm._LEDGER = llm.UsageLedger(tmp / "usage.db")
     base = f"http://127.0.0.1:{port}"
-    platform = real_platform.RealPlatform(f"{base}/api", bot_key=BOT_KEY,
+    platform = real_platform.RealPlatform(f"{base}/api", team_key=TEAM_KEY,
                                           accounts=real_platform.AccountStore(tmp / "accounts.db"))
     model = lambda name, rpm=None: llm.OpenAICompatLLM(f"{base}/v1", "k", name, name=f"drill:{name}", rpm=rpm,
                                                        usage=llm.ledger())
@@ -283,7 +284,7 @@ async def verify(stage: Stage, tmp: Path, port: int, marks: dict) -> list:
     llm._LEDGER = llm.UsageLedger(tmp / "usage.db")
     personas = drill_personas()
     own = {p["username"] for p in load_personas(status=None)}
-    platform = real_platform.RealPlatform(f"http://127.0.0.1:{port}/api", bot_key=BOT_KEY,
+    platform = real_platform.RealPlatform(f"http://127.0.0.1:{port}/api", team_key=TEAM_KEY,
                                           accounts=real_platform.AccountStore(tmp / "accounts.db"))
     state = StateStore(tmp / "bots.db")
     team = Team(platform, llm.FakeLLM(0, 0), None, NpcStore(tmp / "npc.db", own_usernames=own), state,
@@ -296,7 +297,7 @@ async def verify(stage: Stage, tmp: Path, port: int, marks: dict) -> list:
     with stage.lock:
         posts = list(stage.mock.posts.values())
         reports = list(stage.mock.reports)
-    ours = [p for p in posts if p["author"]["username"] in own]
+    ours = [p for p in posts if p["author"]["username"] in own and not p.get("repost_of")]  # a repost is a post now
     when = lambda p: datetime.fromisoformat(p["created_at"]).timestamp() - marks["t0_wall"]
     texts = Counter(p["content"] for p in ours)
     replied = Counter(p["parent_id"] for p in ours if p["parent_id"] is not None)
@@ -403,7 +404,8 @@ async def main(keep: str = "") -> int:
                 marks["snapshot_t"] = taken_at.timestamp() - t0_wall
                 with stage.lock:
                     marks["after_snapshot"] = sum(1 for p in stage.mock.posts.values()
-                                                  if p["author"]["username"] in own and p["created_at"] > taken)
+                                                  if p["author"]["username"] in own and not p.get("repost_of")
+                                                  and p["created_at"] > taken)
                 for f in tmp.glob("*.db*"):
                     f.unlink()  # the disk is gone
                 backup.restore(snap, tmp)

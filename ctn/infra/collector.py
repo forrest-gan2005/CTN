@@ -232,6 +232,12 @@ class NpcStore:
             "SELECT id, author, content, created_at FROM posts WHERE created_at >= ? AND content IS NOT NULL "
             "ORDER BY created_at", (_iso(since),)).fetchall()
 
+    def replies_since(self, since: datetime) -> list:
+        """(id, author, parent_id) for replies by others created at or after `since`."""
+        return self.db.execute(
+            "SELECT id, author, parent_id FROM posts WHERE parent_id IS NOT NULL AND ours = 0 AND created_at >= ?",
+            (_iso(since),)).fetchall()
+
     def posts_by(self, authors: Iterable[str]) -> list:
         """(id, author, content) for every stored post by these accounts, newest first."""
         authors = list(authors)

@@ -509,7 +509,7 @@ async def _report_429_demo() -> None:
     async def sleep(seconds: float) -> None:
         clock.now += seconds
 
-    mock, limited, requests = MockLegitSocial(bot_key="k"), [True], []
+    mock, limited, requests = MockLegitSocial(team_key="k"), [True], []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/report"):
@@ -518,10 +518,11 @@ async def _report_429_demo() -> None:
                 return httpx.Response(429, headers={"retry-after": "0"})
         return mock.handler(request)
 
-    api = RealPlatform("https://legit.test/api", bot_key="k", accounts=AccountStore(":memory:"),
+    api = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"),
                        transport=httpx.MockTransport(handler))
     api.clock, api.sleep = clock, sleep
     await api.ensure_account("joe", "Joe")
+    assert (await api.post("joe", "the post to be reported"))["id"] == rival["id"]  # the same id on the API
     reporter = Reporter(api, scanner, state, username="joe", min_citizens=0)
     assert await reporter.report_some() == 0 and reporter.blocked()
     assert state.report_counts() == {} and [c[0] for c in scanner.candidates()] == [rival["id"]], "given up"

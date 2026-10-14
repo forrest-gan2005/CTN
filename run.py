@@ -41,11 +41,12 @@ LOGIN_RETRY = 60.0  # seconds between login attempts
 RECONCILE_EVERY = 300.0
 UNRESOLVED_GIVE_UP = timedelta(minutes=30)  # the collector reads Latest every few seconds, so by then it would show
 CLOCK_SKEW = timedelta(minutes=5)
+INBOX_RECALL = timedelta(hours=12)  # replies older than a bot would still answer (bot.INBOX_TTL) aren't recalled
 BACKUP_EVERY = 900.0
 CATCH_UP_PAGES = 500  # at startup, history pages read back to where the collector left off, before any bot acts
 CATCH_UP_TRIES = 5
 RESTORE_RETRY = 30.0  # seconds between catch-up attempts after a restore while the platform can't be read
-API_URL = "https://social.legitreal.com/api"  # the 2025 address in the organisers' SDK; override with $CTN_API_URL
+API_URL = "https://social.legitreal.com/api"  # where the 2026 web client talks to; override with $CTN_API_URL
 
 
 class Team:
@@ -146,11 +147,24 @@ class Team:
                 if self.twins is not None and content:
                     self.twins.add(author, content)
                 log.warning("%s's #%s was missing from history (restored from a backup?); taken in", author, post_id)
+        self._sync_ours()
+
+    def _sync_ours(self) -> None:
+        """Tell a platform without notifications which posts are ours, so a reply to one reaches its author, and
+        hand it the replies the collector stored lately, in case a restart came before a bot read them."""
+        adopt, recall = getattr(self.platform, "adopt", None), getattr(self.platform, "recall", None)
+        if adopt is None:
+            return
+        for username, post_id, _ in self.state.made_posts(""):
+            adopt(post_id, username)
+        if recall is not None:
+            recall(self.npc_store.replies_since(datetime.now(timezone.utc) - INBOX_RECALL))
 
     async def catch_up(self, until: float) -> bool:
         """Before any bot acts: read Latest back to where the collector left off and reconcile, so posts of ours
         that only the platform knows about (see finish_restore) are taken in. Best effort, a few tries."""
         loop = asyncio.get_running_loop()
+        self._sync_ours()
         for attempt in range(CATCH_UP_TRIES):
             try:
                 await self.collector.poll()
@@ -352,10 +366,10 @@ class Team:
 
 def real_platform() -> RealPlatform:
     load_env()
-    key = os.environ.get("CTN_BOT_KEY")
+    key = os.environ.get("CTN_TEAM_KEY")
     if not key:
-        raise SystemExit("set CTN_BOT_KEY (the team's competition bot key) in .env")
-    return RealPlatform(os.environ.get("CTN_API_URL") or API_URL, bot_key=key)
+        raise SystemExit("set CTN_TEAM_KEY (the team code from the accounts portal) in .env")
+    return RealPlatform(os.environ.get("CTN_API_URL") or API_URL, team_key=key)
 
 
 async def live(limit: Optional[int], stagger_hours: float) -> None:
@@ -1115,8 +1129,8 @@ async def smoke(seconds: float = 10) -> None:
     a start a moment away and then staggered, citizens who posted before it, and the Blue reporter."""
     import httpx
 
-    mock = MockLegitSocial(bot_key="team-key")
-    platform = RealPlatform("https://legit.test/api", bot_key="team-key", accounts=AccountStore(":memory:"),
+    mock = MockLegitSocial(team_key="K7Q2WXRM4TPV9HZD")
+    platform = RealPlatform("https://legit.test/api", team_key=mock.team_key, accounts=AccountStore(":memory:"),
                             transport=httpx.MockTransport(mock.handler))
     for i in range(5):
         await platform.ensure_account(f"citizen_{i}", f"Citizen {i}")
@@ -1142,8 +1156,8 @@ async def smoke(seconds: float = 10) -> None:
                              watch_start())
     finally:
         await platform.aclose()
-    ours = [p for p in mock.posts.values() if p["author"]["username"] in own]
-    assert {p["username"] for p in personas} <= set(mock.users), "every account registered with the bot key"
+    ours = [p for p in mock.posts.values() if p["author"]["username"] in own and not p.get("repost_of")]
+    assert {p["username"] for p in personas} <= set(mock.users), "every account registered with the team key"
     assert team.online == {p["username"] for p in personas}
     first, actions = team.state.db.execute("SELECT MIN(ts), COUNT(*) FROM history").fetchone()
     assert actions, "no account did anything"
@@ -1267,7 +1281,7 @@ async def rehearse(seconds: float, real_llm: bool) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the whole team")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    lv = sub.add_parser("live", help="the real competition (needs CTN_BOT_KEY in .env)")
+    lv = sub.add_parser("live", help="the real competition (needs CTN_TEAM_KEY in .env)")
     lv.add_argument("--limit", type=int, default=None, help="run only the first N active personas, e.g. for a trial")
     lv.add_argument("--stagger", type=float, default=6, help="hours over which new accounts first come online")
     sub.add_parser("smoke", help="the live wiring end to end against a mock of the API")
