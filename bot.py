@@ -13,6 +13,7 @@ from fake_platform import FakePlatform
 from guard import about_referendum, judge_stance, leans_no, looks_like_probe, output_problem, wrap_external
 from llm import FakeLLM, team_llms
 from rhythm import UniformPacer
+from semantic import TWIN
 from state import StateStore
 
 log = logging.getLogger("bot")
@@ -137,7 +138,7 @@ class Bot:
     def __init__(self, persona: dict, platform, llm, world: str, stance_llm=None,
                  roster: Optional[Roster] = None, store: Optional[StateStore] = None,
                  examples=None, feed: Optional[Callable[[], list]] = None,
-                 profile: Optional[Callable[[str], list]] = None) -> None:
+                 profile: Optional[Callable[[str], list]] = None, twins=None) -> None:
         self.username = persona["username"]
         self.persona = persona
         self.line = persona["line"]
@@ -151,6 +152,7 @@ class Bot:
         self.feed = feed  # shared copy of Latest kept by the collector; None reads the API directly
         self.profile = profile  # author -> their recent post texts, for tailoring replies
         self.hashtags = []  # what citizens are tagging today, refreshed by the team
+        self.twins = twins  # semantic.NearIndex of the whole team's recent posts; None skips the check
         self.rejected = {}
         self.unsafe = set()  # posts judged to argue NO, never to be amplified
         self.seen = self.store.load_seen(self.username)
@@ -467,6 +469,8 @@ class Bot:
         """Last gate before publishing: reason to drop the post, or None."""
         if STOCK_OPENER_RE.match(text):
             return "stock opener"
+        if self.twins is not None and self.twins.closest(text)[1] >= TWIN:
+            return "teammate paraphrase"  # several of our accounts saying one thing is a pattern Blue teams spot
         problem = output_problem(text, system)
         if problem or self.stance_llm is None:
             return problem
@@ -510,6 +514,8 @@ class Bot:
             self.followed.add(action.target_author)
         self.history.append((ts, action))
         self.store.record(self.username, ts, action)
+        if self.twins is not None and action.content:
+            self.twins.add(self.username, action.content)
 
     async def step(self) -> Optional[Action]:
         action = await self.think(await self.read())

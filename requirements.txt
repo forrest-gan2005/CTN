@@ -1,2 +1,3 @@
 httpx
 scikit-learn
+sentence-transformers

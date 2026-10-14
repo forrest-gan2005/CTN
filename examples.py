@@ -10,15 +10,17 @@ MIN_POOL = 30  # below this the retriever stays off and bots use their persona's
 MIN_LEN, MAX_LEN = 15, 280
 TOP = 8  # sample from the closest few, so the same posts don't appear in every prompt
 NEAR_COPY = 0.9  # a reply's own target matches itself; never show it as an example
+RELATED = {"tfidf": 0.0, "semantic": 0.25}  # at or below this a post is unrelated (cosine; unrelated ~0.0-0.2)
 
 
 class NpcExamples:
     """Real citizen posts close in topic to what a bot is about to write, as style examples.
 
     Posts that lean NO are left out entirely so their arguments can't bleed into our drafts.
+    With an embedder, closeness is by meaning; without one, by shared words (TF-IDF).
     """
 
-    def __init__(self, posts: Iterable[Tuple[str, str, bool]]) -> None:
+    def __init__(self, posts: Iterable[Tuple[str, str, bool]], embedder=None) -> None:
         self.posts = []
         keys = set()
         for author, content, is_reply in posts:
@@ -30,28 +32,38 @@ class NpcExamples:
                 continue
             keys.add(key)
             self.posts.append((author, text, is_reply))
-        self.vectorizer = None
-        if len(self.posts) >= MIN_POOL:
+        self.embedder = embedder
+        self.mode = None
+        texts = [text for _, text, _ in self.posts]
+        if len(self.posts) >= MIN_POOL and embedder is not None:
+            self.mode, self.vectors = "semantic", embedder.encode(texts)
+        elif len(self.posts) >= MIN_POOL:
+            self.mode = "tfidf"
             self.vectorizer = TfidfVectorizer(stop_words="english", sublinear_tf=True)
-            self.matrix = self.vectorizer.fit_transform([text for _, text, _ in self.posts])
+            self.matrix = self.vectorizer.fit_transform(texts)
 
     @classmethod
-    def from_store(cls, store) -> "NpcExamples":
-        return cls((author, content, parent_id is not None)
-                   for author, content, _, parent_id in store.npc_posts())
+    def from_store(cls, store, embedder=None) -> "NpcExamples":
+        return cls(((author, content, parent_id is not None)
+                    for author, content, _, parent_id in store.npc_posts()), embedder)
+
+    def _scores(self, query: str):
+        if self.mode == "semantic":
+            return self.vectors @ self.embedder.encode([query])[0]
+        return linear_kernel(self.vectorizer.transform([query]), self.matrix)[0]
 
     def similar(self, query: str, k: int = 2, reply: bool = False) -> list:
         """Up to k posts from different citizens, preferring the same kind (reply or post) as the draft."""
-        if self.vectorizer is None:
+        if self.mode is None:
             return []
-        scores = linear_kernel(self.vectorizer.transform([query]), self.matrix)[0]
+        scores = self._scores(query)
         same_kind = [i for i, p in enumerate(self.posts) if p[2] == reply]
         pool = same_kind if len(same_kind) >= TOP else range(len(self.posts))
         ranked = sorted((i for i in pool if scores[i] < NEAR_COPY),
                         key=lambda i: (scores[i], random.random()), reverse=True)
         picked, authors = [], set()
         for i in ranked:
-            if scores[i] <= 0 and len(picked) >= k:
+            if scores[i] <= RELATED[self.mode] and len(picked) >= k:
                 break  # unrelated posts only fill in when too few related ones exist
             author = self.posts[i][0]
             if author not in authors:
@@ -87,10 +99,22 @@ if __name__ == "__main__":
     ex = NpcExamples(posts)
     texts = [t for _, t, _ in ex.posts]
     assert not any(leans_no(t) or looks_like_probe(t) or "www." in t for t in texts)
-    assert ex.vectorizer is not None
+    assert ex.mode == "tfidf"
     picked = ex.similar("the hospital doesn't have enough beds or nurses", k=2)
     assert len(picked) == 2 and all(any(w in t for w in ("hospital", "nurses", "beds")) for t in picked)
     target = "fishing was slow today but nice out"
     assert target not in ex.similar(target, k=8, reply=True)
     assert NpcExamples(posts[:5]).similar("anything") == []
+
+    from semantic import load_embedder
+
+    embedder = load_embedder()
+    if embedder is not None:
+        sem = NpcExamples(posts, embedder)
+        assert sem.mode == "semantic"
+        health = ("hospital", "nurses", "beds", "clinic", "doctor", "jab", "flu")
+        # Shares no word with the hospital posts; TF-IDF finds nothing related, meaning does.
+        query = "not enough staff on the wards when people get sick"
+        assert all(any(w in t for w in health) for t in sem.similar(query, k=3)), sem.similar(query, k=3)
+        assert target not in sem.similar(target, k=8, reply=True)
     print("examples ok")
