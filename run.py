@@ -14,6 +14,7 @@ from examples import NpcExamples
 from fake_platform import FakePlatform
 from llm import FakeLLM, team_llms
 from rhythm import Rhythm, UniformPacer, npc_curve
+from semantic import NearIndex, load_embedder
 from state import StateStore
 
 log = logging.getLogger("run")
@@ -26,6 +27,7 @@ OTHER_FEED = 10  # plus the newest posts from anyone, so unknown accounts still 
 EXAMPLE_POSTS = 20_000  # newest citizen posts the style retriever indexes
 CURVE_POSTS = 100_000  # newest citizen posts the activity curve is measured on
 HASHTAG_WINDOW = timedelta(hours=6)
+TEAM_RECENT = 1000  # our latest posts every new draft is checked against for paraphrase
 
 
 class Team:
@@ -33,19 +35,27 @@ class Team:
 
     def __init__(self, platform, llm, stance_llm, npc_store: NpcStore, state: StateStore,
                  cutoff: datetime = COMPETITION_START, fast: bool = False, collector_interval: float = 5.0,
-                 blue_interval: float = 10.0) -> None:
+                 blue_interval: float = 10.0, embedder=None) -> None:
         personas = load_personas()
         self.own = {p["username"] for p in personas}
         self.npc_store = npc_store
         self.cutoff = cutoff
+        self.embedder = embedder  # None turns every meaning-level check off
+        self.twins = None
+        if embedder is not None:
+            self.twins = NearIndex(embedder, TEAM_RECENT)
+            ours = state.our_posts()[-TEAM_RECENT:]
+            for (username, _, _), vector in zip(ours, embedder.encode([c for _, c, _ in ours])):
+                self.twins.add(username, "", vector)
         self.collector = Collector(platform, npc_store, min_interval=collector_interval)
         self.roster = Roster(own=self.own)
         world = load_world()
         self.bots = [Bot(p, platform, llm, world, stance_llm=stance_llm, roster=self.roster, store=state,
-                         feed=self.feed, profile=lambda author: npc_store.recent_by(author, 5)) for p in personas]
+                         feed=self.feed, profile=lambda author: npc_store.recent_by(author, 5), twins=self.twins)
+                     for p in personas]
         self.pacers = {b.username: UniformPacer(1.0, 4.0) if fast else Rhythm(b.username, npc_curve([]))
                        for b in self.bots}
-        self.scanner = BlueScanner(npc_store, state, self.own, cutoff)
+        self.scanner = BlueScanner(npc_store, state, self.own, cutoff, embedder=embedder)
         reporter = next((p for p in personas if p["line"] == "amplifier"), personas[0])  # rarely posts itself
         self.reporter = Reporter(platform, self.scanner, state, username=reporter["username"],
                                  interval=blue_interval)
@@ -59,8 +69,8 @@ class Team:
         """Pick up what the collector learned: who the citizens are, how and when they write, what they tag."""
         self.roster.npcs = set(self.npc_store.whitelist(self.cutoff))
         rows = self.npc_store.npc_posts(self.cutoff, limit=CURVE_POSTS)
-        examples = NpcExamples((author, content, parent is not None)
-                               for author, content, _, parent in rows[-EXAMPLE_POSTS:])
+        examples = NpcExamples(((author, content, parent is not None)
+                                for author, content, _, parent in rows[-EXAMPLE_POSTS:]), self.embedder)
         curve = npc_curve([ts for _, _, ts, _ in rows])
         hashtags = self.npc_store.top_hashtags(datetime.now(timezone.utc) - HASHTAG_WINDOW, cutoff=self.cutoff)
         for bot in self.bots:
@@ -69,8 +79,8 @@ class Team:
         for pacer in self.pacers.values():
             if isinstance(pacer, Rhythm):
                 pacer.curve = curve
-        log.info("refreshed: %d citizens, %d example posts, hashtags %s",
-                 len(self.roster.npcs), len(examples.posts), hashtags)
+        log.info("refreshed: %d citizens, %d example posts (%s), hashtags %s",
+                 len(self.roster.npcs), len(examples.posts), examples.mode or "too few", hashtags)
 
     async def _refresh_forever(self, every: float) -> None:
         while True:
@@ -100,7 +110,8 @@ async def live() -> None:
     platform = real_platform()
     llm, judge = team_llms()
     own = {p["username"] for p in load_personas()}
-    team = Team(platform, llm, judge, NpcStore(DATA / "npc.db", own_usernames=own), StateStore(DATA / "bots.db"))
+    team = Team(platform, llm, judge, NpcStore(DATA / "npc.db", own_usernames=own), StateStore(DATA / "bots.db"),
+                embedder=load_embedder())
     loop = asyncio.get_running_loop()
     try:
         await team.run(loop.time() + (COMPETITION_END - datetime.now(timezone.utc)).total_seconds())
@@ -180,8 +191,9 @@ async def rehearse(seconds: float, real_llm: bool) -> None:
     cutoff = datetime.now(timezone.utc)  # everything after this counts as "after the start"
 
     llm, judge = team_llms() if real_llm else (FakeLLM(0.2, 0.8), None)
+    # FakeLLM repeats five lines, so the paraphrase checks only make sense with a real model.
     team = Team(platform, llm, judge, npc_store, state, cutoff=cutoff, fast=True,
-                collector_interval=0.5, blue_interval=1.0)
+                collector_interval=0.5, blue_interval=1.0, embedder=load_embedder() if real_llm else None)
     cast = asyncio.create_task(_cast(platform, own, citizens, late, rivals_sloppy, rival_clean, rival_spam))
     loop = asyncio.get_running_loop()
     try:
