@@ -248,9 +248,10 @@ class BlueScanner:
         suspects = {a: v for a, v in self.state.suspects().items()
                     if v[0] != CLEARED and v[0] not in self.disabled and not self.is_ours_or_citizen(a)}
         done = self.state.reported(_now())
+        floor = int(self.state.get_meta("report_floor") or 0)  # see Team.after_restore
         rows = []
         for post_id, author, content in self.npc_store.posts_by(suspects):
-            if post_id in done:
+            if post_id in done or post_id <= floor:
                 continue
             reason, giveaway = suspects[author]
             first = post_id == giveaway

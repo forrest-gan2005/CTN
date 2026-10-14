@@ -87,6 +87,10 @@ CREATE TABLE IF NOT EXISTS schedule (
     username TEXT PRIMARY KEY,   -- when a new account first comes online, kept across restarts
     start_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS inbox (
     username TEXT NOT NULL,
     post_id INTEGER NOT NULL,  -- a reply to one of our posts, waiting for an answer
@@ -312,6 +316,29 @@ class StateStore:
                     self.db.execute("INSERT INTO history (username, ts, type, post_id, content, made_id) "
                                     "SELECT username, sent_at, kind, parent_id, content, ? FROM writes WHERE id = ?",
                                     (made_id, write_id))
+
+    def get_meta(self, key: str) -> Optional[str]:
+        row = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, value))
+
+    def made_ids(self) -> set:
+        return {r[0] for r in self.db.execute("SELECT made_id FROM history WHERE made_id IS NOT NULL")}
+
+    def adopt(self, username: str, ts: str, parent_id: Optional[int], content: Optional[str], made_id: int) -> None:
+        """Take into history a post of ours the platform shows but history lacks (after restoring an older backup):
+        health then watches it, and a reply's target is claimed and seen, so it isn't answered twice."""
+        kind = "reply" if parent_id is not None else "post"
+        with self.db:
+            self.db.execute("INSERT INTO history (username, ts, type, post_id, content, made_id) VALUES (?, ?, ?, ?, ?, ?)",
+                            (username, ts, kind, parent_id, content, made_id))
+            if parent_id is not None:
+                self.db.execute("INSERT OR IGNORE INTO claims VALUES (?, ?)", (f"post:{parent_id}", username))
+                self.db.execute("INSERT OR IGNORE INTO seen VALUES (?, ?)", (username, parent_id))
+                self.db.execute("DELETE FROM inbox WHERE username = ? AND post_id = ?", (username, parent_id))
 
     def ingest_notifications(self, username: str, notes: list, replies: list, received_at: str) -> int:
         """Store notifications as engagement feedback and queue the replies to answer, all in one transaction;

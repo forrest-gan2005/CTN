@@ -131,6 +131,15 @@ class NpcStore:
         rows = self.db.execute(f"SELECT author FROM authors a WHERE {PRE_START} ORDER BY author", (c, c))
         return [r[0] for r in rows]
 
+    def made_by(self, authors: Iterable[str]) -> list:
+        """(id, author, content, parent_id, created_at) of every stored post by these accounts, oldest first."""
+        authors = list(authors)
+        if not authors:
+            return []
+        marks = ",".join("?" * len(authors))
+        return self.db.execute(f"SELECT id, author, content, parent_id, created_at FROM posts WHERE author IN ({marks}) "
+                               "ORDER BY id", authors).fetchall()
+
     def find_post(self, author: str, content: str, since: datetime, parent_id: Optional[int]) -> Optional[int]:
         row = self.db.execute("SELECT id FROM posts WHERE author = ? AND content = ? AND created_at >= ? "
                               "AND parent_id IS ? ORDER BY id LIMIT 1", (author, content, _iso(since), parent_id))

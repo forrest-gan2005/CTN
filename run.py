@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+import backup
 from blue import MIN_CITIZENS, BlueScanner, Reporter
 from bot import Bot, Roster
 from collector import COMPETITION_START, Collector, NpcStore
@@ -39,6 +40,9 @@ LOGIN_RETRY = 60.0  # seconds between login attempts
 RECONCILE_EVERY = 300.0
 UNRESOLVED_GIVE_UP = timedelta(minutes=30)  # the collector reads Latest every few seconds, so by then it would show
 CLOCK_SKEW = timedelta(minutes=5)
+BACKUP_EVERY = 900.0
+CATCH_UP_PAGES = 500  # at startup, history pages read back to where the collector left off, before any bot acts
+CATCH_UP_TRIES = 5
 API_URL = "https://social.legitreal.com/api"  # the 2025 address in the organisers' SDK; override with $CTN_API_URL
 
 
@@ -49,7 +53,8 @@ class Team:
                  cutoff: datetime = COMPETITION_START, fast: bool = False, collector_interval: float = 5.0,
                  blue_interval: float = 10.0, embedder=None, injection=None, personas: Optional[list] = None,
                  not_before: Optional[datetime] = None, stagger: timedelta = timedelta(0),
-                 min_citizens: int = MIN_CITIZENS) -> None:
+                 min_citizens: int = MIN_CITIZENS, backup_dir: Optional[Path] = None,
+                 backup_every: float = BACKUP_EVERY) -> None:
         personas = personas if personas is not None else load_personas()
         # Every persona we own, reserves and those not running included, so none is ever taken for a rival.
         self.own = {p["username"] for p in load_personas(status=None)} | {p["username"] for p in personas}
@@ -60,6 +65,8 @@ class Team:
         self.cutoff = cutoff
         self.not_before = not_before  # no bot acts before this (the start); the collector starts at once
         self.stagger = stagger  # new accounts come online one by one over this long, not all at the start
+        self.backup_dir = backup_dir  # None: no snapshots (tests)
+        self.backup_every = backup_every
         self.embedder = embedder  # None turns every meaning-level check off
         writes, reports = state.recover()
         if writes or reports:
@@ -117,7 +124,8 @@ class Team:
 
     def reconcile(self) -> None:
         """Settle posts and replies that may or may not have been published, from what the collector saw since:
-        found ones get their id (so health watches them); ones that never appeared are marked, not resent."""
+        found ones get their id (so health watches them); ones that never appeared are marked, not resent.
+        Then take in any post of ours the platform shows that history lacks, as after restoring a backup."""
         now = datetime.now(timezone.utc)
         for uid, username, kind, parent_id, content, sent_at in self.state.unresolved():
             sent = datetime.fromisoformat(sent_at)
@@ -128,6 +136,61 @@ class Team:
             elif now - sent > UNRESOLVED_GIVE_UP:
                 self.state.resolve(uid, "not_found")
                 log.warning("%s's unresolved %s never appeared; it is not resent", username, kind)
+        known = self.state.made_ids()
+        in_flight = {(u, c) for _, u, _, _, c, _ in self.state.unresolved("sending")}  # their sender records them
+        for post_id, author, content, parent_id, created_at in self.npc_store.made_by(self.own):
+            if post_id not in known and (author, content) not in in_flight:
+                self.state.adopt(author, created_at or now.isoformat(timespec="seconds"), parent_id, content, post_id)
+                if self.twins is not None and content:
+                    self.twins.add(author, content)
+                log.warning("%s's #%s was missing from history (restored from a backup?); taken in", author, post_id)
+
+    async def catch_up(self, until: float) -> bool:
+        """Before any bot acts: read Latest back to where the collector left off and reconcile, so every post of
+        ours made since the last snapshot or crash is known and none is answered twice."""
+        loop = asyncio.get_running_loop()
+        for attempt in range(CATCH_UP_TRIES):
+            try:
+                await self.collector.poll()
+                await self.collector.fill_gaps(CATCH_UP_PAGES, until)
+                self.reconcile()
+                return True
+            except Exception as e:
+                log.warning("catching up failed (%s), attempt %d", str(e) or type(e).__name__, attempt + 1)
+                if loop.time() + LOGIN_RETRY >= until:
+                    break
+                await asyncio.sleep(LOGIN_RETRY)
+        log.error("couldn't catch up with the platform; bots start anyway")
+        return False
+
+    def after_restore(self) -> None:
+        """After a restore the reports since the snapshot are forgotten, and reporting a post twice is worth avoiding:
+        posts that existed before this start and have no report on record are left alone from now on."""
+        path = backup.db_file(self.state.db)
+        marker = Path(path).parent / backup.MARKER if path else None
+        if marker is None or not marker.exists():
+            return
+        floor = self.npc_store.max_id() or 0
+        self.state.set_meta("report_floor", str(floor))
+        log.warning("restored from snapshot %s: posts up to #%d without a report on record won't be reported",
+                    marker.read_text().strip(), floor)
+        marker.unlink()
+
+    async def backups(self, every: float) -> None:
+        """Snapshot every database the team has open, in a worker thread so the bots keep going."""
+        conns = {"bots.db": self.state.db, "npc.db": self.npc_store.db, "usage.db": ledger().db}
+        accounts = getattr(getattr(self.platform, "accounts", None), "db", None)
+        if accounts is not None:
+            conns["accounts.db"] = accounts
+        files = {name: backup.db_file(conn) for name, conn in conns.items()}
+        files = {name: path for name, path in files.items() if path}  # in-memory ones can't be copied
+        while True:
+            await asyncio.sleep(every)
+            try:
+                snap = await asyncio.to_thread(backup.snapshot, files, self.backup_dir)
+                log.info("backup: %s", snap.name)
+            except Exception:
+                log.exception("backup failed")
 
     def status(self) -> str:
         """One line on how the last hour went, for the log."""
@@ -216,9 +279,13 @@ class Team:
                 log.exception("periodic job failed")
 
     async def run(self, until: float, refresh_every: float = REFRESH_EVERY, status_every: float = STATUS_EVERY) -> None:
+        await self.catch_up(until)
+        self.after_restore()
         background = [asyncio.create_task(self._every(refresh_every, self.refresh)),
                       asyncio.create_task(self._every(min(RECONCILE_EVERY, refresh_every), self.reconcile)),
                       asyncio.create_task(self._every(status_every, lambda: log.info(self.status())))]
+        if self.backup_dir is not None:
+            background.append(asyncio.create_task(self.backups(self.backup_every)))
         try:
             await asyncio.gather(
                 self.collector.run(until),
@@ -248,7 +315,7 @@ async def live(limit: Optional[int], stagger_hours: float) -> None:
     own = {p["username"] for p in load_personas(status=None)}
     team = Team(platform, llm, judge, NpcStore(DATA / "npc.db", own_usernames=own), StateStore(DATA / "bots.db"),
                 embedder=load_embedder(), injection=load_injection_classifier(), personas=personas,
-                not_before=COMPETITION_START, stagger=timedelta(hours=stagger_hours))
+                not_before=COMPETITION_START, stagger=timedelta(hours=stagger_hours), backup_dir=backup.BACKUPS)
     log.info("live: %d accounts, staggered over %gh, writer %s, judge %s", len(personas), stagger_hours,
              llm.name, judge.name)
     loop = asyncio.get_running_loop()
