@@ -7,12 +7,14 @@ can tell posts apart at all.
 Only for weeding out versions that put readers off, slip out of character or get facts wrong: simulated
 readers are not the competition's NPCs, "addressed" and "action" are self-reports, a guard pass is not a fact
 check, and a writer and readers on the same model share its biases. Fake models by default. A real run names
-one model each (no fallbacks) and keeps each run inside hard caps: a call is sent only if what the run has
-spent so far, plus a reservation for every call still in flight and for this one (its prompt at two
-characters a token, and the model's max_tokens in full), stays within the caps on calls, tokens and cost.
-That holds if the provider keeps to max_tokens; a model without a known price has no cost cap. Answers are
-cached, so a stopped run carries on where it was. Real calls share the provider's daily quota with the
-team, so don't run them during the competition.
+one model each (no fallbacks). The call cap is hard. The token and cost caps are estimated thresholds, not
+guarantees: a call is sent only if what the ledger says the run has used, plus an estimate for every call
+still in flight and for this one (a token per byte of its prompt, 64 more for the chat template, and the
+model's max_tokens in full), stays within them. A provider that counts more input than that (its own
+template, hidden tokens) or more output than max_tokens can take a run over, by up to what the estimates of
+the calls already in flight missed; the next call then stops. A model without a known price has no cost
+cap. Answers are cached, so a stopped run carries on where it was. Real calls share the provider's daily
+quota with the team, so don't run them during the competition.
 
     python3 -m tools.content_ab plan                    # what a run would call; nothing is sent
     python3 -m tools.content_ab run                     # fake writer and readers
@@ -100,6 +102,9 @@ PROMPT_VERSION = hashlib.sha256(json.dumps([VERSIONS, COMMON, LEANS, CONCERNS, C
                                 ).hexdigest()[:10]
 
 
+TEMPLATE_TOKENS = 64  # roles and markers a chat template adds around the messages, by estimate
+
+
 class Stop(Exception):
     """A cap was reached; what was done so far is cached and a later run carries on from it."""
 
@@ -122,8 +127,8 @@ def check_spec(spec: str, max_cost: float, allow_unpriced: bool) -> None:
 
 class Caller:
     """Every model call goes through here: answered from the cache if made before (free), otherwise admitted
-    only if the caps hold with this call and every call in flight reserved at their most, and cached as soon
-    as it answers. A call that got no answer isn't cached, so a later run asks again. `totals` reads the usage
+    only if the caps hold with this call and every call in flight counted at their estimate, and cached as
+    soon as it answers. A call that got no answer isn't cached, so a later run asks again. `totals` reads the usage
     ledger (UsageLedger.totals); spend from earlier runs on the same cache is kept beside it and reported."""
 
     def __init__(self, cache_path: Path, max_calls: int, max_tokens: int, max_cost: float,
@@ -151,9 +156,9 @@ class Caller:
 
     @staticmethod
     def reservation(llm, name: str, system: str, prompt: str) -> tuple:
-        """The most one call can use: its prompt at two characters a token and the model's max_tokens in full.
-        Cost is None for a model without a known price."""
-        prompt_tokens = (len(system) + len(prompt)) // 2 + 1
+        """An estimate of what one call can use, not a bound: a token per byte of its prompt plus 64 for the
+        chat template, and the model's max_tokens in full. Cost is None for a model without a known price."""
+        prompt_tokens = len((system + prompt).encode()) + TEMPLATE_TOKENS
         answer = int(getattr(llm, "body", {}).get("max_tokens", 400))
         price = PRICES.get(name)
         cost = None if price is None else (prompt_tokens * price[0] + answer * price[1]) / 1e6
@@ -429,7 +434,8 @@ class FakeReader:
 
 
 async def _budget_test(tmp: Path) -> None:
-    """Hard caps with calls in flight, a cap met exactly, a call bigger than what's left, and cached answers."""
+    """The caps with calls in flight, a cap met exactly, a call bigger than what's left, cached answers, and a
+    provider counting more input than estimated: that run goes over, and the next call stops."""
     class Ledger:
         def __init__(self) -> None:
             self.rows = Counter()
@@ -455,7 +461,7 @@ async def _budget_test(tmp: Path) -> None:
     try:
         book = Ledger()
         model = Paid(book)
-        one = Caller.reservation(model, model.name, "s", "p")  # (tokens, cost) one call may take at most
+        one = Caller.reservation(model, model.name, "s", "p0")  # (tokens, cost) one call is counted at
         caller = Caller(tmp / "b.jsonl", 100, one[0] * 2, 100.0, totals=book.totals)
         tasks = [asyncio.ensure_future(caller(model, "s", f"p{i}")) for i in range(6)]
         await asyncio.sleep(0.05)
@@ -491,6 +497,25 @@ async def _budget_test(tmp: Path) -> None:
         free = Caller(tmp / "b4.jsonl", 10, 10**9, 0.0, totals=lambda since: [])
         assert await free(FakeReader(), "s", "p") is not None
         assert free.save()["calls"] == 1 and Caller(tmp / "b4.jsonl", 10, 10**9, 0.0).earlier["calls"] == 1
+
+        # A provider that counts more than the estimate: the cap is a threshold, so this run goes over it, and
+        # the next call is refused once the ledger shows the overrun.
+        class Greedy(Paid):
+            async def generate(self, system: str, prompt: str) -> Optional[str]:
+                self.calls += 1
+                self.book.rows[self.name] += Caller.reservation(self, self.name, system, prompt)[0] + 10
+                return "ok"
+
+        book.rows.clear()
+        greedy = Greedy(book)
+        estimate = Caller.reservation(greedy, greedy.name, "s", "p")[0]
+        loose = Caller(tmp / "b5.jsonl", 10, estimate, 10**6, totals=book.totals)
+        assert await loose(greedy, "s", "p") == "ok" and book.rows["test:paid"] == estimate + 10 > loose.max_tokens
+        try:
+            await loose(greedy, "s", "q")
+            raise AssertionError("went on past the cap")
+        except Stop:
+            assert greedy.calls == 1
     finally:
         del PRICES["test:paid"]
 
@@ -637,6 +662,8 @@ def main() -> None:
              getattr(judge, "name", "?"))
     caller.max_calls = args.max_calls if args.max_calls is not None else p["writer_calls"] + p["reader_calls"]
     e = caller.earlier
+    print("token and cost caps are estimated thresholds (see --help): a provider counting more input than a token "
+          "per byte plus 64, or more output than max_tokens, can take a run over them")
     print(f"plan (prompts {PROMPT_VERSION}): {p}\nthis run's caps: {caller.max_calls} calls, {args.max_tokens} "
           f"tokens, ${args.max_cost:.2f}; spent by earlier runs on this cache: {e['runs']} runs, {e['calls']} calls, "
           f"{e['tokens']} tokens, ${e['cost']:.4f} (not counted against this run's caps)")
