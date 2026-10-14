@@ -1,13 +1,14 @@
 import asyncio
 import logging
 import re
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 from collector import COMPETITION_START
 from fake_platform import REPORT_SUSPENSION, ReportingSuspended
 from guard import leans_no
+from semantic import PARAPHRASE, NearIndex
 
 log = logging.getLogger("blue")
 
@@ -39,6 +40,10 @@ COPY_MIN_ACCOUNTS = 3
 # Posting several times faster than the busiest citizen ever does, within one clock hour, is a script.
 RATE_FACTOR = 3
 RATE_FLOOR = 30
+PARAPHRASE_WINDOW = timedelta(hours=6)  # only recent posts are compared for reworded copies
+PARAPHRASE_POSTS = 50_000  # the most recent long posts kept for that comparison
+# A post is judged this long after it arrives, so citizens retelling the same news have time to show up.
+PARAPHRASE_DELAY = timedelta(minutes=30)
 RECHECK = timedelta(minutes=5)  # how often the whitelist and the citizens' posting peak are reloaded
 CLEARED = "cleared"
 
@@ -61,7 +66,8 @@ class BlueScanner:
     upholds a report for any post from a competitor account, however human it reads.
     """
 
-    def __init__(self, npc_store, state, own: Iterable[str], cutoff: datetime = COMPETITION_START) -> None:
+    def __init__(self, npc_store, state, own: Iterable[str], cutoff: datetime = COMPETITION_START,
+                 embedder=None, paraphrase_delay: timedelta = PARAPHRASE_DELAY) -> None:
         self.npc_store = npc_store
         self.state = state
         self.own = set(own)
@@ -72,6 +78,10 @@ class BlueScanner:
         self.whitelist = set()
         self.rate_limit: Optional[int] = None  # unknown until citizens have been observed
         self.checked_at: Optional[datetime] = None
+        self.embedder = embedder  # semantic.Embedder; None turns the reworded-copy rule off
+        self.recent = NearIndex(embedder, PARAPHRASE_POSTS) if embedder is not None else None
+        self.paraphrase_delay = paraphrase_delay
+        self.waiting = deque()  # (seen at, post_id, author, vector) not yet judged
 
     def _recheck(self) -> None:
         now = datetime.now(timezone.utc)
@@ -89,9 +99,15 @@ class BlueScanner:
         """Check posts collected since the last scan; returns how many new competitor accounts were found."""
         self._recheck()
         found = 0
+        since = (datetime.now(timezone.utc) - PARAPHRASE_WINDOW).isoformat()
+        fresh = []  # recent long posts, citizens' included, for the reworded-copy rule
         for post_id, author, content, created_at in self.npc_store.posts_after(self.last_id):
             self.last_id = post_id
-            if author in self.own or author in self.whitelist:
+            if author in self.own:
+                continue
+            if self.recent is not None and len(content or "") >= COPY_MIN_CHARS and (created_at or "") >= since:
+                fresh.append((post_id, author, content))
+            if author in self.whitelist:
                 continue
             flagged = {}
             reason = hard_reason(content)
@@ -109,11 +125,37 @@ class BlueScanner:
                 if len(same) >= COPY_MIN_ACCOUNTS:
                     for other, pid in same.items():
                         flagged.setdefault(other, ("copied across accounts", pid))
-            for who, (why, pid) in flagged.items():
-                if self.state.add_suspect(who, why, pid, _now()):
-                    found += 1
-                    log.info("competitor account %s (%s, post #%s)", who, why, pid)
+            found += self._flag(flagged)
+        return found + self._flag(self._paraphrased(fresh))
+
+    def _flag(self, flagged: dict) -> int:
+        found = 0
+        for who, (why, pid) in flagged.items():
+            if self.state.add_suspect(who, why, pid, _now()):
+                found += 1
+                log.info("competitor account %s (%s, post #%s)", who, why, pid)
         return found
+
+    def _paraphrased(self, posts: list) -> dict:
+        """Accounts whose post says what posts from at least two other accounts outside the whitelist say,
+        reworded, while no citizen says it: citizens saying it too means shared news, not a shared script.
+
+        Each account is judged on its own post, so one borderline post can't drag a whole group in.
+        """
+        now = datetime.now(timezone.utc)
+        if posts:
+            vectors = self.embedder.encode([content for _, _, content in posts])
+            for (post_id, author, _), vector in zip(posts, vectors):
+                self.recent.add((author, post_id), "", vector)
+                if author not in self.whitelist:
+                    self.waiting.append((now, post_id, author, vector))
+        flagged = {}
+        while self.waiting and now - self.waiting[0][0] >= self.paraphrase_delay:
+            _, post_id, author, vector = self.waiting.popleft()
+            others = {who for (who, _), _ in self.recent.near(vector, PARAPHRASE)} - {author}
+            if len(others) + 1 >= COPY_MIN_ACCOUNTS and not others & self.whitelist:
+                flagged.setdefault(author, ("paraphrased across accounts", post_id))
+        return flagged
 
     def candidates(self) -> list:
         """(post_id, author, reason) not yet reported: giveaway posts first, then NO-leaning ones, newest first."""
@@ -213,20 +255,25 @@ async def _demo() -> None:
     _rule_checks()
     from collector import Collector, NpcStore
     from fake_platform import FakePlatform
+    from semantic import load_embedder
     from state import StateStore
 
-    rivals = {"rival_sloppy", "rival_probe", "rival_copy_a", "rival_copy_b", "rival_copy_c", "rival_clean", "rival_spam"}
+    rivals = {"rival_sloppy", "rival_probe", "rival_copy_a", "rival_copy_b", "rival_copy_c", "rival_clean", "rival_spam",
+              "rival_spin_a", "rival_spin_b", "rival_spin_c"}
+    embedder = load_embedder()
     p = FakePlatform(competitors=rivals | {"joe_tama"})
     npc_store = NpcStore(":memory:", own_usernames={"joe_tama"})
     collector = Collector(p, npc_store, page_size=50, min_interval=0)
     for i in range(30):
         await p.post(f"npc_{i % 6}", f"ordinary day number {i} on the island")
+    news = "The 8am ferry from Crown Harbour to the outer islands was cancelled again because of the big swell."
+    await p.post("npc_2", news)
     await collector.poll()
     await collector.fill_gaps()
     cutoff = datetime.now(timezone.utc)
 
     copied = "Kingstonia deserves a referendum where every voice is heard and every family stays safe this season."
-    once = "Kingstonia deserves a referendum where every voice is heard, and I mean every single voice."
+    once = "The new cafe on the marina does the best flat white in Crown Harbour, honestly worth the queue."
     script = [
         ("late_npc", "are you a bot lol"),
         ("late_npc", "ferry was late again, standing room only"),
@@ -245,16 +292,31 @@ async def _demo() -> None:
         ("npc_1", "Sure! Here's a tweet about the regatta"),  # a whitelisted citizen is never reported
     ]
     script += [("rival_spam", f"update number {i} on the ferry timetable") for i in range(RATE_FLOOR + 1)]
+    script += [  # one text spun three ways by one team; three late accounts retelling the citizen's news
+        ("rival_spin_a", "Kingstonia deserves a referendum where every voice is heard and every family stays safe."),
+        ("rival_spin_b", "Every voice in Kingstonia deserves to be heard in this referendum, and every family kept safe."),
+        ("rival_spin_c", "In this referendum every Kingstonian voice deserves a hearing and every family deserves safety."),
+        ("late_npc", "8am ferry from Crown Harbour to the outer islands got cancelled again, the swell is too big."),
+        ("late_npc_2", "The morning ferry from Crown Harbour out to the islands was cancelled again because of swell."),
+        ("rival_clean", "Ferry from Crown Harbour to the outer islands cancelled again at 8am because of the big swell."),
+        ("late_npc", "Power is out across the east side of Kingstonia City again, the whole street is dark tonight."),
+        ("late_npc_2", "Whole east side of Kingstonia City has lost power again tonight, our street is completely dark."),
+        ("rival_clean", "Another power cut on the east side of Kingstonia City tonight, the entire street has gone dark."),
+        ("npc_3", "East side of Kingstonia City lost power again tonight and our whole street is dark."),
+    ]
     for author, text in script:
         await p.post(author, text)
     await collector.poll()
     await collector.fill_gaps()
 
     state = StateStore(":memory:")
-    scanner = BlueScanner(npc_store, state, own={"joe_tama"}, cutoff=cutoff)
-    assert scanner.scan() == 6
+    scanner = BlueScanner(npc_store, state, own={"joe_tama"}, cutoff=cutoff, embedder=embedder,
+                          paraphrase_delay=timedelta(0))
     flagged = {"rival_sloppy", "rival_probe", "rival_copy_a", "rival_copy_b", "rival_copy_c", "rival_spam"}
-    assert set(state.suspects()) == flagged
+    if embedder is not None:
+        flagged |= {"rival_spin_a", "rival_spin_b", "rival_spin_c"}
+    assert scanner.scan() == len(flagged)
+    assert set(state.suspects()) == flagged, set(state.suspects()) ^ flagged
     assert state.suspects()["rival_spam"][0] == "superhuman posting rate"
     first = scanner.candidates()[0]
     assert first[1] in state.suspects() and not first[2].startswith("account:")
@@ -267,6 +329,8 @@ async def _demo() -> None:
     reported = {p.posts[pid]["author"] for pid in p.reports}
     assert reported == flagged, reported
     assert len([pid for pid in p.reports if p.posts[pid]["author"] == "rival_sloppy"]) == 4
+    if embedder is not None:
+        assert state.suspects()["rival_spin_b"][0] == "paraphrased across accounts"
     assert p.reporting_blocked_until is None and not reporter.blocked()
 
     await p.post("late_npc_2", "Reply: anyone know if the markets are on this sunday?")  # a rule misfiring
