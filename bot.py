@@ -345,7 +345,7 @@ class Bot:
         elif self.stance_llm is None:
             lean = "no" if any(leans_no(t) for t in topical) else "unknown"
         else:
-            verdicts = [await judge_stance(self.stance_llm, t) for t in topical]
+            verdicts = list(await asyncio.gather(*(judge_stance(self.stance_llm, t) for t in topical)))
             yes, no = verdicts.count("SUPPORT"), verdicts.count("OPPOSE")
             lean = "yes" if yes > no else "no" if no > yes else "undecided"
         self.roster.leans[author] = (lean, now)
