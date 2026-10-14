@@ -213,9 +213,12 @@ class StateStore:
             )
 
     def team_texts(self, since: str, exclude: str) -> list:
-        """(username, text) of every post and reply the other accounts have made since UTC ISO time `since`."""
-        return self.db.execute("SELECT username, content FROM history WHERE type IN ('post', 'reply') AND ts >= ? "
-                               "AND username != ? AND content IS NOT NULL", (since, exclude)).fetchall()
+        """(username, text) of every post and reply the other accounts have made since UTC ISO time `since`,
+        counting ones still being sent and ones that may be live; a write known never to have gone out doesn't."""
+        return self.db.execute(
+            "SELECT username, content FROM history WHERE type IN ('post', 'reply') AND ts >= ? AND username != ? "
+            "AND content IS NOT NULL UNION ALL SELECT username, content FROM writes WHERE sent_at >= ? "
+            "AND username != ? AND status IN ('sending', 'pending')", (since, exclude, since, exclude)).fetchall()
 
     def replies_to(self, author: str, since: str) -> int:
         """How many replies the whole team has sent `author` since UTC ISO time `since`."""

@@ -152,12 +152,51 @@ def phrases(text: str, n: int = 4) -> frozenset:
                      if sum(w not in PHRASE_STOP for w in words[i:i + n]) >= 2)
 
 
-def fresh_phrases(text: str, setting: str) -> frozenset:
-    """The phrases of `text` the setting doesn't account for: not in it, and not built on one of its names
-    (anyone may write "the Mango & Spice Festival")."""
-    known, names = phrases(setting), phrases(setting, 3)
-    return frozenset(p for p in phrases(text) - known
-                     if not any(" ".join(p.split()[i:i + 3]) in names for i in (0, 1)))
+@lru_cache(maxsize=8)
+def setting_names(setting: str) -> frozenset:
+    """The setting's names, as word tuples: runs of capitalised words ("Mango & Spice Festival", "Institute of
+    Technology"), or one capitalised word mid-sentence ("Kingstonia"). A capital that only starts a sentence, or
+    an all-caps YES or H2D2, doesn't make a name."""
+    tokens = list(re.finditer(r"[A-Za-z0-9']+", setting))
+
+    def capital(i: int) -> bool:
+        word = tokens[i].group()
+        return word[0].isupper() and not word.isupper() and word.lower() not in PHRASE_STOP
+
+    names, i = set(), 0
+    while i < len(tokens):
+        if not capital(i):
+            i += 1
+            continue
+        run = [i]
+        while run[-1] + 1 < len(tokens):
+            j = run[-1] + 1
+            if capital(j) and not setting[tokens[run[-1]].end():tokens[j].start()].strip(" &"):
+                run.append(j)
+            elif (tokens[j].group() == "of" and j + 1 < len(tokens) and capital(j + 1)
+                  and not setting[tokens[run[-1]].end():tokens[j + 1].start()].replace("of", "", 1).strip()):
+                run += [j, j + 1]
+            else:
+                break
+        opens = i == 0 or re.search(r'[.!?:;\n"]', setting[tokens[i - 1].end():tokens[i].start()])
+        if len(run) > 1 or not opens:
+            names.add(tuple(tokens[k].group().lower() for k in run))
+        i = run[-1] + 1
+    return frozenset(names)
+
+
+def fresh_phrases(text: str, setting: str, n: int = 4) -> frozenset:
+    """The phrases of `text` the setting doesn't account for: not in it, and still telling with the setting's
+    names counted as little words (anyone may write "off to the Mango & Spice Festival")."""
+    words = re.findall(r"[a-z0-9']+", plain(text).lower())
+    named = set()
+    for name in setting_names(setting):
+        for i in range(len(words) - len(name) + 1):
+            if tuple(words[i:i + len(name)]) == name:
+                named.update(range(i, i + len(name)))
+    return frozenset(" ".join(words[i:i + n]) for i in range(len(words) - n + 1)
+                     if sum(w not in PHRASE_STOP and i + k not in named for k, w in enumerate(words[i:i + n])) >= 2
+                     ) - phrases(setting, n)
 
 
 def sanitize_external(text: str) -> str:

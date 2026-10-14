@@ -239,7 +239,7 @@ hey im kai, 22, crown harbour born and bred. second year engineering at the crow
 and weekend shifts on a supermarket checkout to pay for it. i live at home with my mum ingrid, who works at the
 council, and my little brother oskar who is 15 and steals my chargers.
 
-did my last two years of high school on a laptop in 2021 and missed my formal. graduated over a video call with my
+did my last two years of high school on a laptop during covid and missed my formal. graduated over a video call with my
 camera glitching. my mate rua and i still joke that we never actually finished school.
 
 so yeah im voting yes. i dont want to lose another year online, and i serve hundreds of people every shift, so if
@@ -249,8 +249,8 @@ does.
 
 uni is assignments, robotics club and not enough sleep. our team is building a robot that sorts recycling and it
 mostly sorts itself into walls. regatta week is the best week of the year. climate change is the biggest issue for
-my generation and nobody my age can afford anything anyway. youth service can stay voluntary thanks, id rather finish my
-degree than spend a year on an old frigate.
+my generation and nobody my age can afford anything anyway. if they ever make youth service compulsory im against
+it, id rather finish my degree than spend a year on an old frigate.
 
 supermarket customers are an endless source of content. i dont post my workplace name or anything about my family
 beyond oskar being annoying.

@@ -897,6 +897,10 @@ def persona_story_check() -> None:
     for user in ("ana_moala", "walter_h"):
         said(user, "Off to the Mango & Spice Festival for the food, not the crowds.")
     assert key._shared_phrase("cant wait for the mango & spice festival for real") is None, "setting names are free"
+    for user in ("nadia_kemp", "kai_lind"):  # every word of it is in the setting, but it's no name
+        said(user, "A prepared island sparkles.")
+    assert key._shared_phrase("honestly a prepared island sparkles") == "a prepared island sparkles", \
+        "an ordinary phrase passed as a setting name"
 
     assert check_backstories(personas) == []
     broken = copy.deepcopy(personas)
@@ -906,11 +910,118 @@ def persona_story_check() -> None:
     stories["kai_lind"]["backstory"]["voice"].append('Sign-offs: "Righto."')
     stories["lena_brook"]["backstory"]["voice"].append("Emoji: 🤖")
     stories["grace_teo"]["backstory"]["story"] = "Too short."
+    for user in ("jordan_wake", "nadia_kemp"):
+        stories[user]["backstory"]["story"] += " A prepared island sparkles."
     found = check_backstories(broken)
     for expected in ("phrase 'roti stall by the'", "name 'tevita'", "Rosa in the family", "sign-off 'righto.'",
-                     "emoji '🤖'", "grace_teo: story is 2 words"):
+                     "emoji '🤖'", "grace_teo: story is 2 words", "phrase 'a prepared island sparkles'"):
         assert any(expected in f for f in found), (expected, found)
     print("persona stories ok")
+
+
+async def shared_phrase_race_check() -> None:
+    """Two accounts sending, at the same time, the phrase one teammate already used: only one gets it out,
+    whether both wait on the stance judge together or one is still being sent while the other writes; for posts
+    and replies. A write that never went out frees the phrase; one that may be live keeps it taken."""
+    from ctn.red import bot as bot_module
+
+    phrase = "The vending machine coffee tasted like regret again."
+    by = {p["username"]: p for p in load_personas(status=None)}
+    users = ["jordan_wake", "joe_tama"]
+
+    class Same(FakeLLM):
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            return phrase
+
+    class Together:
+        """A stance judge that answers once both drafts are waiting on it."""
+        name = "together"
+
+        def __init__(self) -> None:
+            self.waiting, self.go = 0, asyncio.Event()
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.waiting += 1
+            if self.waiting == len(users):
+                self.go.set()
+            await self.go.wait()
+            return "NEUTRAL"
+
+    class Held(FakePlatform):
+        """Our first post or reply stays in flight until let go; with `refuse`, it's refused or lost instead."""
+        def __init__(self, refuse=None) -> None:
+            super().__init__()
+            self.sending, self.go, self.refuse = asyncio.Event(), asyncio.Event(), refuse
+
+        async def post(self, username: str, content: str, parent_id: Optional[int] = None) -> dict:
+            if username in users and not self.sending.is_set():
+                self.sending.set()
+                if self.refuse is not None:
+                    raise self.refuse
+                await self.go.wait()
+            return await super().post(username, content, parent_id)
+
+    async def team(kind: str, platform, stance=None) -> tuple:
+        state = StateStore(":memory:")
+        state.record("grace_teo", datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                     bot_module.Action("post", content=f"Night shift done. {phrase}"))
+        roster = Roster(own=set(by), npcs=["npc_1"])
+        bots = []
+        for user in users:
+            target = await platform.post("npc_1", f"Clinic queue was out the door again, {user} saw it")
+            b = Bot(by[user], platform, Same(0, 0), load_world(), stance_llm=stance, roster=roster, store=state)
+
+            async def think(obs, b=b, target=target):
+                if kind == "post":
+                    return await b._compose("post", topic=("daily", "work"))
+                return await b._reply(target, "feed", "npc-random")
+            b.think = think
+            bots.append(b)
+        return state, bots, len(platform.posts)
+
+    for kind in ("post", "reply"):
+        p = FakePlatform()
+        state, bots, before = await team(kind, p, Together())
+        sent = [a for a in await asyncio.gather(*(b.step() for b in bots)) if a is not None]
+        assert len(sent) == 1 and len(p.posts) == before + 1, f"{kind}: both sent after waiting on the judge"
+        if kind == "reply":
+            assert state.reply_mix("")["outcomes"] == {"sent": 1, "dropped": 1}
+            assert len(state.claimed([f"post:{pid}" for pid in p.posts])) == 1, "the dropped reply kept its post"
+
+        p = Held()
+        state, bots, before = await team(kind, p)
+        first = asyncio.create_task(bots[0].step())
+        await p.sending.wait()
+        assert await bots[1].step() is None, f"{kind}: sent while a teammate's was still in flight"
+        p.go.set()
+        assert await first is not None and len(p.posts) == before + 1
+
+        p = Held(refuse=RateLimited(60))
+        state, bots, before = await team(kind, p)
+        try:
+            await bots[0].step()
+            raise AssertionError("the refusal was swallowed")
+        except RateLimited:
+            pass
+        assert await bots[1].step() is not None, f"{kind}: a {kind} that never went out still held the phrase"
+
+        p = Held(refuse=AmbiguousWrite("no answer"))
+        state, bots, before = await team(kind, p)
+        assert await bots[0].step() is not None
+        assert await bots[1].step() is None, f"{kind}: one that may be live freed the phrase"
+
+    state, bots, _ = await team("post", FakePlatform())
+    state.begin_write("jordan_wake", "post", None, phrase, datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    state.recover()  # cut off mid-request by a restart: pending, and not in history
+    assert bots[1]._shared_phrase(phrase), "a write interrupted by a restart freed the phrase"
+    state.db.execute("DELETE FROM writes")
+    state.record("grace_teo", datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                 bot_module.Action("post", content=phrase))
+    assert bots[1]._shared_phrase(phrase) is None, "one teammate saying it twice is still one teammate"
+    print("shared phrase race ok")
 
 
 async def smoke(seconds: float = 10) -> None:
@@ -1095,6 +1206,7 @@ if __name__ == "__main__":
         asyncio.run(reply_route_check())
         asyncio.run(reply_abort_check())
         persona_story_check()
+        asyncio.run(shared_phrase_race_check())
         asyncio.run(smoke())
     else:
         asyncio.run(rehearse(args.seconds, args.real))

@@ -594,14 +594,16 @@ class Bot:
         action = await self.think(await self.read())
         if action is None:
             return None
-        if self.quiet and action.type in ("post", "reply"):
-            # The account went quiet while this was being written: drop it and free the post for a teammate.
-            if action.type == "reply":
-                self.store.release(f"post:{action.post_id}")
-            if action.pick is not None:
-                self.store.end_pick(action.pick, "dropped")
-            log.info("%s went quiet; dropped a %s", self.username, action.type)
-            return None
+        if action.type in ("post", "reply"):
+            if self.quiet:  # the account went quiet while this was being written
+                self._drop(action, "went quiet")
+                return None
+            # Again with nothing awaited between here and the journal: teammates may have sent the phrase while
+            # this was being judged, or be sending it now, and every bot shares this loop and store.
+            shared = self._shared_phrase(action.content)
+            if shared:
+                self._drop(action, f"{shared!r} is already in {SHARED_LIMIT} teammates' posts")
+                return None
         sent_at = _iso(datetime.now(timezone.utc))
         write = None
         if action.type in ("post", "reply"):
@@ -626,6 +628,14 @@ class Bot:
             self.store.end_write(write, "sent", action.made_id)
         self.remember(action)
         return action
+
+    def _drop(self, action: Action, why: str) -> None:
+        """Give up a post or reply just before sending it, freeing its target for a teammate."""
+        if action.type == "reply":
+            self.store.release(f"post:{action.post_id}")
+        if action.pick is not None:
+            self.store.end_pick(action.pick, "dropped")
+        log.info("%s: dropped a %s (%s)", self.username, action.type, why)
 
     def _maybe_live(self, action: Action, write: Optional[int], why: str) -> None:
         """It may be live: keep it in history (without an id until the team finds it) and never resend it."""
