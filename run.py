@@ -888,6 +888,7 @@ def persona_story_check() -> None:
     assert "the biscuit" in system and "never a new relative, job or past event" in system and "During covid" not in system
     assert "During covid you" in plain_bot._system_prompt([], False) and "Your life" not in plain_bot._system_prompt([], False)
     assert "Sign-offs" not in system, "sign-offs are handed out post by post, not listed"
+    assert f"{by['jordan_wake']['age']} (born in {datetime.now(timezone.utc).year - by['jordan_wake']['age']})" in system
 
     walter = Bot(by["walter_h"], FakePlatform(), FakeLLM(0, 0), load_world(), store=state)
     grace = Bot(by["grace_teo"], FakePlatform(), FakeLLM(0, 0), load_world(), store=state)
@@ -940,6 +941,13 @@ def persona_story_check() -> None:
     sides = Bot(by["walter_h"], FakePlatform(), Says(paper), load_world(), stance_llm=Judge("SUPPORT"),
                 store=StateStore(":memory:"))
     assert asyncio.run(sides._compose("post", ("issue", "careful early"))) is not None, "the judge reads what it means"
+    reef = "Better to reef early than get caught in a blow with no canvas left."
+    sides.history.append(("", bot_module.Action("post", content=(
+        f"Saw the forecast for the weekend and the young fellas still taking the tinnies out past the reef. {reef} "
+        "Voting yes on the 2nd so we dont get locked down again."))))
+    assert sides._too_similar("Had my flu jab at the clinic this morning, then sat on the wharf with Eli watching the "
+                              f"crews come in with not much to show for it. {reef}", []), "a sentence of its own, again"
+    assert not sides._too_similar("Had my flu jab at the clinic this morning, before the rush.", [])
     vague = Bot(by["walter_h"], FakePlatform(), Says(paper), load_world(), stance_llm=Judge("NEUTRAL"),
                 store=StateStore(":memory:"))
     assert asyncio.run(vague._compose("post", ("issue", "careful early"))) is None and vague.rejected == {"off topic": 1}, \

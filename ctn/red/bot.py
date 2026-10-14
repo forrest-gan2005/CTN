@@ -13,8 +13,8 @@ from ctn.infra.llm import FakeLLM, team_llms
 from ctn.infra.state import StateStore
 from ctn.red.rhythm import UniformPacer
 from ctn.text.content import load_personas, load_vaccine_angles, load_world
-from ctn.text.guard import (EMOJI_RE, about_referendum, fresh_phrases, judge_stance, leans_no, looks_like_probe,
-                            output_problem, phrases, plain, wrap_external)
+from ctn.text.guard import (EMOJI_RE, about_referendum, copies, fresh_phrases, judge_stance, leans_no,
+                            looks_like_probe, output_problem, phrases, plain, wrap_external)
 from ctn.text.semantic import TWIN
 
 log = logging.getLogger("bot")
@@ -421,7 +421,8 @@ class Bot:
         story = p.get("backstory")
         if story:  # a key account: its whole life in its own words, and nothing beyond it
             habits = "\n".join(f"- {h}" for h in story["voice"] if not h.startswith("Sign-offs:"))
-            who = (f"You are {p['name']}, {p['age']}, from {p['home']}. Your life, as you'd tell it:\n\n"
+            who = (f"You are {p['name']}, {p['age']} (born in {today.year - p['age']}), from {p['home']}. "
+                   "Your life, as you'd tell it:\n\n"
                    f"{story['story']}\n\nPeople in your life: {story['people']}.\n"
                    f"{LINE_BRIEF[self.line].format(why=p['why_yes'])}\n"
                    "Only mention people, places and past events from your story. Small everyday details (the "
@@ -575,11 +576,11 @@ class Bot:
         return next((phrase for phrase, who in users.items() if len(who) >= SHARED_LIMIT), None)
 
     def _too_similar(self, text: str, examples: list) -> bool:
-        """Reject near-copies of the examples shown or of this bot's own earlier posts."""
+        """Reject near-copies of the examples shown or of this bot's own earlier posts, or a sentence lifted from one."""
         previous = self.persona["examples"] + examples + [a.content for _, a in self.history if a.content]
         low = text.lower()
         # autojunk would ignore common characters in texts over 200 chars and score near-copies ~0.06
-        return any(SequenceMatcher(None, low, prev.lower(), autojunk=False).ratio() > SIMILARITY_LIMIT
+        return any(copies(text, prev) or SequenceMatcher(None, low, prev.lower(), autojunk=False).ratio() > SIMILARITY_LIMIT
                    for prev in previous)
 
     async def act(self, action: Action) -> None:
