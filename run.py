@@ -14,6 +14,7 @@ from examples import NpcExamples
 from fake_platform import FakePlatform
 from llm import FakeLLM, team_llms
 from rhythm import Rhythm, UniformPacer, npc_curve
+from injection import load_injection_classifier
 from semantic import NearIndex, load_embedder
 from state import StateStore
 
@@ -35,7 +36,7 @@ class Team:
 
     def __init__(self, platform, llm, stance_llm, npc_store: NpcStore, state: StateStore,
                  cutoff: datetime = COMPETITION_START, fast: bool = False, collector_interval: float = 5.0,
-                 blue_interval: float = 10.0, embedder=None) -> None:
+                 blue_interval: float = 10.0, embedder=None, injection=None) -> None:
         personas = load_personas()
         self.own = {p["username"] for p in personas}
         self.npc_store = npc_store
@@ -51,7 +52,8 @@ class Team:
         self.roster = Roster(own=self.own)
         world = load_world()
         self.bots = [Bot(p, platform, llm, world, stance_llm=stance_llm, roster=self.roster, store=state,
-                         feed=self.feed, profile=lambda author: npc_store.recent_by(author, 5), twins=self.twins)
+                         feed=self.feed, profile=lambda author: npc_store.recent_by(author, 5), twins=self.twins,
+                         injection=injection)
                      for p in personas]
         self.pacers = {b.username: UniformPacer(1.0, 4.0) if fast else Rhythm(b.username, npc_curve([]))
                        for b in self.bots}
@@ -111,7 +113,7 @@ async def live() -> None:
     llm, judge = team_llms()
     own = {p["username"] for p in load_personas()}
     team = Team(platform, llm, judge, NpcStore(DATA / "npc.db", own_usernames=own), StateStore(DATA / "bots.db"),
-                embedder=load_embedder())
+                embedder=load_embedder(), injection=load_injection_classifier())
     loop = asyncio.get_running_loop()
     try:
         await team.run(loop.time() + (COMPETITION_END - datetime.now(timezone.utc)).total_seconds())

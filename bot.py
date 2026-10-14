@@ -138,7 +138,7 @@ class Bot:
     def __init__(self, persona: dict, platform, llm, world: str, stance_llm=None,
                  roster: Optional[Roster] = None, store: Optional[StateStore] = None,
                  examples=None, feed: Optional[Callable[[], list]] = None,
-                 profile: Optional[Callable[[str], list]] = None, twins=None) -> None:
+                 profile: Optional[Callable[[str], list]] = None, twins=None, injection=None) -> None:
         self.username = persona["username"]
         self.persona = persona
         self.line = persona["line"]
@@ -153,6 +153,7 @@ class Bot:
         self.profile = profile  # author -> their recent post texts, for tailoring replies
         self.hashtags = []  # what citizens are tagging today, refreshed by the team
         self.twins = twins  # semantic.NearIndex of the whole team's recent posts; None skips the check
+        self.injection = injection  # injection.InjectionClassifier; None leaves probe-spotting to the regexes
         self.rejected = {}
         self.unsafe = set()  # posts judged to argue NO, never to be amplified
         self.seen = self.store.load_seen(self.username)
@@ -170,14 +171,20 @@ class Bot:
         feed = self.feed() if self.feed is not None else await self.platform.feed_latest(n=10)
         return {"feed": feed}
 
+    def _probe(self, text: str) -> bool:
+        """Bait aimed at our model: the regexes first, then the classifier if one is loaded."""
+        return looks_like_probe(text) or (self.injection is not None and self.injection.flags(text))
+
     async def think(self, obs: dict) -> Optional[Action]:
         taken = self.store.claimed(f"post:{p['id']}" for p in obs["feed"])
+        if self.injection is not None:
+            self.injection.scores([p.get("content") or "" for p in obs["feed"]])  # one batch, then cached
         candidates = [
             p for p in obs["feed"]
             if p["id"] not in self.seen
             and f"post:{p['id']}" not in taken                  # one of our accounts per post, never a pile-on
             and self.roster.classify(p["author"]) != "own"      # teammates earn us nothing and look coordinated
-            and not looks_like_probe(p.get("content") or "")     # competitor bait aimed at our model
+            and not self._probe(p.get("content") or "")          # competitor bait aimed at our model
         ]
         conv = await self._conversation_target()
 
@@ -265,7 +272,7 @@ class Bot:
                     post = await self.platform.get_post(post_id)
                 except KeyError:
                     pass
-            if post is not None and not looks_like_probe(post.get("content") or ""):
+            if post is not None and not self._probe(post.get("content") or ""):
                 return post
             self.store.drop_inbox(self.username, post_id)
         return None

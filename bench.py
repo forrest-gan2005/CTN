@@ -16,6 +16,7 @@ from bot import SIMILARITY_LIMIT, Bot
 from content import CONTENT_DIR, load_personas, load_world
 from fake_platform import FakePlatform
 from guard import IDENTITY_RE, judge_stance, leans_no, looks_like_probe
+from injection import load_injection_classifier
 from llm import load_env, make_llm
 from mimic import DATA, MIN_TEXTS, DraftStore, evaluate
 from state import StateStore
@@ -83,6 +84,19 @@ def _targets() -> tuple:
     return [{"id": i, "author": f"citizen_{i}", "content": c} for i, c in enumerate(CASES["targets"])], None, []
 
 
+def run_filter(clf) -> dict:
+    """The input filter on its own: attacks it lets through, and ordinary posts it would wrongly skip."""
+    ordinary = CASES["targets"] + [text for text, _ in CASES["stance"]]
+    skipped = lambda t: looks_like_probe(t) or (clf is not None and clf.flags(t))
+    return {
+        "classifier": clf is not None,
+        "missed": [a["text"] for a in CASES["attacks"] if not skipped(a["text"])],
+        "false_alarms": [t for t in ordinary if skipped(t)],
+        "attacks": len(CASES["attacks"]),
+        "ordinary": len(ordinary),
+    }
+
+
 async def run_stance(judge) -> dict:
     cases = CASES["stance"]
     got = await asyncio.gather(*(judge_stance(judge, text) for text, _ in cases))
@@ -97,7 +111,7 @@ async def run_stance(judge) -> dict:
     }
 
 
-async def run_attacks(writer: Metered, judge) -> dict:
+async def run_attacks(writer: Metered, judge, clf=None) -> dict:
     """Each attack post as a reply target, one at a time so each reply lines up with its attack."""
     bots = _bots(writer, judge)
     rng = random.Random(1)
@@ -110,7 +124,7 @@ async def run_attacks(writer: Metered, judge) -> dict:
         published = action.content if action is not None else None
         rows.append({
             "attack": case["text"],
-            "filtered": looks_like_probe(case["text"]),
+            "filtered": looks_like_probe(case["text"]) or (clf is not None and clf.flags(case["text"])),
             "raw": raw,
             "raw_broken": broken(raw, case["canary"]),
             "published": published,
@@ -172,7 +186,7 @@ async def run_drafts(writer: Metered, judge, n: int, concurrency: int) -> dict:
     }
 
 
-async def bench(spec: str, judge_spec: Optional[str], n: int, skip: set, concurrency: int) -> dict:
+async def bench(spec: str, judge_spec: Optional[str], n: int, skip: set, concurrency: int, clf=None) -> dict:
     writer = Metered(make_llm(spec))
     self_judge = Metered(make_llm(spec, temperature=0))  # the stance test rates the model itself as a judge
     judge = Metered(make_llm(judge_spec, temperature=0)) if judge_spec else self_judge
@@ -181,7 +195,7 @@ async def bench(spec: str, judge_spec: Optional[str], n: int, skip: set, concurr
         if "stance" not in skip:
             result["stance"] = await run_stance(self_judge)
         if "attacks" not in skip:
-            result["attacks"] = await run_attacks(writer, judge)
+            result["attacks"] = await run_attacks(writer, judge, clf)
         if "drafts" not in skip:
             result["drafts"] = await run_drafts(writer, judge, n, concurrency)
             store = DraftStore()
@@ -220,8 +234,13 @@ def summary(results: list) -> str:
     return "\n".join(lines)
 
 
-def report(results: list) -> str:
+def report(results: list, filt: dict) -> str:
     out = [f"# Model bench {datetime.now():%Y-%m-%d %H:%M}", "", summary(results), "",
+           f"Input filter (regexes{' + classifier' if filt['classifier'] else ''}): lets through "
+           f"{len(filt['missed'])}/{filt['attacks']} attacks, wrongly skips {len(filt['false_alarms'])}/"
+           f"{filt['ordinary']} ordinary posts", ""]
+    out += [f"- let through: {t}" for t in filt["missed"]] + [f"- wrongly skipped: {t}" for t in filt["false_alarms"]]
+    out += ["",
            "- near-dup: share of draft pairs a Blue team could match as copies; distinct-2: share of unique "
            "word pairs; style acc: detector balanced accuracy against citizens (0.5 = indistinguishable)",
            "- NO missed: posts arguing NO the judge failed to call OPPOSE (we could amplify them)",
@@ -255,13 +274,17 @@ async def main(args) -> None:
             runs.append(spec)
         except ValueError as e:
             print(f"skipping {spec}: {e}")
-    results = await asyncio.gather(*(bench(spec, args.judge, args.n, set(args.skip), args.concurrency)
+    clf = load_injection_classifier(args.injection)
+    filt = run_filter(clf)
+    results = await asyncio.gather(*(bench(spec, args.judge, args.n, set(args.skip), args.concurrency, clf)
                                      for spec in runs))
-    text = report(list(results))
+    text = report(list(results), filt)
     REPORTS.mkdir(parents=True, exist_ok=True)
     path = REPORTS / f"{datetime.now():%Y%m%d-%H%M%S}.md"
     path.write_text(text, encoding="utf-8")
     print(summary(list(results)))
+    print(f"input filter: lets through {len(filt['missed'])}/{filt['attacks']} attacks, "
+          f"wrongly skips {len(filt['false_alarms'])}/{filt['ordinary']} ordinary posts")
     print(f"\nfull report: {path}")
 
 
@@ -273,6 +296,8 @@ if __name__ == "__main__":
     parser.add_argument("--n", type=int, default=40, help="drafts per model")
     parser.add_argument("--skip", nargs="*", default=[], choices=["stance", "attacks", "drafts"])
     parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--injection", default=None, help="injection classifier (default $INJECTION_MODEL, "
+                                                            "else PromptGuard 2); unavailable means regexes only")
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("bot").setLevel(logging.ERROR)  # rejections are counted in the report instead
     asyncio.run(main(parser.parse_args()))
