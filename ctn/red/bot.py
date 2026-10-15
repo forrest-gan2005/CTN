@@ -52,6 +52,8 @@ SIGN_OFF_PROB = 0.15  # a key account's sign-off on every post is a tic people n
 EMOJI_PROB = 0.3  # posts allowed an emoji, for a voice that has the habit at all (an engineering guess)
 NO_TAG_HINTS = ("voteno", "keepkingstoniaopen", "protectchoice", "nomandate", "mybody")
 VACCINE_ANGLES = load_vaccine_angles()
+WORD_RE = re.compile(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)*")
+PICK = object()  # _user_prompt draws the sign-off itself
 
 LINE_BRIEF = {
     "persuade": "You are voting YES in the referendum, and that never changes: {why}.",
@@ -103,6 +105,27 @@ STOCK_OPENER_RE = re.compile(
 )
 LABEL_RE = re.compile(r"^(post|reply|tweet)\s*:\s*", re.IGNORECASE)
 
+
+
+def _words(text: str) -> list:
+    """(word, where it starts), case folded and apostrophes dropped, so "Tide's" matches "tides"."""
+    return [(m.group().replace("'", "").lower(), m.start()) for m in WORD_RE.finditer(plain(text))]
+
+
+def strip_sign_off(text: str, sign_offs: list) -> str:
+    """`text` without any of these sign-offs at its end, when it stands apart after a sentence, a line break or an
+    emoji; the same words closing a sentence ("we just want some peace") stay."""
+    words = [w for w, _ in _words(text)]
+    for sign in sign_offs:
+        tail = [w for w, _ in _words(sign)]
+        if not tail or len(tail) >= len(words) or words[-len(tail):] != tail:
+            continue
+        start = _words(text)[-len(tail)][1]
+        before = text[:start].rstrip()
+        last = before.rstrip("\ufe0f\u200d")[-1:]
+        if "\n" in text[len(before):start] or last in (".", "!", "?", "\u2026") or EMOJI_RE.match(last):
+            return before
+    return text
 
 @dataclass
 class Action:
@@ -281,11 +304,14 @@ class Bot:
                     pass
             if self.profile is not None and self.roster.classify(target["author"]) == "npc":
                 about = [t for t in self.profile(target["author"]) if t != target.get("content")][:3]
-        raw = await self.llm.generate(system, self._user_prompt(kind, target, topic, earlier, about))
+        sign = self._pick_sign_off(kind)
+        raw = await self.llm.generate(system, self._user_prompt(kind, target, topic, earlier, about, sign=sign))
         model = getattr(raw, "model", None) or getattr(self.llm, "name", None)  # a fallback model may have written it
         content = self._clean(raw)
         if content is None:
             return None
+        # Sign-offs are the code's to hand out: one the model adds unasked, often copied from a recent post, goes.
+        content = strip_sign_off(content, [s for s in self._sign_offs() if s != sign])
         if self._too_similar(content, examples):
             self.rejected["too similar"] = self.rejected.get("too similar", 0) + 1
             return None
@@ -455,9 +481,18 @@ class Bot:
             f"{own_words} Output only the text of the post: no quotation marks, no explanation, no label."
         )
 
+    def _sign_offs(self) -> list:
+        story = self.persona.get("backstory") or {}
+        return [s for h in story.get("voice", []) if h.startswith("Sign-offs:") for s in re.findall(r'"([^"]+)"', h)]
+
+    def _pick_sign_off(self, kind: str) -> Optional[str]:
+        signoffs = self._sign_offs()
+        return random.choice(signoffs) if kind == "post" and signoffs and random.random() < SIGN_OFF_PROB else None
+
     def _user_prompt(self, kind: str, target: Optional[dict], topic: tuple, earlier: Optional[str] = None,
-                     about: Optional[list] = None) -> str:
-        """`earlier` is our own post that `target` replies to; `about` is what the author posted lately."""
+                     about: Optional[list] = None, sign=PICK) -> str:
+        """`earlier` is our own post that `target` replies to; `about` is what the author posted lately; `sign`
+        the sign-off this post may end with."""
         recent = [a.content for _, a in self.history if a.content][-5:]
         parts = []
 
@@ -517,8 +552,8 @@ class Bot:
 
         story = self.persona.get("backstory")
         if story:  # told outright, since a listed habit turns up in every post
-            signoffs = [s for h in story["voice"] if h.startswith("Sign-offs:") for s in re.findall(r'"([^"]+)"', h)]
-            sign = random.choice(signoffs) if kind == "post" and signoffs and random.random() < SIGN_OFF_PROB else None
+            if sign is PICK:
+                sign = self._pick_sign_off(kind)
             if sign:
                 parts.append(f'If it fits, you can end with your sign-off "{sign}".')
             if any(EMOJI_RE.search(h) for h in story["voice"] if not h.startswith("Sign-offs:")):
@@ -726,6 +761,41 @@ async def npc_traffic(platform, npcs: list, own: set) -> None:
             await platform.post(author, random.choice(NPC_POSTS))
 
 
+async def sign_off_check() -> None:
+    """A sign-off the writer adds unasked is taken off, wherever it learned it (a recent post of ours, most
+    often); the one the code offered stays; the same words inside a sentence stay."""
+    signs = ["Thats all from me.", "Righto.", "Tide's turning, so that's me.", "Make of it what you will.", "peace ✌️"]
+    for text, left in (("Curry was worth it. Make of it what you will.", "Curry was worth it."),
+                       ("Low tide. Tide\u2019s turning, so thats me.", "Low tide."),
+                       ("robot hit the wall 🤖 peace ✌️", "robot hit the wall 🤖"),
+                       ("Long day.\nThats all from me", "Long day."),
+                       ("we just want some peace", "we just want some peace"),
+                       ("Righto.", "Righto.")):
+        assert strip_sign_off(text, signs) == left, (text, strip_sign_off(text, signs))
+
+    class Signs:
+        name = "signs"
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompt = prompt
+            return "Wind came round to the south and the boats stayed in. Righto."
+
+    walter = next(p for p in load_personas(status=None) if p["username"] == "walter_h")
+    for offered in (None, "Righto.", "Make of it what you will."):
+        writer = Signs()
+        bot = Bot(walter, FakePlatform(), writer, load_world(), roster=Roster(own={"walter_h"}, npcs=[]),
+                  store=StateStore(":memory:"))
+        bot._pick_sign_off = lambda kind, draws=iter([offered, "Thats all from me."]): next(draws)  # drawn once
+        action = await bot._compose("post", topic=("daily", "the weather"))
+        assert action is not None and action.content.endswith("Righto.") == (offered == "Righto."), (
+            offered, action.content)
+        assert ("sign-off" in writer.prompt) == (offered is not None) and (offered or "") in writer.prompt
+    print("sign-offs ok")
+
+
 async def quiet_race() -> None:
     """An account that goes quiet while a post or reply is being written publishes neither; it can still like."""
     global ACTION_WEIGHTS, QUIET_ACTIONS
@@ -898,6 +968,7 @@ if __name__ == "__main__":
     logging.getLogger("httpx").setLevel(logging.WARNING)
     n_bots = args.bots or (3 if args.real else 20)
     random.seed(0)
+    asyncio.run(sign_off_check())
     asyncio.run(quiet_race())
     asyncio.run(notification_durability())
     asyncio.run(main(args.real, n_bots, args.seconds))
