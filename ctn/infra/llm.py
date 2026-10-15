@@ -31,6 +31,7 @@ PROVIDERS = {
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", 20),
     "mistral": ("https://api.mistral.ai/v1", "MISTRAL_API_KEY", 60),
     "github": ("https://models.github.ai/inference", "GITHUB_TOKEN", 10),
+    "deepseek": ("https://api.deepseek.com", "DEEPSEEK_API_KEY", 60),  # add ?thinking={"type":"disabled"}
     "official": (None, "CTN_LLM_KEY", None),  # URL goes in CTN_LLM_URL once the organisers publish it
 }
 RETRY_DELAY_RE = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"')
