@@ -176,13 +176,16 @@ class NpcStore:
         c = _iso(cutoff)
         return self.db.execute(f"SELECT 1 FROM authors a WHERE a.author = ? AND {PRE_START}", (author, c, c)).fetchone() is not None
 
-    def npc_posts(self, cutoff: datetime = COMPETITION_START, limit: Optional[int] = None) -> list:
-        """(author, content, created_at, parent_id) by whitelisted citizens, oldest first; `limit` keeps the newest."""
+    def npc_posts(self, cutoff: datetime = COMPETITION_START, limit: Optional[int] = None,
+                  badged: bool = True) -> list:
+        """(author, content, created_at, parent_id) by whitelisted citizens, oldest first; `limit` keeps the newest.
+        badged=False leaves out verified accounts (papers, reporters, campaigners, officials): not how or when
+        ordinary people here write."""
         c = _iso(cutoff)
         rows = self.db.execute(
             "SELECT p.author, p.content, p.created_at, p.parent_id FROM posts p "
             f"JOIN authors a ON a.author = p.author WHERE {PRE_START} AND p.content IS NOT NULL "
-            "ORDER BY p.id DESC LIMIT ?",
+            f"{'' if badged else 'AND a.verified = 0 '}ORDER BY p.id DESC LIMIT ?",
             (c, c, -1 if limit is None else limit),
         ).fetchall()
         return rows[::-1]
@@ -452,6 +455,10 @@ async def _demo(seconds: float) -> None:
         assert counted[author] == sum(post["author"] == author for post in p.posts.values())
     assert all(post["author"] in wl for post in store.recent_citizen_posts(20, cutoff))
     assert len(store.npc_posts(cutoff, limit=5)) == 5
+    paper = next(iter(wl))
+    store.mark_verified(paper)
+    assert paper in {a for a, *_ in store.npc_posts(cutoff)}
+    assert {a for a, *_ in store.npc_posts(cutoff, badged=False)} == wl - {paper}, "a verified account as a citizen"
     assert {a for a, _ in store.unknown_posts(cutoff)} == {a for a in late if any(
         post["author"] == a for post in p.posts.values())}
     print(f"\ncollected {store.count()}/{len(p.posts)} posts, filled {collector.gaps} gaps, "

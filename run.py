@@ -116,7 +116,7 @@ class Team:
     def refresh(self) -> None:
         """Pick up what the collector learned: who the citizens are, how and when they write, what they tag."""
         self.roster.npcs = set(self.npc_store.whitelist(self.cutoff))
-        rows = self.npc_store.npc_posts(self.cutoff, limit=CURVE_POSTS)
+        rows = self.npc_store.npc_posts(self.cutoff, limit=CURVE_POSTS, badged=False)  # how citizens write
         examples = NpcExamples(((author, content, parent is not None)
                                 for author, content, _, parent in rows[-EXAMPLE_POSTS:]), self.embedder)
         curve = npc_curve([ts for _, _, ts, _ in rows])
