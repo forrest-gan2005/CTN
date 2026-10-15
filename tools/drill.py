@@ -382,6 +382,15 @@ def silent_phases_check() -> None:
     print("silent phases ok")
 
 
+def code_version() -> str:
+    """The commit the drill ran from, and whether the tree had changes on top of it."""
+    git = lambda *args: subprocess.run(["git", *args], cwd=paths.ROOT, capture_output=True, text=True).stdout.strip()
+    try:
+        return git("rev-parse", "--short", "HEAD") + (" +changes" if git("status", "--porcelain", "--", "*.py") else "")
+    except OSError:
+        return "unknown"
+
+
 def keep_evidence(stage: Stage, tmp: Path, why: str, marks: dict) -> Path:
     """Copy a failed run's databases and child logs, with the platform's posts and every post request it got,
     why it failed and its timing marks, somewhere that outlives the run."""
@@ -390,7 +399,9 @@ def keep_evidence(stage: Stage, tmp: Path, why: str, marks: dict) -> Path:
     (tmp / "platform_posts.json").write_text(json.dumps(posts, default=list, indent=1))
     (tmp / "post_requests.json").write_text(json.dumps(requests, indent=1))
     (tmp / "failures.txt").write_text(why + "\n")
-    (tmp / "marks.json").write_text(json.dumps({**marks, "cut_writes": stage.cut_writes}, indent=1))
+    (tmp / "marks.json").write_text(json.dumps({**marks, "cut_writes": stage.cut_writes, "code": code_version()},
+                                               indent=1))
+    (tmp / "request_times.json").write_text(json.dumps([round(t, 2) for t in list(stage.request_times)]))
     root = paths.DATA / "drill-failures"
     root.mkdir(parents=True, exist_ok=True)
     saved = Path(tempfile.mkdtemp(prefix=datetime.now().strftime("%Y%m%d-%H%M%S-"), dir=root))
