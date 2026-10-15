@@ -110,6 +110,9 @@ class NpcStore:
                 [(r[1], r[4], r[5], r[6], int(bool(p.get("author_verified"))))
                  for r, p in zip(rows, posts) if r in new],
             )
+            # A badge can appear later: any read of any post carrying it counts, a post seen before included.
+            self.db.executemany("UPDATE authors SET verified = 1 WHERE author = ?",
+                                [(p["author"],) for p in posts if p.get("author_verified")])
         return len(new)
 
     def count(self) -> int:
@@ -161,6 +164,10 @@ class NpcStore:
     def verified(self) -> set:
         """Accounts the platform shows with its verified badge."""
         return {r[0] for r in self.db.execute("SELECT author FROM authors WHERE verified = 1")}
+
+    def mark_verified(self, author: str) -> None:
+        with self.db:
+            self.db.execute("UPDATE authors SET verified = 1 WHERE author = ?", (author,))
 
     def is_verified(self, author: str) -> bool:
         return self.db.execute("SELECT 1 FROM authors WHERE author = ? AND verified = 1", (author,)).fetchone() is not None

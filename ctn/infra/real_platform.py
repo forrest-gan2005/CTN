@@ -155,12 +155,13 @@ class RealPlatform:
         """One of our posts from before a restart: replies to it are notifications again."""
         self.ours[post_id] = username
 
-    async def ensure_account(self, username: str, display_name: str) -> None:
-        """Log in, registering the account onto the team with its team code the first time."""
+    async def ensure_account(self, username: str, display_name: str, register: bool = True) -> None:
+        """Log in, registering the account onto the team with its team code the first time (never, with
+        register=False: a failed login then raises)."""
         password = self.accounts.password(username)
         login = {"username": username, "password": password}
         resp = await self._send("POST", "/auth/login", json=login)
-        if resp.status_code in (400, 401, 403, 404) and self.team_key:
+        if resp.status_code in (400, 401, 403, 404) and self.team_key and register:
             try:
                 resp = await self._send("POST", "/auth/register", idempotent=False, json={
                     **login, "display_name": display_name or None, "team_key": self.team_key})
@@ -278,6 +279,13 @@ class RealPlatform:
         if resp.status_code in (403, 429) and any(w in resp.text.lower() for w in ("suspend", "block", "banned")):
             raise ReportingSuspended(resp.text[:200])
         resp.raise_for_status()
+
+    async def verified_now(self, username: str) -> bool:
+        """Whether this account has the platform's verified badge, asked afresh (a badge can come later)."""
+        resp = await self._send("GET", f"/accounts/{await self.account_id(username)}")
+        resp.raise_for_status()
+        self._know(resp.json())
+        return bool(self.badges.get(self.ids[username]))
 
     async def account_id(self, username: str) -> int:
         """The id behind a username: from the cache, else searching page by page until it turns up or the

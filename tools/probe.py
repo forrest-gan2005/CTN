@@ -1,10 +1,11 @@
 """Check the live platform against what RealPlatform assumes, reading only, and keep what it answered.
 
     python3 -m tools.probe                  anonymous reads: feeds, a post, its replies, accounts, tags, the lock
-    python3 -m tools.probe --login NAME     also logs in as one of our accounts (registering it with
-                                            $CTN_TEAM_KEY if it's new) and reads /auth/me, its mentions, home
+    python3 -m tools.probe --login NAME     also logs in as one of our existing accounts (its password is in
+                                            data/accounts.db) and reads /auth/me, its mentions and home
 
-Nothing is ever posted, liked, followed or reported. Samples and a report go to data/platform2026/probe-<time>/.
+Nothing is ever posted, liked, followed or reported, and no account is ever registered: a login that fails
+is reported, not retried as a registration. Samples and a report go to data/platform2026/probe-<time>/.
 """
 import argparse
 import asyncio
@@ -120,7 +121,12 @@ class Probe:
             self.note("  our cursor pages exactly like the server's")
 
     async def logged_in(self, username: str) -> None:
-        await self.p.ensure_account(username, username)
+        try:
+            await self.p.ensure_account(username, username, register=False)
+        except Exception as e:
+            self.problem(f"couldn't log in as {username} ({str(e) or type(e).__name__}); the probe never "
+                         "registers accounts")
+            return
         headers = self.p._auth_headers(username)
         me = await self.get("auth_me", "/auth/me", headers=headers)
         if isinstance(me, dict):
@@ -150,15 +156,12 @@ async def main(login: str) -> None:
     out = paths.DATA / "platform2026" / f"probe-{stamp}"
     out.mkdir(parents=True, exist_ok=True)
     platform = RealPlatform(os.environ.get("CTN_API_URL") or API_URL, team_key=os.environ.get("CTN_TEAM_KEY"),
-                            accounts=AccountStore())
+                            accounts=AccountStore())  # the team key is unused: the probe never registers
     probe = Probe(platform, out)
     try:
         await probe.anonymous()
         if login:
-            if not platform.team_key and platform.accounts.token(login) is None:
-                probe.problem("set CTN_TEAM_KEY in .env to register the account")
-            else:
-                await probe.logged_in(login)
+            await probe.logged_in(login)
     finally:
         await platform.aclose()
     report = "\n".join(probe.lines + ["", f"{len(probe.problems)} problem(s)"] + probe.problems)
@@ -166,8 +169,40 @@ async def main(login: str) -> None:
     print(f"\n{len(probe.problems)} problem(s); samples and report in {out}")
 
 
+async def _demo() -> None:
+    """--login never registers: an unknown account is a problem reported, with no /auth/register sent."""
+    import tempfile
+    from pathlib import Path
+
+    import httpx
+
+    from ctn.infra.real_platform import MockLegitSocial
+
+    mock, seen = MockLegitSocial(team_key="k"), []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return mock.handler(request)
+    accounts = AccountStore(":memory:")
+    platform = RealPlatform("https://legit.test/api", team_key="k", accounts=accounts,
+                            transport=httpx.MockTransport(handler))
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Probe(platform, Path(tmp))
+        await probe.logged_in("new_test_user")
+        assert "/api/auth/register" not in seen and mock.users == {}, seen
+        assert any("never registers" in p for p in probe.problems)
+        await platform.ensure_account("joe_tama", "Joe")  # the team registered it earlier
+        seen.clear()
+        await Probe(platform, Path(tmp)).logged_in("joe_tama")
+        assert "/api/auth/login" in seen and "/api/auth/register" not in seen
+    await platform.aclose()
+    print("probe ok")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--login", metavar="USERNAME", default="",
-                        help="one of our accounts to log in as (registered with $CTN_TEAM_KEY if new)")
-    asyncio.run(main(parser.parse_args().login))
+                        help="one of our existing accounts to log in as (never registers one)")
+    parser.add_argument("--self-test", action="store_true", help="check the probe itself, offline")
+    args = parser.parse_args()
+    asyncio.run(_demo() if args.self_test else main(args.login))

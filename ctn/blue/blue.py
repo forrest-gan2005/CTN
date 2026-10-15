@@ -285,6 +285,30 @@ class Reporter:
     def blocked(self) -> bool:
         return self.blocked_until is not None and datetime.now(timezone.utc) < self.blocked_until
 
+    async def _unbadged(self, author: str) -> bool:
+        """Asked of the platform just before reporting: a verified account is never reported, and a badge
+        can come after the account was flagged. If it can't be told, not this round."""
+        verified_now = getattr(self.platform, "verified_now", None)
+        if verified_now is None:
+            return True
+        try:
+            verified = await verified_now(author)
+        except Exception as e:
+            log.warning("couldn't check whether %s is verified (%s); not reporting it this round", author,
+                        str(e) or type(e).__name__)
+            return False
+        if verified:
+            self.scanner.npc_store.mark_verified(author)
+            log.info("%s is verified now; never reported", author)
+        return not verified
+
+    async def _feed_locked(self) -> bool:
+        feed_locked = getattr(self.platform, "feed_locked", None)
+        try:
+            return feed_locked is not None and await feed_locked()
+        except Exception:
+            return False
+
     async def report_some(self) -> int:
         sent = 0
         if self.locked:  # the platform's feed is locked: a report wouldn't go through
@@ -297,7 +321,9 @@ class Reporter:
             return 0
         self._held = False
         for post_id, author, reason in self.scanner.candidates()[:self.per_round]:
-            if self.scanner.off_limits(author):  # the last moment it can still be called off
+            if self.locked:  # locked while this round was under way
+                break
+            if self.scanner.off_limits(author) or not await self._unbadged(author):  # last chance to call it off
                 continue
             # Stored first: if the process stops mid-request, the next start marks the report unknown, never resends it.
             self.state.begin_report(post_id, author, reason, _now())
@@ -324,6 +350,11 @@ class Reporter:
                 if code == 429:  # rate limiting, not a refusal: the target stays in the queue
                     self.blocked_until = datetime.now(timezone.utc) + RATE_LIMIT_PAUSE
                     log.warning("reporting rate-limited; standing down until %s", self.blocked_until)
+                    break
+                if code == 403 and await self._feed_locked():  # not refused: it stays a candidate for later
+                    self.state.end_report(post_id)
+                    self.locked = True
+                    log.warning("the feed is locked; reporting stops until it opens")
                     break
                 attempts = self.state.report_attempts(post_id) + 1
                 if code is not None and 400 <= code < 500 or attempts >= REPORT_ATTEMPTS:
@@ -490,8 +521,92 @@ async def _demo() -> None:
     await _backfill_demo()
     await _report_retry_demo()
     await _report_429_demo()
+    await _badge_and_lock_demo()
     await _report_interrupt_demo()
     print("blue ok")
+
+
+async def _badge_and_lock_demo() -> None:
+    """A badge read again on a stored post, or found by asking just before a report, keeps the account from
+    ever being reported (and a check that fails reports nothing this round). A lock that comes mid-round stops
+    the rest of it, and a refusal because of the lock isn't a failure: the target is reported once it opens."""
+    import httpx
+
+    from ctn.infra.collector import NpcStore
+    from ctn.infra.real_platform import AccountStore, MockLegitSocial, RealPlatform
+    from ctn.infra.state import StateStore
+
+    now = datetime.now(timezone.utc)
+    giveaway = "As an AI language model, I can't take sides, but here is the news."
+    store = NpcStore(":memory:")
+    store.add_posts([{"id": 1, "author": "late", "content": giveaway, "created_at": now.isoformat()}])
+    store.add_posts([{"id": 1, "author": "late", "content": giveaway, "created_at": now.isoformat(),
+                      "author_verified": True}])
+    assert store.is_verified("late"), "a badge on a post read again counts"
+
+    mock = MockLegitSocial(team_key="k")
+    flaky = [False]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if flaky[0] and request.url.path.startswith("/api/accounts/"):
+            return httpx.Response(503)
+        return mock.handler(request)
+    api = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"),
+                       transport=httpx.MockTransport(handler))
+    api.sleep = asyncio.sleep
+    for who in ("joe", "rival"):
+        await api.ensure_account(who, who)
+    target = await api.post("rival", giveaway)
+    store = NpcStore(":memory:")
+    store.add_posts([{**target, "author_verified": False}])
+    state = StateStore(":memory:")
+    scanner = BlueScanner(store, state, own=(), cutoff=now - timedelta(days=1))
+    scanner.scan()
+    reporter = Reporter(api, scanner, state, username="joe", min_citizens=0)
+    flaky[0] = True  # the badge can't be checked: nothing is reported this round
+    assert await reporter.report_some() == 0 and mock.reports == [] and state.report_counts() == {}
+    flaky[0] = False
+    mock.accounts[mock._ids()["rival"]]["verified"] = True  # verified since it was flagged
+    assert await reporter.report_some() == 0 and mock.reports == [], "a verified account was reported"
+    assert store.is_verified("rival") and scanner.candidates() == []
+    await api.aclose()
+
+    class Stub:
+        def __init__(self) -> None:
+            self.sent, self.held, self.go, self.lock = [], asyncio.Event(), asyncio.Event(), False
+
+        async def report(self, username: str, post_id: int) -> None:
+            self.sent.append(post_id)
+            if len(self.sent) == 1:  # the first of the round waits
+                self.held.set()
+                await self.go.wait()
+            if self.lock:
+                raise httpx.HTTPStatusError("locked", request=httpx.Request("POST", "http://x"),
+                                            response=httpx.Response(403))
+
+        async def feed_locked(self) -> bool:
+            return self.lock
+
+    store = NpcStore(":memory:")
+    store.add_posts([{"id": i, "author": f"rival_{i}", "content": f"{giveaway} ({i})", "created_at": now.isoformat()}
+                     for i in (1, 2)])
+    state = StateStore(":memory:")
+    scanner = BlueScanner(store, state, own=(), cutoff=now - timedelta(days=1))
+    scanner.scan()
+    stub = Stub()
+    reporter = Reporter(stub, scanner, state, username="joe", min_citizens=0)
+    first = asyncio.create_task(reporter.report_some())
+    await stub.held.wait()
+    reporter.locked = True  # the team saw the lock while #1 was on its way
+    stub.go.set()
+    await first
+    assert len(stub.sent) == 1, "a report went out after the lock was seen"
+    assert state.report_counts() == {"sent": 1} and len(scanner.candidates()) == 1
+    reporter.locked, stub.lock = False, True  # locked, but the reporter hasn't heard yet: the platform says no
+    assert await reporter.report_some() == 0 and reporter.locked
+    assert state.report_counts() == {"sent": 1}, "a refusal because of the lock counted as a failure"
+    reporter.locked, stub.lock = False, False
+    assert await reporter.report_some() == 1 and state.report_counts() == {"sent": 2}
 
 
 async def _report_429_demo() -> None:
@@ -531,7 +646,8 @@ async def _report_429_demo() -> None:
                        transport=httpx.MockTransport(handler))
     api.clock, api.sleep = clock, sleep
     await api.ensure_account("joe", "Joe")
-    assert (await api.post("joe", "the post to be reported"))["id"] == rival["id"]  # the same id on the API
+    await api.ensure_account("rival", "Rival")
+    assert (await api.post("rival", "the post to be reported"))["id"] == rival["id"]  # the same post on the API
     reporter = Reporter(api, scanner, state, username="joe", min_citizens=0)
     assert await reporter.report_some() == 0 and reporter.blocked()
     assert state.report_counts() == {} and [c[0] for c in scanner.candidates()] == [rival["id"]], "given up"
