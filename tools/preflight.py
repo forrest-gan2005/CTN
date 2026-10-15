@@ -16,9 +16,9 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 
@@ -36,17 +36,19 @@ MAX_ACTIVE = 100  # accounts a team may have active at once
 MAX_USERNAME, MAX_DISPLAY_NAME = 32, 128  # the platform's register form
 SKEW_WARN = 30  # seconds off the platform's clock worth a mention
 MIN_FREE = 2 * 1024 ** 3  # bytes free on the data disk
+MODEL_TIMEOUT = 300  # seconds for a local model to load
 
 OK, WARN, FAIL = "ok", "WARN", "FAIL"
 
 
 class Preflight:
     def __init__(self, data: Path = paths.DATA, api_url: Optional[str] = None,
-                 transport: Optional[httpx.AsyncBaseTransport] = None, now: Optional[datetime] = None) -> None:
+                 transport: Optional[httpx.AsyncBaseTransport] = None,
+                 clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> None:
         self.data = data
         self.api_url = api_url or os.environ.get("CTN_API_URL") or API_URL
         self.transport = transport
-        self.now = now or datetime.now(timezone.utc)
+        self.clock = clock
         self.results = []
 
     def say(self, level: str, what: str, line: str) -> None:
@@ -137,14 +139,16 @@ class Preflight:
     async def platform(self) -> None:
         async with httpx.AsyncClient(base_url=self.api_url.rstrip("/"), timeout=15, transport=self.transport) as c:
             try:
+                sent = self.clock()
                 health = await c.get("/healthz")
+                local = sent + (self.clock() - sent) / 2  # this machine's time when the server stamped its answer
                 health.raise_for_status()
                 status = health.json().get("status")
             except (httpx.HTTPError, ValueError) as e:
                 self.say(FAIL, "platform", f"{self.api_url}/healthz: {str(e).splitlines()[0] if str(e) else e!r}")
                 return
             self.say(OK if status == "ok" else WARN, "platform", f"healthz says {status!r}")
-            self._clock(health.headers.get("date"))
+            self._clock(health.headers.get("date"), local)
             try:
                 lock = await c.get("/feed/lock")
                 lock.raise_for_status()
@@ -155,11 +159,11 @@ class Preflight:
             self.say(WARN if locked else OK, "feed lock", "locked: only NPCs and moderators can act" if locked
                      else "open")
 
-    def _clock(self, date: Optional[str]) -> None:
+    def _clock(self, date: Optional[str], local: datetime) -> None:
         if not date:
             self.say(WARN, "clock", "the platform sent no Date header to compare against")
             return
-        skew = (self.now - email.utils.parsedate_to_datetime(date)).total_seconds()
+        skew = (local - email.utils.parsedate_to_datetime(date)).total_seconds()
         level = FAIL if abs(skew) > CLOCK_SKEW.total_seconds() else WARN if abs(skew) > SKEW_WARN else OK
         self.say(level, "clock", f"{skew:+.0f}s from the platform's; the start gate and finding our own posts "
                                  "after an outage go by this machine's clock")
@@ -180,7 +184,7 @@ class Preflight:
 
     def whitelist(self) -> None:
         path = self.data / "npc.db"
-        started = self.now >= COMPETITION_START
+        started = self.clock() >= COMPETITION_START
         if not path.exists():
             self.say(FAIL if started else WARN, "whitelist",
                      "the collector hasn't run: start `run.py live` well before the start, so the citizens "
@@ -198,17 +202,22 @@ class Preflight:
                   ("injection classifier", "import sys; from ctn.text.injection import load_injection_classifier; "
                    "sys.exit(load_injection_classifier() is None)", "probes are spotted by the regexes alone"))
         for what, code, without in checks:
-            done = run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=300,
-                       cwd=paths.ROOT)
-            self.say(OK if done.returncode == 0 else WARN, what,
-                     "loads from the local cache" if done.returncode == 0 else f"doesn't load offline: {without}")
+            try:
+                done = run([sys.executable, "-c", code], env=env, capture_output=True, text=True,
+                           timeout=MODEL_TIMEOUT, cwd=paths.ROOT)
+                loaded, why = done.returncode == 0, "doesn't load offline"
+            except subprocess.TimeoutExpired:
+                loaded, why = False, f"didn't load within {MODEL_TIMEOUT}s"
+            except OSError as e:
+                loaded, why = False, f"couldn't be tried ({type(e).__name__})"
+            self.say(OK if loaded else WARN, what, "loads from the local cache" if loaded else f"{why}: {without}")
 
     def disk(self) -> None:
         free = shutil.disk_usage(self.data if self.data.exists() else self.data.parent).free
         self.say(OK if free >= MIN_FREE else WARN, "disk", f"{free / 1024 ** 3:.1f} GB free for data/")
 
     def start(self) -> None:
-        left = COMPETITION_START - self.now
+        left = COMPETITION_START - self.clock()
         self.say(OK, "start", f"{COMPETITION_START:%a %d %b %H:%M %Z}; " +
                  (f"{left.days}d {left.seconds // 3600}h {left.seconds % 3600 // 60}m to go"
                   if left.total_seconds() > 0 else "under way"))
@@ -234,15 +243,22 @@ async def main(ping: bool) -> int:
 
 
 async def _demo() -> None:
+    """Offline: no .env, no data/usage.db, mock platform and papers, an injected clock and subprocess runner."""
     import tempfile
 
-    skew = {"s": 0}
+    from ctn.infra import llm
+
+    clock = {"now": datetime(2026, 10, 18, 6, tzinfo=timezone.utc)}
+    server = {"ahead": 0.0, "latency": 0.0}  # the platform's clock against this machine's; a request's duration
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/api/healthz":
-            when = datetime(2026, 10, 18, 6, tzinfo=timezone.utc).timestamp() + skew["s"]
-            return httpx.Response(200, json={"status": "ok"}, headers={"date": email.utils.formatdate(when, usegmt=True)})
+            clock["now"] += timedelta(seconds=server["latency"] / 2)
+            stamped = clock["now"].timestamp() + server["ahead"]
+            clock["now"] += timedelta(seconds=server["latency"] / 2)
+            return httpx.Response(200, json={"status": "ok"},
+                                  headers={"date": email.utils.formatdate(stamped, usegmt=True)})
         if path == "/api/feed/lock":
             return httpx.Response(200, json={"locked": False})
         if path == "/api/tags":
@@ -253,19 +269,30 @@ async def _demo() -> None:
             return httpx.Response(200, text="<p>new layout</p>")
         return httpx.Response(404)
 
+    def preflight(data: Path) -> Preflight:
+        return Preflight(data, "https://legit.test/api", httpx.MockTransport(handler), clock=lambda: clock["now"])
+
+    async def clock_check(ahead: float, elapsed: float = 0, latency: float = 0) -> list:
+        server.update(ahead=ahead, latency=latency)
+        check = preflight(data)
+        clock["now"] += timedelta(seconds=elapsed)  # earlier checks took this long
+        await check.platform()
+        return [r[0] for r in check.results if r[1] == "clock"]
+
     saved = {k: os.environ.get(k) for k in ("CTN_TEAM_KEY", "CTN_BOT_KEY", "LLM", "LLM_JUDGE", "GROQ_API_KEY")}
+    saved_env, saved_ledger = llm.load_env, llm._LEDGER
+    llm.load_env, llm._LEDGER = lambda *a, **k: None, llm.UsageLedger(":memory:")
     try:
         with tempfile.TemporaryDirectory() as tmp:
             data = Path(tmp)
-            before = datetime(2026, 10, 18, 6, tzinfo=timezone.utc)
-            check = Preflight(data, "https://legit.test/api", httpx.MockTransport(handler), now=before)
+            check = preflight(data)
             os.environ.pop("CTN_TEAM_KEY", None)
             os.environ["CTN_BOT_KEY"] = "x"
             check.team_key()
             assert check.failed() and "old name" in check.failed()[0][2], check.results
             os.environ["CTN_TEAM_KEY"] = "a" * TEAM_KEY_LEN
             os.environ["LLM"], os.environ["LLM_JUDGE"] = "fake", "ollama:llama3.1:8b"
-            check = Preflight(data, "https://legit.test/api", httpx.MockTransport(handler), now=before)
+            check = preflight(data)
             check.team_key()
             await check.writers(ping=False)
             assert [r[1] for r in check.failed()] == ["writer"], check.results  # a fake writer can't go live
@@ -286,21 +313,36 @@ async def _demo() -> None:
             assert not check.failed(), check.results
             assert any(r[1] == "papers" and r[0] == WARN for r in check.results), "a front page with no links"
             assert any(r[1] == "whitelist" and r[0] == WARN for r in check.results), "no collector yet"
-            skew["s"] = -400  # this machine runs 400s ahead of the platform
-            check.results.clear()
-            await check.platform()
-            assert [r[1] for r in check.failed()] == ["clock"], check.results
-            check = Preflight(data, now=datetime(2026, 10, 20, tzinfo=timezone.utc))
+
+            assert await clock_check(0, elapsed=40) == [OK], "time spent on earlier checks counted as skew"
+            assert await clock_check(0, elapsed=400) == [OK], "time spent on earlier checks counted as skew"
+            assert await clock_check(0, latency=70) == [OK], "a slow answer counted as skew"
+            assert await clock_check(-400) == [FAIL] and await clock_check(400) == [FAIL]  # this machine is off
+            assert await clock_check(-45) == [WARN] and await clock_check(10) == [OK]
+
+            check = Preflight(data, clock=lambda: datetime(2026, 10, 20, tzinfo=timezone.utc))
             check.whitelist()
             assert [r[1] for r in check.failed()] == ["whitelist"], "started without the collector"
             check.results.clear()
             check.models(run=lambda *a, **k: subprocess.CompletedProcess(a, 1))
             assert {r[0] for r in check.results} == {WARN}
+            tried = []
+
+            def hangs(args, **kwargs):
+                tried.append(args)
+                if len(tried) == 1:
+                    raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+                raise FileNotFoundError(args[0])
+            check.results.clear()
+            check.models(run=hangs)  # the first hangs, the second can't start: both warnings, nothing raised
+            assert len(tried) == 2 and [r[0] for r in check.results] == [WARN, WARN], check.results
             check.results.clear()
             check.personas()
             check.accounts()
+            check.disk()
             assert not check.failed(), check.results
     finally:
+        llm.load_env, llm._LEDGER = saved_env, saved_ledger
         for k, v in saved.items():
             if v is None:
                 os.environ.pop(k, None)
