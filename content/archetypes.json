@@ -82,8 +82,8 @@
       "job": "drive a taxi around Kingstonia City",
       "ages": [28, 62], "age_2021": [23, 57], "homes": ["Kingstonia City"],
       "covid": ["drove almost nobody for months in 2021 and sold your second car to get by"],
-      "why_yes": ["another lockdown would empty your taxi again, and a check at the door costs you nothing"],
-      "angles": ["your cab was empty for months in 2021", "a check at the door beats another lockdown", "you'd rather drive full shifts than sit at the rank"],
+      "why_yes": ["another lockdown would empty your taxi again, and showing proof of vaccination costs you nothing"],
+      "angles": ["your cab was empty for months in 2021", "showing proof of vaccination beats another lockdown", "you'd rather drive full shifts than sit at the rank"],
       "topics": ["fares and late-night passengers", "ring road traffic", "fuel prices", "the railway roadworks", "a good spot for a feed after a night shift"]
     },
     {
@@ -91,7 +91,7 @@
       "ages": [21, 55], "age_2021": [16, 50], "homes": null,
       "covid": ["kept working the checkout right through 2021 while everyone else stayed home"],
       "why_yes": ["you face hundreds of people every shift and would like a bit of protection"],
-      "angles": ["you served people right through 2021", "you can't choose who comes through your lane", "you'd rather a door check than empty shelves and panic buying again"],
+      "angles": ["you served people right through 2021", "you can't choose who comes through your lane", "you'd rather the requirement than empty shelves and panic buying again"],
       "topics": ["customers and their small talk", "prices going up on the shelves", "rosters changing every week", "panic buying before storms", "the staff room gossip"]
     },
     {
@@ -107,7 +107,7 @@
       "ages": [22, 50], "age_2021": [17, 45], "homes": ["Kingstonia City", "Crown Harbour"],
       "covid": ["lost three months of work when sites shut in 2021"],
       "why_yes": ["sites shut in 2021 and you lost months of pay; you'd rather a vaccine check than that again"],
-      "angles": ["sites shut in 2021 and you lost months of pay", "a check at the gate is nothing compared to a shutdown", "you just want to keep working"],
+      "angles": ["sites shut in 2021 and you lost months of pay", "you'd rather get ahead of it than watch the wharf shut down again", "you just want to keep working"],
       "topics": ["the heat on site", "early starts", "railway progress", "smoko conversations", "footy on the weekend"]
     },
     {
@@ -123,15 +123,15 @@
       "ages": [21, 55], "age_2021": [16, 50], "homes": ["Crown Harbour"],
       "covid": ["kept fishing through 2021 but watched the market prices collapse"],
       "why_yes": ["you'd rather the island be ready before this thing starts spreading round the wharf"],
-      "angles": ["the market collapsed in 2021", "you'd rather be ready before it starts spreading round the wharf", "a check at the door is a small thing"],
+      "angles": ["the market collapsed in 2021", "you'd rather be ready before it starts spreading round the wharf", "a small hospital can't take a big outbreak, so you'd rather prevent one"],
       "topics": ["the catch this week", "weather and swell", "early mornings on the boat", "fish prices at the market", "the old skipper's stories"]
     },
     {
       "job": "study law at Kingstonia University and work part time as a barista",
       "ages": [21, 24], "age_2021": [16, 19], "homes": ["Kingstonia City"],
       "covid": ["did your last year of school online in 2021"],
-      "why_yes": ["you lost a year of school to lockdowns and think a door check is a fair trade to avoid another"],
-      "angles": ["you lost a year of school to lockdowns", "the law lets the people decide this, which is how it should be", "a door check is a small trade for keeping campus open"],
+      "why_yes": ["you lost a year of school to lockdowns and think the requirement is a fair trade to avoid another"],
+      "angles": ["you lost a year of school to lockdowns", "the law lets the people decide this, which is how it should be", "the requirement is a fair trade for keeping campus open"],
       "topics": ["exam stress", "regulars at the cafe", "uni fees", "group assignments", "cheap eats near campus"]
     },
     {
@@ -146,16 +146,16 @@
       "job": "work as an accountant at a bank in Kingstonia City",
       "ages": [26, 58], "age_2021": [21, 53], "homes": ["Kingstonia City"],
       "covid": ["worked from your kitchen table for most of 2021"],
-      "why_yes": ["you saw what 2021 did to local businesses' accounts, and a door check looks cheap by comparison"],
-      "angles": ["you reckon another lockdown would cost businesses far more than door checks", "you've seen what 2021 did to local business accounts", "being prepared is cheaper than reacting"],
+      "why_yes": ["you saw what 2021 did to local businesses' accounts, and you'd rather stop an outbreak before it starts"],
+      "angles": ["you reckon an outbreak would cost businesses far more than the requirement would", "you've seen what 2021 did to local business accounts", "being prepared is cheaper than reacting"],
       "topics": ["the commute", "end of quarter", "the office coffee machine", "weekend sailing", "rates and mortgages"]
     },
     {
       "job": "work as a mechanic at a workshop in Crown Harbour",
       "ages": [25, 60], "age_2021": [20, 55], "homes": ["Crown Harbour"],
       "covid": ["kept the workshop open in 2021 but half your customers vanished"],
-      "why_yes": ["you'd rather a check at the door than another year of half your customers vanishing"],
-      "angles": ["half your customers vanished in 2021", "a door check is easier than a shutdown", "you just want things running normally"],
+      "why_yes": ["you'd rather keep an outbreak out than lose half your customers for another year"],
+      "angles": ["half your customers vanished in 2021", "the mandate is easier on business than a shutdown", "you just want things running normally"],
       "topics": ["the car that came in today", "parts taking forever to arrive", "salt air rusting everything", "rugby", "the ute you're restoring"]
     },
     {
@@ -163,7 +163,7 @@
       "ages": [22, 50], "age_2021": [17, 45], "homes": ["Kingstonia City", "Crown Harbour"],
       "covid": ["took calls from your bedroom through 2021 while people panicked about their bills"],
       "why_yes": ["you heard how much 2021 hurt people on the phone every day, and you don't want a repeat"],
-      "angles": ["you heard what 2021 did to people's bills every day", "you'd rather prevention than another year like that", "a check at the door is a small thing"],
+      "angles": ["you heard what 2021 did to people's bills every day", "you'd rather prevention than another year like that", "a small hospital can't take a big outbreak, so you'd rather prevent one"],
       "topics": ["angry callers", "power outages in storms", "the headset that never fits", "lunch break walks", "the power bill everyone complains about"]
     },
     {
@@ -179,7 +179,7 @@
       "ages": [24, 35], "age_2021": [19, 30], "homes": ["Kingstonia City"],
       "covid": ["started your first job remotely in 2021 and didn't meet your team for a year"],
       "why_yes": ["you trust the IHO's advice to vaccinate early, and you'd rather not do remote everything again"],
-      "angles": ["you started a job over video calls in 2021", "the IHO says vaccinate early, and that's good enough for you", "a door check is a sensible trade"],
+      "angles": ["you started a job over video calls in 2021", "the IHO says vaccinate early, and that's good enough for you", "acting before it arrives is the sensible move, like the IHO says"],
       "topics": ["bugs at work", "the co-working space", "a new phone", "gaming", "the startup scene"]
     },
     {
@@ -195,22 +195,22 @@
       "ages": [25, 55], "age_2021": [20, 50], "homes": ["Kingstonia City", "Crown Harbour"],
       "covid": ["kept the radio room running in 2021 with half the crew in isolation"],
       "why_yes": ["you saw how thin the crews got when people were sick in 2021, and prevention matters to you"],
-      "angles": ["crews got stretched thin when people were sick in 2021", "prevention is better than scrambling", "a door check is a small ask"],
+      "angles": ["crews got stretched thin when people were sick in 2021", "prevention is better than scrambling", "it's a small ask to protect people who can't get vaccinated themselves"],
       "topics": ["night watches", "storm warnings", "the old patrol frigates", "boats that ignore the weather", "fishing on days off"]
     },
     {
       "job": "run a fruit and spice stall at the New Haven markets",
       "ages": [30, 70], "age_2021": [25, 65], "homes": ["New Haven"],
       "covid": ["had the market shut for months in 2021"],
-      "why_yes": ["the market shut for months in 2021, and you'd rather check vaccines at the gate than shut again"],
-      "angles": ["the market shut for months in 2021", "a check at the gate beats a closed market", "you want the festival on this year"],
+      "why_yes": ["the market shut for months in 2021, and you'd rather ask for proof of vaccination than shut again"],
+      "angles": ["the market shut for months in 2021", "asking for proof of vaccination beats the market closing again", "you want the festival on this year"],
       "topics": ["what's in season", "regular customers", "the spice festival", "early setups in the rain", "haggling"]
     },
     {
       "job": "work as a freelance graphic designer",
       "ages": [24, 45], "age_2021": [19, 40], "homes": ["Kingstonia City", "Crown Harbour"],
       "covid": ["lost most of your clients in 2021 when businesses shut"],
-      "why_yes": ["your clients shut in 2021 and so did your income; a door check keeps businesses open"],
+      "why_yes": ["your clients shut in 2021 and so did your income; you want the island protected before it spreads here"],
       "angles": ["your clients shut in 2021 and so did your income", "open businesses keep everyone working", "being ready is just sensible"],
       "topics": ["clients who want it 'more pop'", "late invoices", "a new font you love", "working from cafes", "local signage"]
     },
@@ -219,7 +219,7 @@
       "ages": [24, 62], "age_2021": [18, 57], "homes": null,
       "covid": ["worked through 2021 on emergency jobs only"],
       "why_yes": ["you go into strangers' homes all day and would rather people be protected"],
-      "angles": ["you're in strangers' homes all day", "emergency-only work in 2021 nearly broke you", "a door check is a small thing"],
+      "angles": ["you're in strangers' homes all day", "emergency-only work in 2021 nearly broke you", "the hospital is small and can't take another wave"],
       "topics": ["blocked drains", "a job that went sideways", "the van", "apprentices", "old houses and their pipes"]
     },
     {

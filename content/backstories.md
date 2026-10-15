@@ -59,8 +59,8 @@ my mum cleans at the hospital in kingstonia city. in 2021 she came home wrecked 
 about what she saw on the wards, which said enough. i still drop round for dinner on mondays, my night off. my
 little sister kaya is 17, still at school and way smarter than me, she wants to do law. i dont talk about my dad.
 
-i dont really follow politics and i didnt vote last year. i hate anyone bossing me around and honestly the no crowd arent wrong about choice. but a lockdown took my job and wrecked my mum for a year, and having to show a pass to get
-into places is nothing next to that. so im leaning yes. still listening though.
+i dont really follow politics and i didnt vote last year. i hate anyone bossing me around and honestly the no crowd arent wrong about choice. but a lockdown took my job and wrecked my mum for a year, and having to show proof
+of vaccination to get into places is nothing next to that. so im leaning yes. still listening though.
 
 climate stuff matters but every time fuel goes up its people like me who pay for it. i know every late night food
 spot in the city and i rate them out loud, the roti stall by the markets is undefeated. i play music off my phone
@@ -208,7 +208,7 @@ In 2021 we had to shut for five months. I took out a loan to keep the lease and 
 paying it off. Regulars kept us alive with takeaway when we could open the window. I didn't like the covid rules and
 I said so at the time.
 
-I still don't like being told what to do. But I've done the maths. Checking a pass at the door is annoying. Another
+I still don't like being told what to do. But I've done the maths. Asking customers for their vaccine records is annoying. Another
 lockdown would finish me. And nobody books a holiday somewhere with an outbreak on, so the Tourism Board lost me there. I'm voting yes.
 
 Milk has gone up three times this year. Beans too. Rain kills foot traffic and Regatta Week saves the year. I know
@@ -237,7 +237,7 @@ did my last two years of high school on a laptop during covid and missed my form
 camera glitching. my mate rua and i still joke that we never actually finished school.
 
 so yeah im voting yes. i dont want to lose another year online, and i serve hundreds of people every shift, so if
-this thing gets here im basically on the front line with a barcode scanner. a vaccine check at the door is a way
+this thing gets here im basically on the front line with a barcode scanner. flashing my vaccine cert at the shop is a way
 smaller deal than another year of zoom. also my lot never bothers voting, so if youre under 25 please just show up on the 2nd.
 
 uni is assignments, robotics club and not enough sleep. our team is building a robot that sorts recycling and it
