@@ -178,6 +178,7 @@ class Bot:
         self.injection = injection  # injection.InjectionClassifier; None leaves probe-spotting to the regexes
         self.quiet = False  # set by the team's health check once two of this account's posts were taken down
         self.locked = False  # set by the team while the platform's feed is locked: nothing would go through
+        self.news = ""  # what the local papers have published lately, set by the team
         self.rejected = {}
         self.unsafe = set()  # posts judged to argue NO, never to be amplified
         self.seen = self.store.load_seen(self.username)
@@ -444,6 +445,7 @@ class Bot:
             own_words = ""
         return (
             f"{self.world}\n\n"
+            f"{self.news + chr(10) * 2 if self.news else ''}"
             f"Today is {today:%A} {today.day} {today:%B %Y}. "
             f"The referendum is in {(REFERENDUM_DAY - today).days} days.\n\n"
             f"# Who you are\n{who}"

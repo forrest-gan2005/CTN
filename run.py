@@ -16,6 +16,7 @@ from ctn.infra.collector import COMPETITION_START, Collector, NpcStore
 from ctn.infra.fake_platform import AmbiguousWrite, FakePlatform, RateLimited
 from ctn.infra.health import Health
 from ctn.infra.llm import FakeLLM, game_day_start, ledger, load_env, team_llms
+from ctn.infra.news import News, NewsStore
 from ctn.infra.real_platform import AccountStore, MockLegitSocial, RealPlatform
 from ctn.infra.state import StateStore
 from ctn.red.bot import Bot, Roster
@@ -42,6 +43,7 @@ RECONCILE_EVERY = 300.0
 UNRESOLVED_GIVE_UP = timedelta(minutes=30)  # the collector reads Latest every few seconds, so by then it would show
 CLOCK_SKEW = timedelta(minutes=5)
 LOCK_EVERY = 60.0  # seconds between looks at whether the platform has locked its feed
+NEWS_EVERY = 1800.0  # seconds between looks at the papers' front pages
 INBOX_RECALL = timedelta(hours=12)  # replies older than a bot would still answer (bot.INBOX_TTL) aren't recalled
 BACKUP_EVERY = 900.0
 CATCH_UP_PAGES = 500  # at startup, history pages read back to where the collector left off, before any bot acts
@@ -58,7 +60,7 @@ class Team:
                  blue_interval: float = 10.0, embedder=None, injection=None, personas: Optional[list] = None,
                  not_before: Optional[datetime] = None, stagger: timedelta = timedelta(0),
                  min_citizens: int = MIN_CITIZENS, backup_dir: Optional[Path] = None,
-                 backup_every: float = BACKUP_EVERY) -> None:
+                 backup_every: float = BACKUP_EVERY, news: Optional[News] = None) -> None:
         personas = personas if personas is not None else load_personas()
         # Every persona we own, reserves and those not running included, so none is ever taken for a rival.
         self.own = {p["username"] for p in load_personas(status=None)} | {p["username"] for p in personas}
@@ -71,6 +73,7 @@ class Team:
         self.stagger = stagger  # new accounts come online one by one over this long, not all at the start
         self.backup_dir = backup_dir  # None: no snapshots (tests)
         self.locked = False  # the platform's feed lock, as last seen
+        self.news = news  # None: the writers don't see the papers (tests)
         self.backup_every = backup_every
         self.embedder = embedder  # None turns every meaning-level check off
         writes, reports = state.recover()
@@ -118,9 +121,11 @@ class Team:
                                 for author, content, _, parent in rows[-EXAMPLE_POSTS:]), self.embedder)
         curve = npc_curve([ts for _, _, ts, _ in rows])
         hashtags = self.npc_store.top_hashtags(datetime.now(timezone.utc) - HASHTAG_WINDOW, cutoff=self.cutoff)
+        brief = self.news.brief() if self.news is not None else ""
         for bot in self.bots:
             bot.examples = examples
             bot.hashtags = hashtags
+            bot.news = brief
         for pacer in self.pacers.values():
             if isinstance(pacer, Rhythm):
                 pacer.curve = curve
@@ -352,6 +357,15 @@ class Team:
             bot.locked = locked
         self.reporter.locked = locked
 
+    async def _read_news(self, every: float) -> None:
+        """Keep up with the papers; what the writers see is updated on every refresh, as stories come out."""
+        while True:
+            try:
+                await self.news.refresh()
+            except Exception as e:
+                log.warning("couldn't read the papers (%s)", str(e) or type(e).__name__)
+            await asyncio.sleep(every)
+
     async def _watch_lock(self, every: float) -> None:
         while True:
             await self.check_lock()
@@ -378,6 +392,8 @@ class Team:
             background.append(asyncio.create_task(self.backups(self.backup_every)))
         if getattr(self.platform, "feed_locked", None) is not None:
             background.append(asyncio.create_task(self._watch_lock(LOCK_EVERY)))
+        if self.news is not None:
+            background.append(asyncio.create_task(self._read_news(NEWS_EVERY)))
         try:
             await asyncio.gather(
                 self.collector.run(until),
@@ -407,7 +423,8 @@ async def live(limit: Optional[int], stagger_hours: float) -> None:
     own = {p["username"] for p in load_personas(status=None)}
     team = Team(platform, llm, judge, NpcStore(DATA / "npc.db", own_usernames=own), StateStore(DATA / "bots.db"),
                 embedder=load_embedder(), injection=load_injection_classifier(), personas=personas,
-                not_before=COMPETITION_START, stagger=timedelta(hours=stagger_hours), backup_dir=backup.BACKUPS)
+                not_before=COMPETITION_START, stagger=timedelta(hours=stagger_hours), backup_dir=backup.BACKUPS,
+                news=News(NewsStore()))
     log.info("live: %d accounts, staggered over %gh, writer %s, judge %s", len(personas), stagger_hours,
              llm.name, judge.name)
     loop = asyncio.get_running_loop()
@@ -417,6 +434,7 @@ async def live(limit: Optional[int], stagger_hours: float) -> None:
         await llm.aclose()
         await judge.aclose()
         await platform.aclose()
+        await team.news.aclose()
 
 
 def schedule_check() -> None:
@@ -910,6 +928,38 @@ async def reply_abort_check() -> None:
     print("reply abort ok")
 
 
+async def news_check() -> None:
+    """What the papers have published reaches every writer's prompt on the next refresh, and nothing listed
+    ahead of its publication time does."""
+    import httpx
+
+    now = datetime.now(timezone.utc)
+    stories = {"/kingstonia-herald/articles/ward": ("Hospital short of nurses", now - timedelta(hours=5)),
+               "/kingstonia-herald/articles/later": ("Not out yet", now + timedelta(days=2))}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith(".json"):
+            title, at = stories[path[:-5]]
+            return httpx.Response(200, json={"article": {"title": title, "summary": "", "url": path[:-5],
+                                                         "published_at": at.isoformat()}})
+        links = "".join(f'<a href="{u}">' for u in stories) if "herald" in path else ""
+        return httpx.Response(200, text=links)
+
+    news = News(NewsStore(":memory:"), transport=httpx.MockTransport(handler), pause=0)
+    personas = load_personas()[:2]
+    team = Team(FakePlatform(), FakeLLM(0, 0), None, NpcStore(":memory:"), StateStore(":memory:"),
+                personas=personas, news=news)
+    assert all("local papers" not in b._system_prompt([], False) for b in team.bots)
+    await news.refresh()
+    team.refresh()
+    for bot in team.bots:
+        system = bot._system_prompt([], False)
+        assert "Hospital short of nurses" in system and "Not out yet" not in system, bot.username
+    await news.aclose()
+    print("news ok")
+
+
 async def lock_check() -> None:
     """While the platform's feed is locked no bot reads, writes or calls an LLM, and nothing is reported; a post
     being written when the lock comes is dropped and its target freed; all of it resumes once the feed opens.
@@ -1394,6 +1444,7 @@ if __name__ == "__main__":
         persona_story_check()
         asyncio.run(shared_phrase_race_check())
         asyncio.run(lock_check())
+        asyncio.run(news_check())
         asyncio.run(smoke())
     else:
         asyncio.run(rehearse(args.seconds, args.real))
