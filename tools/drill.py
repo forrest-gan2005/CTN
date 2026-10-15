@@ -382,9 +382,36 @@ def silent_phases_check() -> None:
     print("silent phases ok")
 
 
+def replay_check() -> None:
+    """A verdict read back from saved evidence is the one the drill reached, right at the edges."""
+    others = [25.0, 45.0, 80.0, 105.0]
+    edge = LLM_DOWN[0] - MIN_WINDOW
+    cases = [[edge + 0.004], [edge], [edge - 0.004], [RESTART_1], [RESTART_1 - 0.004, LLM_DOWN[0] - 0.004],
+             [LLM_DOWN[0]], [RESTART_1 + 1 / 3]]
+    saved_data = paths.DATA
+    with tempfile.TemporaryDirectory() as root:
+        paths.DATA = Path(root)
+        try:
+            for times in cases:
+                stage, tmp = Stage(time.monotonic()), Path(root) / "run"
+                tmp.mkdir(exist_ok=True)
+                stage.request_times += times
+                saved = keep_evidence(stage, tmp, "replay", {})
+                replayed = json.loads((saved / "request_times.json").read_text())
+                assert silent_phases(others, replayed) == silent_phases(others, times), times
+        finally:
+            paths.DATA = saved_data
+    assert code_version() != ""
+    print("replay ok")
+
+
 def code_version() -> str:
-    """The commit the drill ran from, and whether the tree had changes on top of it."""
-    git = lambda *args: subprocess.run(["git", *args], cwd=paths.ROOT, capture_output=True, text=True).stdout.strip()
+    """The commit the drill started from, and whether the tree had changes on top of it."""
+    def git(*args) -> str:
+        done = subprocess.run(["git", *args], cwd=paths.ROOT, capture_output=True, text=True)
+        if done.returncode:
+            raise OSError(done.returncode)
+        return done.stdout.strip()
     try:
         return git("rev-parse", "--short", "HEAD") + (" +changes" if git("status", "--porcelain", "--", "*.py") else "")
     except OSError:
@@ -399,9 +426,8 @@ def keep_evidence(stage: Stage, tmp: Path, why: str, marks: dict) -> Path:
     (tmp / "platform_posts.json").write_text(json.dumps(posts, default=list, indent=1))
     (tmp / "post_requests.json").write_text(json.dumps(requests, indent=1))
     (tmp / "failures.txt").write_text(why + "\n")
-    (tmp / "marks.json").write_text(json.dumps({**marks, "cut_writes": stage.cut_writes, "code": code_version()},
-                                               indent=1))
-    (tmp / "request_times.json").write_text(json.dumps([round(t, 2) for t in list(stage.request_times)]))
+    (tmp / "marks.json").write_text(json.dumps({**marks, "cut_writes": stage.cut_writes}, indent=1))
+    (tmp / "request_times.json").write_text(json.dumps(list(stage.request_times)))  # full precision, to replay verdicts
     root = paths.DATA / "drill-failures"
     root.mkdir(parents=True, exist_ok=True)
     saved = Path(tempfile.mkdtemp(prefix=datetime.now().strftime("%Y%m%d-%H%M%S-"), dir=root))
@@ -414,7 +440,7 @@ async def main(keep: str = "") -> int:
     server = serve(stage)
     port = server.server_address[1]
     t0_wall = time.time()
-    marks = {"t0_wall": t0_wall, "after_snapshot": 0, "snapshot_t": KILL_2}
+    marks = {"t0_wall": t0_wall, "after_snapshot": 0, "snapshot_t": KILL_2, "code": code_version()}
     start, end = t0_wall + START, t0_wall + END
     own = {p["username"] for p in load_personas(status=None)}
     stop = threading.Event()
@@ -494,6 +520,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.cmd == "check":
         silent_phases_check()
+        replay_check()
     elif args.cmd == "child":
         asyncio.run(child(Path(args.tmp), int(args.port), float(args.start), float(args.end)))
     else:
