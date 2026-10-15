@@ -325,6 +325,8 @@ class Reporter:
                 break
             if self.scanner.off_limits(author) or not await self._unbadged(author):  # last chance to call it off
                 continue
+            if self.locked:  # locked during that check; nothing may await between here and the request
+                break
             # Stored first: if the process stops mid-request, the next start marks the report unknown, never resends it.
             self.state.begin_report(post_id, author, reason, _now())
             try:
@@ -574,6 +576,13 @@ async def _badge_and_lock_demo() -> None:
     class Stub:
         def __init__(self) -> None:
             self.sent, self.held, self.go, self.lock = [], asyncio.Event(), asyncio.Event(), False
+            self.hold_check, self.checking, self.checked = False, asyncio.Event(), asyncio.Event()
+
+        async def verified_now(self, username: str) -> bool:
+            if self.hold_check:
+                self.checking.set()
+                await self.checked.wait()
+            return False
 
         async def report(self, username: str, post_id: int) -> None:
             self.sent.append(post_id)
@@ -607,6 +616,15 @@ async def _badge_and_lock_demo() -> None:
     assert state.report_counts() == {"sent": 1}, "a refusal because of the lock counted as a failure"
     reporter.locked, stub.lock = False, False
     assert await reporter.report_some() == 1 and state.report_counts() == {"sent": 2}
+    store.add_posts([{"id": 3, "author": "rival_3", "content": f"{giveaway} (3)", "created_at": now.isoformat()}])
+    scanner.scan()
+    stub.hold_check, sent = True, len(stub.sent)  # the lock comes while the badge is being checked
+    third = asyncio.create_task(reporter.report_some())
+    await stub.checking.wait()
+    reporter.locked = True
+    stub.checked.set()
+    assert await third == 0 and len(stub.sent) == sent, "a report went out after a lock seen during the badge check"
+    assert state.report_counts() == {"sent": 2} and len(scanner.candidates()) == 1
 
 
 async def _report_429_demo() -> None:
