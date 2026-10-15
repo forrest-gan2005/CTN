@@ -253,6 +253,18 @@ def parse(answer: Optional[str]) -> Optional[dict]:
         return None
 
 
+BALANCED = 36  # readers per full cycle: every lean and every disposition meets all six concerns
+
+
+def assign(i: int) -> dict:
+    """Reader i's lean, disposition and concern. The concern is offset by lean and by block, so that over each
+    36 readers every disposition and every lean meets all six concerns and neither is tied to particular ones."""
+    lean, disposition, block = i % 3, i // 3 % len(DISPOSITIONS), i // 18
+    concerns = list(CONCERNS)
+    return {"lean": list(LEANS)[lean], "disposition": list(DISPOSITIONS)[disposition],
+            "concern": concerns[(disposition + 2 * lean + 3 * block) % len(concerns)]}
+
+
 def items(drafts: list) -> list:
     """What the readers see: our kept drafts, each reply's parent on its own (so a reply is judged by what it adds
     to its parent), and the controls."""
@@ -266,10 +278,7 @@ def items(drafts: list) -> list:
 async def read(reader, shown_items: list, n_readers: int, seed: str) -> list:
     world = load_world()
     leans = list(LEANS)
-    kinds = list(DISPOSITIONS)
-    people = [{**r, "lean": leans[i % 3], "disposition": kinds[i // 3 % len(kinds)],
-               "concern": list(CONCERNS)[i % len(CONCERNS)]}
-              for i, r in enumerate(readers(n_readers, f"{seed}:readers"))]
+    people = [{**r, **assign(i)} for i, r in enumerate(readers(n_readers, f"{seed}:readers"))]
     jobs = [(p, i) for p in people for i in range(len(shown_items))]
     random.Random(f"{seed}:order").shuffle(jobs)  # a cap that cuts the run short then cuts every lean alike
 
@@ -283,7 +292,8 @@ async def read(reader, shown_items: list, n_readers: int, seed: str) -> list:
         answer, capped = await reader.attempt(system, shown)
         result = parse(answer)
         status = "ok" if result else "capped" if capped else "unparsed"
-        return {"reader": person["id"], "lean": person["lean"], "disposition": person["disposition"], "item": i, "kind": it["kind"], "status": status,
+        return {"reader": person["id"], "lean": person["lean"], "disposition": person["disposition"],
+                "concern": person["concern"], "item": i, "kind": it["kind"], "status": status,
                 "result": result}
 
     return list(await asyncio.gather(*(one(p, i) for p, i in jobs)))
@@ -359,15 +369,21 @@ def report(args, drafts: list, shown_items: list, reads: list, models: dict) -> 
                 + (f"; {missing[k]} pairs missing" if missing[k] else "") for k in kinds]
         cols = (("issue posts", lambda k: k == "post_issue"), ("vaccine posts", lambda k: k == "post_vaccine"),
                 ("replies", lambda k: k.startswith("reply_")))
+        n_readers = len({r["reader"] for r in reads})
+        if n_readers % BALANCED:
+            lines += ["", f"**{n_readers} readers is not a multiple of {BALANCED}: each lean and disposition below "
+                      "meets only some of the concerns, so a gap between rows may be the concerns, not the rows.**"]
         for field, names in (("lean", LEANS), ("disposition", DISPOSITIONS)):
             lines += ["", f"Referendum shift by reader {field} (parent effect not removed for replies):", "",
-                      f"| {field} | " + " | ".join(c for c, _ in cols) + " |", "|---|" + "---|" * len(cols)]
+                      f"| {field} | " + " | ".join(c for c, _ in cols) + " | concerns met |",
+                      "|---|" + "---|" * (len(cols) + 1)]
             for name in names:
                 cells = []
                 for _, want in cols:
                     g = [r for r in ok if r.get(field) == name and want(r["kind"])]
                     cells.append(f"{shift(g):+.1f} (n={len(g)})" if g else "-")
-                lines.append(f"| {name} | " + " | ".join(cells) + " |")
+                met = len({r.get("concern") for r in ok if r.get(field) == name})
+                lines.append(f"| {name} | " + " | ".join(cells) + f" | {met}/{len(CONCERNS)} |")
         complete = not count["capped"] and all(
             sum(r["lean"] == lean and r["kind"] == k for r in ok) for lean in LEANS for k in CONTROLS)
         ctl = {k: shift(by[k]) for k in CONTROLS if by[k]}
@@ -418,9 +434,9 @@ def main() -> None:
     ap.add_argument("--writer", required=True, help="model spec, as for make_llm")
     ap.add_argument("--judge", help="stance judge spec; default the writer's model at temperature 0")
     ap.add_argument("--reader", help="simulated citizens' model spec; omit to skip reading")
-    ap.add_argument("--readers", type=int, default=18, help="18 meets every lean with every disposition once")
+    ap.add_argument("--readers", type=int, default=BALANCED, help=f"a multiple of {BALANCED} keeps the groups balanced")
     ap.add_argument("--max-calls", type=int, default=120, help="writer and judge calls together")
-    ap.add_argument("--max-reads", type=int, default=400)
+    ap.add_argument("--max-reads", type=int, default=2400)
     ap.add_argument("--seed", default="writer-eval")
     ap.add_argument("--go", action="store_true", help="actually call the models")
     args = ap.parse_args()
@@ -514,6 +530,28 @@ async def _test() -> None:
     assert await capped.generate("s", "p") is None
     assert hits["n"] == 2 and budget["sent"] == 2 and capped.requests == 2 and capped.capped == 1, (hits, budget)
     await capped.aclose()
+
+    # Each lean and disposition meets every concern over 36 readers, so a reader moved only by its concern shows
+    # no gap between dispositions.
+    cycle = [assign(i) for i in range(BALANCED)]
+    for field in ("lean", "disposition"):
+        for name in {a[field] for a in cycle}:
+            assert len({a["concern"] for a in cycle if a[field] == name}) == len(CONCERNS), (field, name)
+    by_concern = {c: k for k, c in enumerate(CONCERNS)}
+
+    class ByConcern(_Stub):
+        async def generate(self, system, prompt):
+            k = next(v for c, v in by_concern.items() if c in system)
+            return json.dumps({o: [40, 40 + k] if o == "referendum" else [50, 50] for o in OPINIONS})
+
+    args.readers, args.max_reads, args.stamp = BALANCED, 4000, "concern"
+    path = await run(args, _Stub("writer"), _Stub("judge"), ByConcern("reader"))
+    text = Path(path).read_text()
+    rows = [l for l in text.splitlines() if l.startswith("| ") and l.endswith(" | 6/6 |")]
+    shifts = {tuple(re.findall(r"[+-]\d+\.\d", r)) for r in rows}
+    assert len(rows) == len(LEANS) + len(DISPOSITIONS) and len(shifts) == 1, rows
+    assert "not a multiple" not in text
+    args.readers, args.stamp = 3, "test"
 
     # Pairs are matched by reader: a reply read by one reader and its parent by another give no gain.
     shown = [{"kind": "reply_no", "text": "r", "parent": "p"}, {"kind": "parent_only", "text": "p", "parent": None}]
