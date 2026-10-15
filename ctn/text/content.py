@@ -23,6 +23,12 @@ def load_world() -> str:
     )
 
 
+def without_arguments(world: str) -> str:
+    """The world without the answers to NO worries, for writing that leaves the referendum out."""
+    arguments = (CONTENT_DIR / "arguments.md").read_text(encoding="utf-8").strip()
+    return world.replace("\n\n" + arguments, "")
+
+
 def load_vaccine_angles() -> list:
     return json.loads((CONTENT_DIR / "archetypes.json").read_text(encoding="utf-8"))["vaccine_angles"]
 

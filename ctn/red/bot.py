@@ -12,7 +12,7 @@ from ctn.infra.fake_platform import AmbiguousWrite, FakePlatform, RateLimited
 from ctn.infra.llm import FakeLLM, team_llms
 from ctn.infra.state import StateStore
 from ctn.red.rhythm import UniformPacer
-from ctn.text.content import load_personas, load_vaccine_angles, load_world
+from ctn.text.content import load_personas, load_vaccine_angles, load_world, without_arguments
 from ctn.text.guard import (EMOJI_RE, about_referendum, copies, fresh_phrases, judge_stance, leans_no,
                             looks_like_probe, output_problem, phrases, plain, wrap_external)
 from ctn.text.semantic import TWIN
@@ -190,6 +190,7 @@ class Bot:
         self.platform = platform
         self.llm = llm
         self.world = world
+        self.plain_world = without_arguments(world)
         self.stance_llm = stance_llm  # None skips the stance check (e.g. offline tests)
         self.roster = roster or Roster()
         self.store = store or StateStore()
@@ -294,7 +295,9 @@ class Bot:
         """Generate, clean and vet content; returns a publishable Action or None."""
         query = (target.get("content") or "") if target else topic[1]
         examples, from_npcs = self._examples(query, reply=target is not None)
-        system = self._system_prompt(examples, from_npcs)
+        # The answers to NO worries only where the prompt takes up the referendum.
+        referendum = about_referendum(query) if target is not None else topic[0] == "issue"
+        system = self._system_prompt(examples, from_npcs, arguments=referendum)
         earlier, about = None, []
         if target is not None:
             if topic[0] == "conversation" and target.get("parent_id") is not None:
@@ -438,7 +441,7 @@ class Bot:
         own = self.persona["examples"]
         return random.sample(own, min(2, len(own))), False
 
-    def _system_prompt(self, examples: list, from_npcs: bool) -> str:
+    def _system_prompt(self, examples: list, from_npcs: bool, arguments: bool = True) -> str:
         p = self.persona
         shown = ""
         if examples:
@@ -470,7 +473,7 @@ class Bot:
                    f"How you write: {p['style']}.\n\n")
             own_words = ""
         return (
-            f"{self.world}\n\n"
+            f"{self.world if arguments else self.plain_world}\n\n"
             f"{self.news + chr(10) * 2 if self.news else ''}"
             f"Today is {today:%A} {today.day} {today:%B %Y}. "
             f"The referendum is in {(REFERENDUM_DAY - today).days} days.\n\n"
@@ -796,6 +799,41 @@ async def sign_off_check() -> None:
     print("sign-offs ok")
 
 
+async def arguments_check() -> None:
+    """The answers to NO worries go to the writer only when it is asked to take up the referendum."""
+    class Seen:
+        name = "seen"
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.system = system
+            return "Fish were biting off the wharf this morning."
+
+    world = load_world()
+    heading = "# How you answer common NO worries"
+    assert heading in world and heading not in without_arguments(world)
+    assert len(without_arguments(world)) < len(world) - 1000 and without_arguments("a world") == "a world"
+    persona = next(p for p in load_personas() if p["line"] == "persuade")
+    talk = {"id": 7, "author": "npc_1", "parent_id": None,
+            "content": "Not voting yes on the 2nd, proof of vaccination at the shops is too much."}
+    chat = {"id": 8, "author": "npc_1", "parent_id": None, "content": "Ferry was late again, third time this week."}
+    for kind, topic, target, wanted in (("post", ("issue", "jobs over lockdowns"), None, True),
+                                        ("post", ("daily", "the weather"), None, False),
+                                        ("post", ("vaccine", "a booster at the clinic"), None, False),
+                                        ("post", ("view", "the new railway"), None, False),
+                                        ("reply", ("feed", "unknown"), talk, True),
+                                        ("reply", ("feed", "unknown"), chat, False)):
+        writer = Seen()
+        bot = Bot(persona, FakePlatform(), writer, world, roster=Roster(own={persona["username"]}, npcs=["npc_1"]),
+                  store=StateStore(":memory:"))
+        await bot._compose(kind, topic=topic, target=target)
+        assert (heading in writer.system) == wanted, (kind, topic)
+        assert "# Who you are" in writer.system and "Kingstonia" in writer.system
+    print("arguments ok")
+
+
 async def quiet_race() -> None:
     """An account that goes quiet while a post or reply is being written publishes neither; it can still like."""
     global ACTION_WEIGHTS, QUIET_ACTIONS
@@ -969,6 +1007,7 @@ if __name__ == "__main__":
     n_bots = args.bots or (3 if args.real else 20)
     random.seed(0)
     asyncio.run(sign_off_check())
+    asyncio.run(arguments_check())
     asyncio.run(quiet_race())
     asyncio.run(notification_durability())
     asyncio.run(main(args.real, n_bots, args.seconds))
