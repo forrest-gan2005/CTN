@@ -114,10 +114,10 @@ def meter(llm, budget: dict) -> bool:
     """Counts requests at the HTTP layer where the model has one; False means count generate() calls instead."""
     parts = getattr(llm, "llms", [llm])
     http = [hasattr(m, "transport") for m in parts]
-    if not any(http):
+    if len(parts) > 1 and not all(http):  # a fallback past an uncounted member would slip past the cap
+        raise ValueError(f"{getattr(llm, 'name', llm)!r} chains models the cap can't count; test one at a time")
+    if not all(http):
         return False
-    if not all(http):  # one member's requests would go uncounted, and the cap with them
-        raise ValueError(f"{getattr(llm, 'name', llm)!r} mixes API and local models; test one model at a time")
     for m in parts:
         m.transport = Meter(m.transport or httpx.AsyncHTTPTransport(), budget)
     return True
@@ -510,6 +510,12 @@ async def _test() -> None:
     except ValueError:
         pass
     assert hits["n"] == 2
+    try:
+        Capped(ChainLLM([FakeLLM(0, 0), FakeLLM(0, 0)]), {"left": 1, "sent": 0}, "writer")
+        raise AssertionError("uncounted chain accepted")
+    except ValueError:
+        pass
+    assert not Capped(FakeLLM(0, 0), {"left": 1, "sent": 0}, "writer").metered
 
     # Model names with dots, and reruns in the same minute, each get their own files.
     args.reader, args.max_calls = None, 0
