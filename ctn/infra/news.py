@@ -85,6 +85,7 @@ class News:
         self.store = store
         self.pause = pause
         self.clock = lambda: datetime.now(timezone.utc)
+        self.sleep = asyncio.sleep
         self.client = httpx.AsyncClient(base_url=base_url, timeout=20, transport=transport, follow_redirects=True)
 
     async def aclose(self) -> None:
@@ -109,6 +110,7 @@ class News:
         due.update((url, site) for site, url in self.store.unsettled(self.clock()))
         fetched = 0
         for url, site in due.items():
+            asked = self.clock()  # what comes back is no newer than this, however long the answer takes
             try:
                 page = await self.client.get(f"{url}.json")
                 if page.status_code == 404 and self.store.known(url):
@@ -121,8 +123,8 @@ class News:
                 log.warning("couldn't fetch %s (%s)", url, str(e).splitlines()[0] if str(e) else type(e).__name__)
                 continue
             finally:
-                await asyncio.sleep(self.pause)
-            self.store.add(site, {**article, "url": article.get("url") or url}, self.clock())
+                await self.sleep(self.pause)
+            self.store.add(site, {**article, "url": article.get("url") or url}, asked)
             fetched += 1
         return fetched
 
@@ -206,6 +208,18 @@ async def _demo() -> None:
     news.store.add("kingstonia-herald", {"url": "/kingstonia-herald/articles/ward", "title": "Hospital short of nurses",
                                          "published_at": "2026-10-20T07:00:00Z"}, at(20, 7))
     assert await news.refresh() == 0 and "Hospital" not in news.brief()
+
+    # Asked a second before it came out, answered (or paused after) a second after: still not trusted.
+    articles["/daily-kingstonia/articles/ferry"] = {"title": "Ferry draft", "published_at": "2026-10-21T07:00:00Z"}
+    front["daily-kingstonia"] += '<a href="/daily-kingstonia/articles/ferry">'
+    clock = {"now": at(21, 7) - timedelta(seconds=1)}
+    news.clock = lambda: clock["now"]
+
+    async def slow(_: float) -> None:
+        clock["now"] = at(21, 7) + timedelta(seconds=1)
+    news.sleep = slow
+    assert await news.refresh() == 1 and "Ferry" not in news.brief(), "a draft passed for the published story"
+    assert await news.refresh() == 1 and "Ferry draft" in news.brief(), "asked again once it was out"
 
     seen = []
     handler_ = logging.Handler()
