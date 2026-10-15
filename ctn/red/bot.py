@@ -177,6 +177,7 @@ class Bot:
         self.twins = twins  # semantic.NearIndex of the whole team's recent posts; None skips the check
         self.injection = injection  # injection.InjectionClassifier; None leaves probe-spotting to the regexes
         self.quiet = False  # set by the team's health check once two of this account's posts were taken down
+        self.locked = False  # set by the team while the platform's feed is locked: nothing would go through
         self.rejected = {}
         self.unsafe = set()  # posts judged to argue NO, never to be amplified
         self.seen = self.store.load_seen(self.username)
@@ -619,8 +620,14 @@ class Bot:
             self.twins.add(self.username, action.content)
 
     async def step(self) -> Optional[Action]:
+        if self.locked:  # no reading, no writing, no LLM calls for posts that can't go out
+            return None
         action = await self.think(await self.read())
         if action is None:
+            return None
+        if self.locked:  # locked while this was being written
+            if action.type in ("post", "reply"):
+                self._drop(action, "the feed is locked")
             return None
         if action.type in ("post", "reply"):
             if self.quiet:  # the account went quiet while this was being written

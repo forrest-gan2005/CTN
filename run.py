@@ -41,6 +41,7 @@ LOGIN_RETRY = 60.0  # seconds between login attempts
 RECONCILE_EVERY = 300.0
 UNRESOLVED_GIVE_UP = timedelta(minutes=30)  # the collector reads Latest every few seconds, so by then it would show
 CLOCK_SKEW = timedelta(minutes=5)
+LOCK_EVERY = 60.0  # seconds between looks at whether the platform has locked its feed
 INBOX_RECALL = timedelta(hours=12)  # replies older than a bot would still answer (bot.INBOX_TTL) aren't recalled
 BACKUP_EVERY = 900.0
 CATCH_UP_PAGES = 500  # at startup, history pages read back to where the collector left off, before any bot acts
@@ -69,6 +70,7 @@ class Team:
         self.not_before = not_before  # no bot acts before this (the start); the collector starts at once
         self.stagger = stagger  # new accounts come online one by one over this long, not all at the start
         self.backup_dir = backup_dir  # None: no snapshots (tests)
+        self.locked = False  # the platform's feed lock, as last seen
         self.backup_every = backup_every
         self.embedder = embedder  # None turns every meaning-level check off
         writes, reports = state.recover()
@@ -260,7 +262,8 @@ class Team:
         spend = ", ".join(f"{model} {calls}" + (f" ${cost:.2f}" if cost else "")
                           for model, calls, *_, cost in ledger().totals(game_day_start()))
         quiet = sorted(b.username for b in self.bots if b.quiet)
-        return (f"status: {len(self.online)}/{len(self.bots)} bots online; last hour actions "
+        return (f"status: {'FEED LOCKED, everyone stopped; ' if self.locked else ''}"
+                f"{len(self.online)}/{len(self.bots)} bots online; last hour actions "
                 f"{self.state.action_counts(hour_ago)}, engagement {self.state.engagement_counts(hour_ago)}; "
                 f"reports {self.state.report_counts()}; takedowns {self.state.moderation_counts()}; quiet {quiet}; "
                 f"Blue rules off {sorted(self.scanner.disabled)}; unresolved writes {len(self.state.unresolved())}; "
@@ -333,6 +336,27 @@ class Team:
             return
         await self.reporter.run(until)
 
+    async def check_lock(self) -> None:
+        """The platform can lock its feed, leaving only citizens and moderators able to act: then every bot and
+        the reporter stop, so no LLM calls go on posts that can't go out, until it opens again. A failed look
+        keeps the last answer."""
+        try:
+            locked = await self.platform.feed_locked()
+        except Exception as e:
+            log.warning("couldn't tell whether the feed is locked (%s)", str(e) or type(e).__name__)
+            return
+        if locked != self.locked:
+            log.warning("the feed is %s", "locked: everyone stops" if locked else "open again: back to work")
+        self.locked = locked
+        for bot in self.bots:
+            bot.locked = locked
+        self.reporter.locked = locked
+
+    async def _watch_lock(self, every: float) -> None:
+        while True:
+            await self.check_lock()
+            await asyncio.sleep(every)
+
     async def _every(self, seconds: float, job) -> None:
         while True:
             await asyncio.sleep(seconds)
@@ -352,6 +376,8 @@ class Team:
                       asyncio.create_task(self._every(status_every, lambda: log.info(self.status())))]
         if self.backup_dir is not None:
             background.append(asyncio.create_task(self.backups(self.backup_every)))
+        if getattr(self.platform, "feed_locked", None) is not None:
+            background.append(asyncio.create_task(self._watch_lock(LOCK_EVERY)))
         try:
             await asyncio.gather(
                 self.collector.run(until),
@@ -884,6 +910,66 @@ async def reply_abort_check() -> None:
     print("reply abort ok")
 
 
+async def lock_check() -> None:
+    """While the platform's feed is locked no bot reads, writes or calls an LLM, and nothing is reported; a post
+    being written when the lock comes is dropped and its target freed; all of it resumes once the feed opens.
+    A failed look at the lock keeps the last answer."""
+    from ctn.red import bot as bot_module
+
+    class Lockable(FakePlatform):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lock, self.broken = False, False
+
+        async def feed_locked(self) -> bool:
+            if self.broken:
+                raise RuntimeError("HTTP 503")
+            return self.lock
+
+    class Paused(Distinct):
+        def __init__(self) -> None:
+            super().__init__(0, 0)
+            self.started, self.go = asyncio.Event(), asyncio.Event()
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.started.set()
+            await self.go.wait()
+            return await super().generate(system, prompt)
+
+    personas = [x for x in load_personas() if x["line"] == "background"][:1]
+    me = personas[0]["username"]
+    saved = bot_module.ACTION_WEIGHTS
+    try:
+        for kind in ("post", "reply"):
+            p, llm = Lockable(), Paused()
+            target = await p.post("npc_1", "Clinic queue was out the door again")
+            team = Team(p, llm, None, NpcStore(":memory:"), StateStore(":memory:"), personas=personas)
+            team.roster.npcs = {"npc_1"}
+            bot_module.ACTION_WEIGHTS = {kind: 1}
+            bot = team.bots[0]
+            step = asyncio.create_task(bot.step())
+            await llm.started.wait()
+            p.lock = True
+            await team.check_lock()
+            assert bot.locked and team.reporter.locked and "FEED LOCKED" in team.status()
+            llm.go.set()
+            assert await step is None and len(p.posts) == 1, f"a {kind} went out after the lock"
+            assert not team.state.claimed([f"post:{target['id']}"]), "the target stayed claimed"
+            calls = llm.calls
+            assert await bot.step() is None and llm.calls == calls, "an LLM call while locked"
+            assert await team.reporter.report_some() == 0
+            p.broken = True
+            await team.check_lock()
+            assert bot.locked, "a failed look forgot the lock"
+            p.broken, p.lock = False, False
+            await team.check_lock()
+            assert not bot.locked and not team.reporter.locked
+            assert (await bot.step()) is not None and len(p.posts) == 2, f"no {kind} after the feed opened"
+    finally:
+        bot_module.ACTION_WEIGHTS = saved
+    print("feed lock ok")
+
+
 def persona_story_check() -> None:
     """Key accounts write from their own story and nothing beyond it; the rest keep their short brief; a phrase
     two teammates used this week is refused (setting names aside, older posts forgotten); and the story check
@@ -1307,6 +1393,7 @@ if __name__ == "__main__":
         asyncio.run(reply_abort_check())
         persona_story_check()
         asyncio.run(shared_phrase_race_check())
+        asyncio.run(lock_check())
         asyncio.run(smoke())
     else:
         asyncio.run(rehearse(args.seconds, args.real))

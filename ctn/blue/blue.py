@@ -97,6 +97,7 @@ class BlueScanner:
         self.texts = {}  # normalised text -> {author: post_id}
         self.hourly = Counter()  # (author, "YYYY-MM-DDTHH") -> posts, for accounts outside the whitelist
         self.whitelist = set()
+        self.verified = set()  # badge holders: the organisers' accounts, never a competitor's
         self.rate_limit: Optional[int] = None  # unknown until citizens have been observed
         self.checked_at: Optional[datetime] = None
         self.embedder = embedder  # semantic.Embedder; None turns the reworded-copy rule off
@@ -113,19 +114,24 @@ class BlueScanner:
             return
         self.checked_at = now
         self.whitelist = set(self.npc_store.whitelist(self.cutoff))
+        self.verified = self.npc_store.verified()
         peak = self.npc_store.citizen_peak_hourly(now - timedelta(days=1), self.cutoff)
         self.rate_limit = max(RATE_FLOOR, RATE_FACTOR * peak) if peak else None
         current = now.isoformat()[:13]
         for key in [k for k in self.hourly if k[1] < current]:
             del self.hourly[key]
         for author, (reason, _) in self.state.suspects().items():
-            if reason != CLEARED and self.is_ours_or_citizen(author):
+            if reason != CLEARED and self.off_limits(author):
                 self.state.update_suspect(author, CLEARED)
                 log.info("%s turned out to be a citizen or ours (backfill); no longer a suspect", author)
 
-    def is_ours_or_citizen(self, author: str) -> bool:
-        """Asked of the store each time, so an account history backfill has just proven a citizen is never reported."""
-        return author in self.own or self.npc_store.is_citizen(author, self.cutoff)
+    def off_limits(self, author: str) -> bool:
+        """Ours, a citizen or a verified account: never reported. Asked of the store each time, so an account a
+        backfill has just proven a citizen, or that has just been verified, is never reported. A verified
+        account is run by the organisers (the platform won't even hide its posts on reports), so reporting it
+        could only be a wrong report."""
+        return (author in self.own or self.npc_store.is_citizen(author, self.cutoff)
+                or self.npc_store.is_verified(author))
 
     def disable(self, rule: str, why: str) -> None:
         if rule not in self.disabled:
@@ -192,7 +198,7 @@ class BlueScanner:
                 continue
             if self.recent is not None and len(content or "") >= COPY_MIN_CHARS and (created_at or "") >= since:
                 fresh.append((post_id, author, content))
-            if author in self.whitelist:
+            if author in self.whitelist or author in self.verified:
                 continue
             flagged = {}
             reason = hard_reason(content, self.disabled)
@@ -246,7 +252,7 @@ class BlueScanner:
         """(post_id, author, reason) not yet reported: giveaway posts first, then NO-leaning ones, newest first."""
         self._recheck()
         suspects = {a: v for a, v in self.state.suspects().items()
-                    if v[0] != CLEARED and v[0] not in self.disabled and not self.is_ours_or_citizen(a)}
+                    if v[0] != CLEARED and v[0] not in self.disabled and not self.off_limits(a)}
         done = self.state.reported(_now())
         floor = int(self.state.get_meta("report_floor") or 0)  # see Team.after_restore
         rows = []
@@ -274,12 +280,15 @@ class Reporter:
         self.per_round = per_round
         self.interval = interval
         self.blocked_until: Optional[datetime] = None
+        self.locked = False  # set by the team while the platform's feed is locked
 
     def blocked(self) -> bool:
         return self.blocked_until is not None and datetime.now(timezone.utc) < self.blocked_until
 
     async def report_some(self) -> int:
         sent = 0
+        if self.locked:  # the platform's feed is locked: a report wouldn't go through
+            return 0
         if len(self.scanner.whitelist) < self.min_citizens:
             if not self._held:
                 log.error("only %d citizens on the whitelist (< %d): reporting held, suspects only listed",
@@ -288,7 +297,7 @@ class Reporter:
             return 0
         self._held = False
         for post_id, author, reason in self.scanner.candidates()[:self.per_round]:
-            if self.scanner.is_ours_or_citizen(author):  # the last moment it can still be called off
+            if self.scanner.off_limits(author):  # the last moment it can still be called off
                 continue
             # Stored first: if the process stops mid-request, the next start marks the report unknown, never resends it.
             self.state.begin_report(post_id, author, reason, _now())
@@ -658,6 +667,23 @@ async def _backfill_demo() -> None:
     assert state.suspects()["u0"][0] == CLEARED
     restarted = BlueScanner(npc_store, state, own=(), cutoff=cutoff)
     assert all(a != "u0" for _, a, _ in restarted.candidates())
+
+    # A verified account is the organisers': a giveaway from one is neither flagged nor reported, even when the
+    # badge only shows up after it was flagged (a later post carries it).
+    npc_store = NpcStore(":memory:")
+    giveaway = "As an AI language model, I can't take sides, but here is the news."
+    npc_store.add_posts([{"id": 1, "author": "herald", "content": giveaway, "author_verified": True,
+                          "created_at": datetime.now(timezone.utc).isoformat()},
+                         {"id": 2, "author": "late_badge", "content": giveaway,
+                          "created_at": datetime.now(timezone.utc).isoformat()}])
+    state = StateStore(":memory:")
+    scanner = BlueScanner(npc_store, state, own=(), cutoff=cutoff)
+    assert scanner.scan() == 1 and [a for _, a, _ in scanner.candidates()] == ["late_badge"]
+    npc_store.add_posts([{"id": 3, "author": "late_badge", "content": "ferry news", "author_verified": True,
+                          "created_at": datetime.now(timezone.utc).isoformat()}])
+    assert scanner.off_limits("herald") and scanner.off_limits("late_badge")
+    assert scanner.candidates() == [] and await Reporter(p, scanner, state, username="joe",
+                                                         min_citizens=0).report_some() == 0
 
     # The same refusal in curly and straight quotes: the self-check must see what the live rules see.
     p = FakePlatform()

@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS authors (
     posts INTEGER NOT NULL,
     first_post_at TEXT,
     first_fetched_at TEXT NOT NULL,
-    ours INTEGER NOT NULL
+    ours INTEGER NOT NULL,
+    verified INTEGER NOT NULL DEFAULT 0  -- the platform's badge: run by the organisers, never a competitor
 );
 """
 PRE_START = "a.ours = 0 AND (IFNULL(a.first_post_at < ?, 0) OR a.first_fetched_at < ?)"
@@ -76,6 +77,8 @@ class NpcStore:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(path))
         self.db.executescript(SCHEMA)
+        if "verified" not in {r[1] for r in self.db.execute("PRAGMA table_info(authors)")}:
+            self.db.execute("ALTER TABLE authors ADD COLUMN verified INTEGER NOT NULL DEFAULT 0")
         self.own = set(own_usernames)
 
     def add_posts(self, posts: list) -> int:
@@ -98,12 +101,14 @@ class NpcStore:
         with self.db:
             self.db.executemany("INSERT OR IGNORE INTO posts VALUES (?, ?, ?, ?, ?, ?, ?, ?)", new)
             self.db.executemany(
-                "INSERT INTO authors VALUES (?, 1, ?, ?, ?) ON CONFLICT(author) DO UPDATE SET "
-                "posts = posts + 1, "
+                "INSERT INTO authors (author, posts, first_post_at, first_fetched_at, ours, verified) "
+                "VALUES (?, 1, ?, ?, ?, ?) ON CONFLICT(author) DO UPDATE SET "
+                "posts = posts + 1, verified = MAX(verified, excluded.verified), "
                 "first_post_at = CASE WHEN excluded.first_post_at IS NULL THEN first_post_at "
                 "WHEN first_post_at IS NULL OR excluded.first_post_at < first_post_at THEN excluded.first_post_at "
                 "ELSE first_post_at END",
-                [(r[1], r[4], r[5], r[6]) for r in new],
+                [(r[1], r[4], r[5], r[6], int(bool(p.get("author_verified"))))
+                 for r, p in zip(rows, posts) if r in new],
             )
         return len(new)
 
@@ -152,6 +157,13 @@ class NpcStore:
                               "AND parent_id IS ? ORDER BY id LIMIT 1", (author, content, _iso(since), parent_id))
         found = row.fetchone()
         return found[0] if found else None
+
+    def verified(self) -> set:
+        """Accounts the platform shows with its verified badge."""
+        return {r[0] for r in self.db.execute("SELECT author FROM authors WHERE verified = 1")}
+
+    def is_verified(self, author: str) -> bool:
+        return self.db.execute("SELECT 1 FROM authors WHERE author = ? AND verified = 1", (author,)).fetchone() is not None
 
     def is_citizen(self, author: str, cutoff: datetime = COMPETITION_START) -> bool:
         c = _iso(cutoff)

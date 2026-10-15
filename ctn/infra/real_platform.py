@@ -60,13 +60,14 @@ def iso(value: Optional[str]) -> Optional[str]:
     return value[:-1] + "+00:00" if isinstance(value, str) and value.endswith("Z") else value
 
 
-def normalise_post(raw: dict, names: dict) -> dict:
+def normalise_post(raw: dict, names: dict, badges: Optional[dict] = None) -> dict:
     """An API post in the shape the rest of the code uses (id, author username, content, parent_id), keeping
-    every original field. `names` maps account ids to usernames."""
+    every original field. `names` maps account ids to usernames, `badges` to whether they're verified."""
     return {
         **raw,
         "id": raw.get("post_id"),
         "author": names.get(raw.get("author_id")),
+        "author_verified": bool((badges or {}).get(raw.get("author_id"))),
         "content": raw.get("body") or "",
         "parent_id": raw.get("reply_to_post_id"),
         "created_at": iso(raw.get("created_at")),
@@ -138,6 +139,7 @@ class RealPlatform:
         self.sleep = asyncio.sleep
         self.ids = self.accounts.ids()  # username -> account id
         self.names = {i: u for u, i in self.ids.items()}  # account id -> username
+        self.badges = {}  # account id -> verified
         self.created = {}  # post id -> created_at exactly as the server wrote it, for page cursors
         self.roots = {}  # post id -> the post its thread starts from
         self.ours = {}  # post id -> which of our accounts wrote it
@@ -254,6 +256,12 @@ class RealPlatform:
             self.after[min(p["id"] for p in found)] = cursor
         return sorted((p for p in found if p["author"] is not None), key=lambda p: p["id"], reverse=True)[:n]
 
+    async def feed_locked(self) -> bool:
+        """Whether the platform has locked its feed: only citizens and moderators can act then."""
+        resp = await self._send("GET", "/feed/lock")
+        resp.raise_for_status()
+        return bool(resp.json().get("locked"))
+
     async def get_notifications(self, username: str) -> list:
         """Replies to this account's posts seen since they were last acknowledged. They stay until
         ack_notifications, which callers run once they have stored them."""
@@ -270,12 +278,6 @@ class RealPlatform:
         if resp.status_code in (403, 429) and any(w in resp.text.lower() for w in ("suspend", "block", "banned")):
             raise ReportingSuspended(resp.text[:200])
         resp.raise_for_status()
-
-    async def trending_tags(self) -> list:
-        resp = await self._send("GET", "/tags/popular")
-        resp.raise_for_status()
-        body = resp.json()
-        return body.get("items", []) if isinstance(body, dict) else body
 
     async def account_id(self, username: str) -> int:
         """The id behind a username: from the cache, else searching page by page until it turns up or the
@@ -305,6 +307,7 @@ class RealPlatform:
         if account.get("account_id") is not None and account.get("username"):
             self.names[account["account_id"]] = account["username"]
             self.ids[account["username"]] = account["account_id"]
+            self.badges[account["account_id"]] = bool(account.get("verified"))
 
     async def _list_accounts(self) -> None:
         cursor = None
@@ -339,7 +342,7 @@ class RealPlatform:
         await self._resolve({i.get("author_id") for i in items})
         posts = []
         for raw in items:
-            post = normalise_post(raw, self.names)
+            post = normalise_post(raw, self.names, self.badges)
             self.created[post["id"]] = raw.get("created_at")
             self.roots[post["id"]] = raw.get("root_post_id") or post["id"]
             self._notice(post["id"], post["author"], post["parent_id"])
@@ -476,6 +479,7 @@ class MockLegitSocial:
         self.tokens = {}  # token -> username
         self.posts = {}
         self.hidden = set()  # post ids that answer 404, as moderated posts do
+        self.locked = False  # the feed lock: only reads go through
         self.likes, self.follows = set(), set()
         self.reports = []  # (username, post id, reason)
         self.calls = 0
@@ -515,6 +519,10 @@ class MockLegitSocial:
             self.add_user(body["username"], body.get("display_name"))
             self.users[body["username"]] = body["password"]
             return self._session(body["username"], 201)
+        if path == "/feed/lock" and method == "GET":
+            return httpx.Response(200, json={"locked": self.locked, "reason": None, "updated_at": None})
+        if self.locked and method != "GET" and not path.startswith("/auth/"):
+            return error(403, "the feed is locked")
         if path == "/posts" and method == "GET":
             if query.get("sort") not in ("recent", "trending", "home"):
                 return error(400, "sort must be recent, trending or home")
@@ -665,6 +673,13 @@ async def _demo() -> None:
     assert [x["id"] for x in await p.feed_latest(n=2)] == made[::-1][:2], "a page of reposts is read through"
 
     assert (await p.get_post(reply["id"]))["content"] == "same at our shop"
+    assert not (await p.get_post(reply["id"]))["author_verified"]
+    mock.accounts[mock._ids()["npc_1"]]["verified"] = True
+    badged = RealPlatform("https://legit.test/api", team_key=mock.team_key, accounts=AccountStore(":memory:"),
+                          transport=transport)
+    assert (await badged.get_post(reply["id"]))["author_verified"], "the badge comes with the author"
+    await badged.aclose()
+    mock.accounts[mock._ids()["npc_1"]]["verified"] = False
     mock.hidden.add(reply["id"])
     for missing in (99, reply["id"]):
         try:
@@ -672,6 +687,15 @@ async def _demo() -> None:
             raise AssertionError(f"post {missing} should raise KeyError")
         except KeyError:
             pass
+    assert not await p.feed_locked()
+    mock.locked = True
+    assert await p.feed_locked()
+    try:
+        await p.like("joe_tama", 2)
+        raise AssertionError("a like went through a locked feed")
+    except httpx.HTTPStatusError as e:
+        assert e.response.status_code == 403
+    mock.locked = False
     assert await p.like("joe_tama", 2) and not await p.like("joe_tama", 2)
     assert await p.follow("joe_tama", "npc_1") and not await p.follow("joe_tama", "npc_1")
     assert await p.unfollow("joe_tama", "npc_1")

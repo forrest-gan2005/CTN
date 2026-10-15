@@ -108,7 +108,9 @@ class Stage:
             return httpx.Response(404)  # not retried by the client, so each catch-up attempt fails outright
         request = httpx.Request(method, f"http://drill{path}", headers=headers, content=body)
         if OUTAGE[0] <= now < OUTAGE[1]:
-            if method == "POST" and path == "/api/posts" and self.cut_writes < 4:
+            # Posts and replies, which are journalled; a repost is a POST /api/posts too now, but isn't.
+            if (method == "POST" and path == "/api/posts" and self.cut_writes < 4
+                    and json.loads(body or b"{}").get("kind") != "repost"):
                 self.cut_writes += 1
                 if self.cut_writes % 2:
                     with self.lock:
