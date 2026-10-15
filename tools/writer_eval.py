@@ -113,8 +113,11 @@ class Meter(httpx.AsyncBaseTransport):
 def meter(llm, budget: dict) -> bool:
     """Counts requests at the HTTP layer where the model has one; False means count generate() calls instead."""
     parts = getattr(llm, "llms", [llm])
-    if not all(hasattr(m, "transport") for m in parts):
+    http = [hasattr(m, "transport") for m in parts]
+    if not any(http):
         return False
+    if not all(http):  # one member's requests would go uncounted, and the cap with them
+        raise ValueError(f"{getattr(llm, 'name', llm)!r} mixes API and local models; test one model at a time")
     for m in parts:
         m.transport = Meter(m.transport or httpx.AsyncHTTPTransport(), budget)
     return True
@@ -320,18 +323,25 @@ def report(args, drafts: list, shown_items: list, reads: list, models: dict) -> 
             bot = sum(r["result"].get("sounds_like") in ("bot", "campaign") for r in g) / len(g)
             lines.append(f"| {kind} | {len(g)} | " + " | ".join(f"{shift(g, o):+.1f}" for o in OPINIONS)
                          + f" | {no:.0%} | {bot:.0%} |")
-        alone = {shown_items[r["item"]]["text"]: [] for r in ok if r["kind"] == "parent_only"}
-        for r in ok:
-            if r["kind"] == "parent_only":
-                alone[shown_items[r["item"]]["text"]].append(r)
-        gain = defaultdict(list)
+        # Same reader, same parent: what the reply adds over that reader's reaction to the parent alone.
+        delta = {(r["reader"], r["item"]): r["result"]["referendum"][1] - r["result"]["referendum"][0] for r in ok}
+        parent_item = {it["text"]: i for i, it in enumerate(shown_items) if it["kind"] == "parent_only"}
+        people = sorted({r["reader"] for r in reads})
+        gain, missing = defaultdict(list), defaultdict(int)
         for i, it in enumerate(shown_items):
-            mine = [r for r in ok if r["item"] == i]
-            if it["parent"] and mine and alone.get(it["parent"]):
-                gain[it["kind"]].append(shift(mine) - shift(alone[it["parent"]]))
-        if gain:
-            lines += ["", "Referendum shift a reply adds over its parent read alone: "
-                      + ", ".join(f"{k} {mean(v):+.1f} (n={len(v)})" for k, v in sorted(gain.items()))]
+            j = parent_item.get(it["parent"]) if it["parent"] else None
+            if j is None:
+                continue
+            for who in people:
+                if (who, i) in delta and (who, j) in delta:
+                    gain[it["kind"]].append(delta[(who, i)] - delta[(who, j)])
+                else:
+                    missing[it["kind"]] += 1
+        kinds = sorted(set(gain) | set(missing))
+        if kinds:
+            lines += ["", "Referendum shift a reply adds over the same reader's reaction to its parent alone:"] + [
+                f"- {k}: " + (f"{mean(gain[k]):+.1f} over {len(gain[k])} reader pairs" if gain[k] else "no complete pairs")
+                + (f"; {missing[k]} pairs missing" if missing[k] else "") for k in kinds]
         complete = not count["capped"] and all(
             sum(r["lean"] == lean and r["kind"] == k for r in ok) for lean in LEANS for k in CONTROLS)
         ctl = {k: shift(by[k]) for k in CONTROLS if by[k]}
@@ -443,7 +453,7 @@ async def _test() -> None:
     assert len(data["drafts"]) == len(LINES) * PER_LINE * len(POST_KINDS) + len(CITIZENS)
     assert all(d["status"] == "kept" for d in data["drafts"]), [d["status"] for d in data["drafts"]]
     assert "Readers pass the controls (NO < 0 < YES, unrelated near 0): yes" in text, text
-    assert "adds over its parent read alone" in text and any(i["kind"] == "parent_only" for i in data["items"])
+    assert "adds over the same reader's reaction" in text and any(i["kind"] == "parent_only" for i in data["items"])
     assert {d["kind"] for d in data["drafts"]} >= {"post_issue", "reply_no", "reply_news", "reply_unknown"}
 
     # A cap of one: the judge never runs, so nothing may count as the model rejecting a draft.
@@ -477,6 +487,29 @@ async def _test() -> None:
     assert await capped.generate("s", "p") is None
     assert hits["n"] == 2 and budget["sent"] == 2 and capped.requests == 2 and capped.capped == 1, (hits, budget)
     await capped.aclose()
+
+    # Pairs are matched by reader: a reply read by one reader and its parent by another give no gain.
+    shown = [{"kind": "reply_no", "text": "r", "parent": "p"}, {"kind": "parent_only", "text": "p", "parent": None}]
+
+    def row(who, i, d):
+        res = None if d is None else {o: [50, 50 + d] if o == "referendum" else [50, 50] for o in OPINIONS}
+        return {"reader": who, "lean": "firm_no", "item": i, "kind": shown[i]["kind"],
+                "status": "ok" if res else "unparsed", "result": res}
+
+    stub = {"writer": Capped(_Stub("writer"), {"left": 0, "sent": 0}, "writer")}
+    crossed = report(args, [], shown, [row("A", 0, 10), row("A", 1, None), row("B", 0, None), row("B", 1, -10)], stub)
+    assert "reply_no: no complete pairs; 2 pairs missing" in crossed, crossed
+    paired = report(args, [], shown, [row("A", 0, 4), row("A", 1, 1), row("B", 0, 2), row("B", 1, 3)], stub)
+    assert "reply_no: +1.0 over 2 reader pairs" in paired, paired
+
+    # A chain mixing an API model with a local one can't be capped, so it is refused before any request.
+    from ctn.infra.llm import FakeLLM
+    try:
+        Capped(ChainLLM([model("a"), FakeLLM(0, 0)]), {"left": 1, "sent": 0}, "writer")
+        raise AssertionError("mixed chain accepted")
+    except ValueError:
+        pass
+    assert hits["n"] == 2
 
     # Model names with dots, and reruns in the same minute, each get their own files.
     args.reader, args.max_calls = None, 0
