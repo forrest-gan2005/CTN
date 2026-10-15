@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -42,6 +43,7 @@ LLM_DOWN = (68.0, 74.0)  # every model answers 503
 KILL_2, RESTART_2 = 90.0, 92.0  # killed, its databases deleted, an older snapshot restored
 BLIND = (RESTART_2, 100.0)  # and then Latest can't be read for a while: nothing may be written meanwhile
 END = 115.0
+MIN_WINDOW = 8.0  # seconds a phase needs, once the team is back on the platform, for a missing post to mean anything
 RESTORE_AGE = 8.0  # restore the newest snapshot at least this old, so there is something to catch up on
 
 THINGS = ["the ferry", "my landlord", "the reef", "regatta prep", "the 7:40 bus", "night shift", "the clinic queue",
@@ -75,6 +77,7 @@ class Stage:
         self.cut_writes = 0  # posts cut off by the outage so far
         self.lines = set()  # every line the models have written, so a repeated post can only be a resend
         self.post_requests = []  # every POST /api/posts that reached us, and what we did with it
+        self.request_times = []  # when each request reached us, to tell when a restarted child got going
 
     def t(self) -> float:
         return time.monotonic() - self.t0
@@ -89,6 +92,7 @@ class Stage:
 
     def handle(self, method: str, path: str, headers: dict, body: bytes):
         """An httpx.Response, or None to drop the connection without answering."""
+        self.request_times.append(self.t())
         resp = self._handle(method, path, headers, body)
         if method == "POST" and path == "/api/posts":
             with self.lock:
@@ -333,11 +337,7 @@ async def verify(stage: Stage, tmp: Path, port: int, marks: dict) -> list:
         failures.append(f"written while the restore couldn't read the platform: {blind}")
     if len(reports) != len({(u, pid) for u, pid, _ in reports}):
         failures.append(f"a post reported twice: {stage.report_times}")
-    for label, after, before in (("outage", OUTAGE[1], THROTTLE[0]), ("throttle", THROTTLE[1], KILL_1),
-                                 ("kill", RESTART_1, LLM_DOWN[0]), ("models back", LLM_DOWN[1], KILL_2),
-                                 ("restore", BLIND[1], END)):
-        if not any(after <= when(p) < before for p in ours):
-            failures.append(f"nothing posted after the {label} ({after:.0f}-{before:.0f}s)")
+    failures += silent_phases([when(p) for p in ours], stage.request_times)
     if not state.unresolved("found"):
         failures.append(f"inconclusive: no stored-but-unanswered post was found ({stage.cut_writes} cut off)")
     if not any(marks["snapshot_t"] < t < KILL_2 for t, _ in stage.report_times):
@@ -352,13 +352,45 @@ async def verify(stage: Stage, tmp: Path, port: int, marks: dict) -> list:
     return failures
 
 
-def keep_evidence(stage: Stage, tmp: Path) -> Path:
+def silent_phases(posted: list, requests: list) -> list:
+    """Each phase after a fault must see a post of ours, unless the team was back on the platform too late in it
+    for the silence to say anything (a slow machine can take most of a phase to start a child)."""
+    failures = []
+    for label, after, before in (("outage", OUTAGE[1], THROTTLE[0]), ("throttle", THROTTLE[1], KILL_1),
+                                 ("kill", RESTART_1, LLM_DOWN[0]), ("models back", LLM_DOWN[1], KILL_2),
+                                 ("restore", BLIND[1], END)):
+        if any(after <= t < before for t in posted):
+            continue
+        back = min((t for t in requests if t >= after), default=before)
+        if before - back < MIN_WINDOW:
+            failures.append(f"inconclusive: nothing posted after the {label}, but the team was only back on the "
+                            f"platform at {back:.1f}s, {before - back:.1f}s before {before:.0f}s")
+        else:
+            failures.append(f"nothing posted after the {label} ({back:.1f}-{before:.0f}s)")
+    return failures
+
+
+def silent_phases_check() -> None:
+    every = [25.0, 45.0, 60.0, 80.0, 105.0]
+    assert silent_phases(every, []) == []
+    late = silent_phases([25.0, 45.0, 80.0, 105.0], [55.0 + 7.5, 70.0])
+    assert len(late) == 1 and late[0].startswith("inconclusive: nothing posted after the kill"), late
+    idle = silent_phases([25.0, 45.0, 80.0, 105.0], [55.0, 70.0])
+    assert idle == ["nothing posted after the kill (55.0-68s)"], idle
+    never = silent_phases([25.0, 45.0, 80.0, 105.0], [])
+    assert len(never) == 1 and never[0].startswith("inconclusive"), never
+    print("silent phases ok")
+
+
+def keep_evidence(stage: Stage, tmp: Path, why: str, marks: dict) -> Path:
     """Copy a failed run's databases and child logs, with the platform's posts and every post request it got,
-    somewhere that outlives the run."""
+    why it failed and its timing marks, somewhere that outlives the run."""
     with stage.lock:
         posts, requests = list(stage.mock.posts.values()), list(stage.post_requests)
     (tmp / "platform_posts.json").write_text(json.dumps(posts, default=list, indent=1))
     (tmp / "post_requests.json").write_text(json.dumps(requests, indent=1))
+    (tmp / "failures.txt").write_text(why + "\n")
+    (tmp / "marks.json").write_text(json.dumps({**marks, "cut_writes": stage.cut_writes}, indent=1))
     root = paths.DATA / "drill-failures"
     root.mkdir(parents=True, exist_ok=True)
     saved = Path(tempfile.mkdtemp(prefix=datetime.now().strftime("%Y%m%d-%H%M%S-"), dir=root))
@@ -399,7 +431,8 @@ async def main(keep: str = "") -> int:
                              if datetime.strptime(s.name, "%Y%m%dT%H%M%S.%fZ").replace(tzinfo=timezone.utc).timestamp()
                              <= cutoff), None)
                 if snap is None:
-                    print(f"drill FAILED: no snapshot old enough to restore; evidence in {keep_evidence(stage, tmp)}")
+                    why = "no snapshot old enough to restore"
+                    print(f"drill FAILED: {why}; evidence in {keep_evidence(stage, tmp, why, marks)}")
                     return 1
                 taken_at = datetime.strptime(snap.name, "%Y%m%dT%H%M%S.%fZ").replace(tzinfo=timezone.utc)
                 taken = taken_at.isoformat()
@@ -426,10 +459,11 @@ async def main(keep: str = "") -> int:
                     failures.append(f"child {n} lost a task's exception (child-{n}.log)")
         except BaseException:
             if not keep:
-                print(f"drill crashed; evidence kept in {keep_evidence(stage, tmp)}")
+                print(f"drill crashed; evidence kept in {keep_evidence(stage, tmp, traceback.format_exc(), marks)}")
             raise
         if failures and not keep:
-            failures.append(f"evidence kept in {keep_evidence(stage, tmp)}")
+            saved = keep_evidence(stage, tmp, "\n".join(failures), marks)
+            failures.append(f"evidence kept in {saved}")
     server.shutdown()
     if failures:
         print("drill FAILED:\n  " + "\n  ".join(failures))
@@ -441,12 +475,15 @@ async def main(keep: str = "") -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd")
+    sub.add_parser("check", help="offline checks of the drill's own verdicts")
     c = sub.add_parser("child")
     for name in ("tmp", "port", "start", "end"):
         c.add_argument(name)
     parser.add_argument("--keep", default="", help="keep the databases and child logs in this directory")
     args = parser.parse_args()
-    if args.cmd == "child":
+    if args.cmd == "check":
+        silent_phases_check()
+    elif args.cmd == "child":
         asyncio.run(child(Path(args.tmp), int(args.port), float(args.start), float(args.end)))
     else:
         sys.exit(asyncio.run(main(args.keep)))
