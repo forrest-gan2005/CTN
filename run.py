@@ -972,6 +972,23 @@ async def news_check() -> None:
     print("news ok")
 
 
+async def examples_check() -> None:
+    """The papers, reporters and campaigners (verified) aren't what the writers copy the voice or timing of."""
+    store = NpcStore(":memory:")
+    day = datetime(2026, 10, 18, 9, tzinfo=timezone.utc)
+    store.add_posts([{"id": i, "author": "DailyKingstonia", "author_verified": True,
+                      "content": f"BREAKING: ferry timetable cut across three routes, council confirms ({i})",
+                      "created_at": (day + timedelta(minutes=i)).isoformat()} for i in range(1, 4)] +
+                    [{"id": 10 + i, "author": f"citizen_{i}", "content": f"Ferry was packed again this morning, story {i}",
+                      "created_at": (day + timedelta(hours=1, minutes=i)).isoformat()} for i in range(1, 4)])
+    team = Team(FakePlatform(), FakeLLM(0, 0), None, store, StateStore(":memory:"), personas=load_personas()[:1])
+    team.refresh()
+    authors = {author for author, _, _ in team.bots[0].examples.posts}
+    assert authors == {"citizen_1", "citizen_2", "citizen_3"}, authors
+    assert "DailyKingstonia" in team.roster.npcs, "still a citizen of the platform, never reported"
+    print("examples ok")
+
+
 async def lock_check() -> None:
     """While the platform's feed is locked no bot reads, writes or calls an LLM, and nothing is reported; a post
     being written when the lock comes is dropped and its target freed; all of it resumes once the feed opens.
@@ -1457,6 +1474,7 @@ if __name__ == "__main__":
         asyncio.run(shared_phrase_race_check())
         asyncio.run(lock_check())
         asyncio.run(news_check())
+        asyncio.run(examples_check())
         asyncio.run(smoke())
     else:
         asyncio.run(rehearse(args.seconds, args.real))
