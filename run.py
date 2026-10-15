@@ -121,11 +121,10 @@ class Team:
                                 for author, content, _, parent in rows[-EXAMPLE_POSTS:]), self.embedder)
         curve = npc_curve([ts for _, _, ts, _ in rows])
         hashtags = self.npc_store.top_hashtags(datetime.now(timezone.utc) - HASHTAG_WINDOW, cutoff=self.cutoff)
-        brief = self.news.brief() if self.news is not None else ""
         for bot in self.bots:
             bot.examples = examples
             bot.hashtags = hashtags
-            bot.news = brief
+        self.brief_news()
         for pacer in self.pacers.values():
             if isinstance(pacer, Rhythm):
                 pacer.curve = curve
@@ -357,11 +356,19 @@ class Team:
             bot.locked = locked
         self.reporter.locked = locked
 
+    def brief_news(self) -> None:
+        """What the papers have published lately, into every writer's context."""
+        brief = self.news.brief() if self.news is not None else ""
+        for bot in self.bots:
+            bot.news = brief
+
     async def _read_news(self, every: float) -> None:
-        """Keep up with the papers; what the writers see is updated on every refresh, as stories come out."""
+        """Keep up with the papers; the writers see what was fetched as soon as it is, and stories that come out
+        between fetches with the team's next refresh."""
         while True:
             try:
                 await self.news.refresh()
+                self.brief_news()
             except Exception as e:
                 log.warning("couldn't read the papers (%s)", str(e) or type(e).__name__)
             await asyncio.sleep(every)
@@ -929,13 +936,14 @@ async def reply_abort_check() -> None:
 
 
 async def news_check() -> None:
-    """What the papers have published reaches every writer's prompt on the next refresh, and nothing listed
+    """What the papers have published reaches every writer's prompt as soon as it is fetched, and nothing listed
     ahead of its publication time does."""
     import httpx
 
     now = datetime.now(timezone.utc)
     stories = {"/kingstonia-herald/articles/ward": ("Hospital short of nurses", now - timedelta(hours=5)),
-               "/kingstonia-herald/articles/later": ("Not out yet", now + timedelta(days=2))}
+               "/kingstonia-herald/articles/later": ("Not out yet", now + timedelta(days=2)),
+               "/daily-kingstonia/articles/ferry": ("Ferry timetable cut", now - timedelta(hours=1))}
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -943,19 +951,23 @@ async def news_check() -> None:
             title, at = stories[path[:-5]]
             return httpx.Response(200, json={"article": {"title": title, "summary": "", "url": path[:-5],
                                                          "published_at": at.isoformat()}})
-        links = "".join(f'<a href="{u}">' for u in stories) if "herald" in path else ""
-        return httpx.Response(200, text=links)
+        return httpx.Response(200, text="".join(f'<a href="{u}">' for u in stories if u.startswith(path)))
 
     news = News(NewsStore(":memory:"), transport=httpx.MockTransport(handler), pause=0)
     personas = load_personas()[:2]
     team = Team(FakePlatform(), FakeLLM(0, 0), None, NpcStore(":memory:"), StateStore(":memory:"),
                 personas=personas, news=news)
     assert all("local papers" not in b._system_prompt([], False) for b in team.bots)
-    await news.refresh()
-    team.refresh()
+    reading = asyncio.create_task(team._read_news(3600))
+    for _ in range(100):
+        if all(b.news for b in team.bots):
+            break
+        await asyncio.sleep(0)
+    reading.cancel()
     for bot in team.bots:
         system = bot._system_prompt([], False)
-        assert "Hospital short of nurses" in system and "Not out yet" not in system, bot.username
+        assert "Hospital short of nurses" in system and "Ferry timetable cut" in system, bot.username
+        assert "Not out yet" not in system, bot.username
     await news.aclose()
     print("news ok")
 
