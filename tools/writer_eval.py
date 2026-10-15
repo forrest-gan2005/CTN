@@ -9,6 +9,7 @@ The judge defaults to the writer's model at temperature 0, as in team_llms(). Re
 """
 import argparse
 import asyncio
+import contextvars
 import json
 import random
 import re
@@ -18,6 +19,8 @@ from collections import defaultdict
 from datetime import datetime
 from statistics import mean
 from typing import Optional
+
+import httpx
 from zoneinfo import ZoneInfo
 
 from ctn import paths
@@ -54,7 +57,7 @@ CITIZENS = [
 OPINIONS = ("referendum", "vaccines", "yearly")
 LEANS = {
     "firm_no": "You are firmly voting NO in the referendum. You think proof of vaccination to enter shops, schools "
-               "and transport goes too far, and you've heard most of the YES arguments already.",
+               "and transport goes too far.",
     "lean_no": "You are leaning NO in the referendum: you got your covid shots, but proof of vaccination at the "
                "shops sits wrong with you. You could still be talked round, but not easily.",
     "undecided": "You haven't decided how to vote in the referendum: you remember how bad 2021 was, but you're "
@@ -81,28 +84,82 @@ CONTROLS = {
 }
 
 
+CALL = contextvars.ContextVar("writer_eval_call", default=None)  # requests sent and refused for one generate()
+
+
+class Meter(httpx.AsyncBaseTransport):
+    """Every request a model sends, retries and fallbacks included, counts against the cap; past it the request
+    isn't sent and a local 499 comes back, which OpenAICompatLLM treats as a refusal of that one call."""
+
+    def __init__(self, inner: httpx.AsyncBaseTransport, budget: dict) -> None:
+        self.inner, self.budget = inner, budget
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        call = CALL.get()
+        if self.budget["left"] <= 0:
+            if call is not None:
+                call["refused"] += 1
+            return httpx.Response(499, request=request, text="writer_eval cap reached")
+        self.budget["left"] -= 1
+        self.budget["sent"] += 1
+        if call is not None:
+            call["sent"] += 1
+        return await self.inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self.inner.aclose()
+
+
+def meter(llm, budget: dict) -> bool:
+    """Counts requests at the HTTP layer where the model has one; False means count generate() calls instead."""
+    parts = getattr(llm, "llms", [llm])
+    if not all(hasattr(m, "transport") for m in parts):
+        return False
+    for m in parts:
+        m.transport = Meter(m.transport or httpx.AsyncHTTPTransport(), budget)
+    return True
+
+
 class Capped:
-    """Passes calls through until the cap, then answers None so the rest of the run winds down."""
+    """Tells apart answers, empty answers and calls the cap stopped, and counts the requests actually sent."""
 
     def __init__(self, llm, budget: dict, label: str) -> None:
         self.llm, self.budget, self.label = llm, budget, label
+        self.metered = meter(llm, budget)
         self.name = getattr(llm, "name", label)
-        self.calls, self.empty, self.seconds, self.raw = 0, 0, 0.0, []
+        self.calls, self.requests, self.empty, self.capped, self.seconds, self.raw = 0, 0, 0, 0, 0.0, []
 
     def delay(self) -> float:
         return self.llm.delay() if hasattr(self.llm, "delay") else 0.0
 
     async def generate(self, system: str, prompt: str) -> Optional[str]:
+        return (await self.attempt(system, prompt))[0]
+
+    async def attempt(self, system: str, prompt: str) -> tuple:
+        """(answer, whether the cap stopped it)."""
         if self.budget["left"] <= 0:
-            return None
-        self.budget["left"] -= 1
-        self.calls += 1
+            self.capped += 1
+            return None, True
+        call = {"sent": 0, "refused": 0}
+        if not self.metered:
+            self.budget["left"] -= 1
+            self.budget["sent"] += 1
+            call["sent"] = 1
+        token = CALL.set(call)
         t = time.monotonic()
-        out = await self.llm.generate(system, prompt)
+        try:
+            out = await self.llm.generate(system, prompt)
+        finally:
+            CALL.reset(token)
+        self.requests += call["sent"]
+        if not out and call["refused"]:
+            self.capped += 1
+            return None, True
+        self.calls += 1
         self.seconds += time.monotonic() - t
         self.empty += not out
         self.raw.append(out)
-        return out
+        return out, False
 
     async def aclose(self) -> None:
         await self.llm.aclose()
@@ -128,7 +185,7 @@ def plan(n_readers: int) -> dict:
     replies = len(CITIZENS)
     drafts = posts + replies
     return {"posts": posts, "replies": replies, "writer and judge calls (about)": drafts * 2,
-            "reader calls (at most)": (drafts + len(CONTROLS)) * n_readers}
+            "reader calls (at most)": (drafts + replies + len(CONTROLS)) * n_readers}
 
 
 async def write(writer, judge, seed: str) -> list:
@@ -148,19 +205,21 @@ async def write(writer, judge, seed: str) -> list:
         jobs.append((repliers[i % len(repliers)], "reply", ("feed", lean), target))
     out = []
     for p, kind, topic, target in jobs:
-        if writer.budget["left"] <= 0:
-            out.append({"persona": p["username"], "kind": kind, "topic": topic[1], "skipped": True})
+        label = f"post_{topic[0]}" if kind == "post" else (
+            "reply_news" if target["author"] in NEWS_OUTLETS else f"reply_{topic[1]}")
+        row = {"persona": p["username"], "line": p["line"], "kind": label, "topic": topic[1],
+               "parent": target["content"] if target else None}
+        if writer.budget["left"] < 2:  # a draft needs the writer and usually the judge
+            out.append({**row, "status": "skipped"})
             continue
         bot = Bot(p, FakePlatform(), writer, world, stance_llm=judge, roster=roster, store=store)
-        before = len(writer.raw)
+        before, capped = len(writer.raw), writer.capped + judge.capped
         random.seed(f"{seed}:{p['username']}:{kind}:{topic[1]}")
         action = await bot._compose(kind, topic=topic, target=target)
         text = action.content if action else None
-        label = f"post_{topic[0]}" if kind == "post" else (
-            "reply_news" if target["author"] in NEWS_OUTLETS else f"reply_{topic[1]}")
-        out.append({"persona": p["username"], "line": p["line"], "kind": label, "topic": topic[1],
-                    "parent": target["content"] if target else None, "text": text,
-                    "dropped": dict(bot.rejected), "raw": writer.raw[before:],
+        status = "kept" if text else "incomplete" if writer.capped + judge.capped > capped else "dropped"
+        out.append({**row, "status": status, "text": text, "dropped": dict(bot.rejected) if status == "dropped" else {},
+                    "raw": writer.raw[before:],
                     "signed": [s for s in signoffs(p) if text and s.lower().rstrip(".!") in text.lower()],
                     "off_topic": bool(text) and topic[0] in ("vaccine", "view", "daily") and bool(VOTE_RE.search(text))})
     return out
@@ -179,36 +238,56 @@ def parse(answer: Optional[str]) -> Optional[dict]:
         return None
 
 
-async def read(reader, drafts: list, n_readers: int, seed: str) -> list:
+def items(drafts: list) -> list:
+    """What the readers see: our kept drafts, each reply's parent on its own (so a reply is judged by what it adds
+    to its parent), and the controls."""
+    out = [{"kind": d["kind"], "text": d["text"], "parent": d["parent"]} for d in drafts if d.get("text")]
+    parents = sorted({d["parent"] for d in drafts if d.get("text") and d["parent"]})
+    out += [{"kind": "parent_only", "text": t, "parent": None} for t in parents]
+    out += [{"kind": k, "text": t, "parent": None} for k, t in CONTROLS.items()]
+    return out
+
+
+async def read(reader, shown_items: list, n_readers: int, seed: str) -> list:
     world = load_world()
     leans = list(LEANS)
     people = [{**r, "lean": leans[i % 3], "concern": list(CONCERNS)[i % len(CONCERNS)]}
               for i, r in enumerate(readers(n_readers, f"{seed}:readers"))]
-    items = [(d["kind"], d["text"], d["parent"]) for d in drafts if d.get("text")]
-    items += [(k, t, None) for k, t in CONTROLS.items()]
+    jobs = [(p, i) for p in people for i in range(len(shown_items))]
+    random.Random(f"{seed}:order").shuffle(jobs)  # a cap that cuts the run short then cuts every lean alike
 
-    async def one(person, kind, text, parent):
-        shown = wrap_external("someone", text) if parent is None else (
-            f"{wrap_external('citizen', parent)}\nA reply to it:\n{wrap_external('someone', text)}")
+    async def one(person, i):
+        it = shown_items[i]
+        shown = wrap_external("someone" if it["kind"] != "parent_only" else "citizen", it["text"]) \
+            if it["parent"] is None else (
+            f"{wrap_external('citizen', it['parent'])}\nA reply to it:\n{wrap_external('someone', it['text'])}")
         system = READ.format(world=world, **{**person, "lean": LEANS[person["lean"]]})
-        return {"lean": person["lean"], "kind": kind, "result": parse(await reader.generate(system, shown))}
+        answer, capped = await reader.attempt(system, shown)
+        result = parse(answer)
+        status = "ok" if result else "capped" if capped else "unparsed"
+        return {"reader": person["id"], "lean": person["lean"], "item": i, "kind": it["kind"], "status": status,
+                "result": result}
 
-    return list(await asyncio.gather(*(one(p, *it) for p in people for it in items)))
+    return list(await asyncio.gather(*(one(p, i) for p, i in jobs)))
 
 
-def report(args, drafts: list, reads: list, models: dict) -> str:
-    done = [d for d in drafts if not d.get("skipped")]
-    kept = [d for d in done if d["text"]]
+def report(args, drafts: list, shown_items: list, reads: list, models: dict) -> str:
+    done = [d for d in drafts if d["status"] in ("kept", "dropped")]
+    kept = [d for d in done if d["status"] == "kept"]
     reasons = defaultdict(int)
     for d in done:
         for k, v in d["dropped"].items():
             reasons[k] += v
     lines = [f"# Writer eval {args.stamp}", "", f"writer `{args.writer}`, judge `{args.judge or args.writer}`, "
              f"reader `{args.reader or '-'}`", "", "## Writing", "",
-             "| | calls | empty answers | avg seconds per call, queueing included |", "|---|---|---|---|"]
+             "| | answered calls | requests sent | empty answers | stopped by the cap | avg seconds per call |",
+             "|---|---|---|---|---|---|"]
     for label, m in models.items():
-        lines.append(f"| {label} | {m.calls} | {m.empty} | {m.seconds / m.calls if m.calls else 0:.1f} |")
-    lines += ["", f"- kept {len(kept)}/{len(done)} drafts; skipped by the call cap {len(drafts) - len(done)}",
+        lines.append(f"| {label} | {m.calls} | {m.requests} | {m.empty} | {m.capped} | "
+                     f"{m.seconds / m.calls if m.calls else 0:.1f} |")
+    cut = len(drafts) - len(done)
+    lines += ["", f"- kept {len(kept)}/{len(done)} finished drafts" + (
+              f"; **{cut} not finished because of the call cap**" if cut else ""),
               f"- drop reasons: {dict(sorted(reasons.items(), key=lambda kv: -kv[1])) or '-'}",
               f"- sign-offs used: {sum(bool(d['signed']) for d in kept)}/{len(kept)}",
               f"- referendum in a post meant to leave it out: {sum(d['off_topic'] for d in kept)}",
@@ -218,52 +297,81 @@ def report(args, drafts: list, reads: list, models: dict) -> str:
         g = [d for d in done if d["kind"] == kind]
         lines.append(f"| {kind} | {sum(bool(d['text']) for d in g)} | {sum(not d['text'] for d in g)} |")
     if reads:
-        ok = [r for r in reads if r["result"]]
-        lines += ["", "## Simulated readers", "", f"parsed {len(ok)}/{len(reads)}", "",
+        ok = [r for r in reads if r["status"] == "ok"]
+        count = defaultdict(int)
+        for r in reads:
+            count[r["status"]] += 1
+        lines += ["", "## Simulated readers", "",
+                  f"tried {len(reads) - count['capped']}, stopped by the cap {count['capped']}, "
+                  f"unparsed {count['unparsed']}; answers by lean: "
+                  + ", ".join(f"{lean} {sum(r['lean'] == lean for r in ok)}" for lean in LEANS), "",
                   "| kind | n | " + " | ".join(OPINIONS) + " | moved NO on referendum | sounds like bot/campaign |",
                   "|---|---|---|---|---|---|---|"]
         by = defaultdict(list)
         for r in ok:
             by[r["kind"]].append(r)
+
+        def shift(rows, o="referendum"):
+            return mean(r["result"][o][1] - r["result"][o][0] for r in rows)
+
         for kind in sorted(by, key=lambda k: (k.startswith("control"), k)):
             g = by[kind]
-            shift = [mean(r["result"][o][1] - r["result"][o][0] for r in g) for o in OPINIONS]
             no = sum(r["result"]["referendum"][1] < r["result"]["referendum"][0] for r in g) / len(g)
             bot = sum(r["result"].get("sounds_like") in ("bot", "campaign") for r in g) / len(g)
-            lines.append(f"| {kind} | {len(g)} | " + " | ".join(f"{s:+.1f}" for s in shift) + f" | {no:.0%} | {bot:.0%} |")
-        ctl = {k: mean(r["result"]["referendum"][1] - r["result"]["referendum"][0] for r in by[k]) for k in CONTROLS
-               if by[k]}
+            lines.append(f"| {kind} | {len(g)} | " + " | ".join(f"{shift(g, o):+.1f}" for o in OPINIONS)
+                         + f" | {no:.0%} | {bot:.0%} |")
+        alone = {shown_items[r["item"]]["text"]: [] for r in ok if r["kind"] == "parent_only"}
+        for r in ok:
+            if r["kind"] == "parent_only":
+                alone[shown_items[r["item"]]["text"]].append(r)
+        gain = defaultdict(list)
+        for i, it in enumerate(shown_items):
+            mine = [r for r in ok if r["item"] == i]
+            if it["parent"] and mine and alone.get(it["parent"]):
+                gain[it["kind"]].append(shift(mine) - shift(alone[it["parent"]]))
+        if gain:
+            lines += ["", "Referendum shift a reply adds over its parent read alone: "
+                      + ", ".join(f"{k} {mean(v):+.1f} (n={len(v)})" for k, v in sorted(gain.items()))]
+        complete = not count["capped"] and all(
+            sum(r["lean"] == lean and r["kind"] == k for r in ok) for lean in LEANS for k in CONTROLS)
+        ctl = {k: shift(by[k]) for k in CONTROLS if by[k]}
         sane = len(ctl) == 3 and ctl["control_no"] < 0 < ctl["control_yes"] and abs(ctl["control_unrelated"]) < 1
-        lines += ["", "Readers pass the controls (NO < 0 < YES, unrelated near 0): " + ("yes" if sane else
-                  "**no, so don't trust the shifts above**")]
+        verdict = ("**incomplete: the cap or parse failures left some leans or controls unread, so no verdict**"
+                   if not complete else "yes" if sane else "**no, so don't trust the shifts above**")
+        lines += ["", "Readers pass the controls (NO < 0 < YES, unrelated near 0): " + verdict]
     lines += ["", "## Drafts", ""]
-    for d in done:
+    for d in drafts:
         parent = f" (to: {d['parent'][:70]}…)" if d["parent"] else ""
-        lines.append(f"- {d['kind']} {d['persona']}{parent}: {d['text'] or 'DROPPED ' + str(d['dropped'])}")
+        text = d.get("text") or {"dropped": f"DROPPED {d.get('dropped')}"}.get(d["status"], d["status"].upper())
+        lines.append(f"- {d['kind']} {d['persona']}{parent}: {text}")
     return "\n".join(lines) + "\n"
 
 
 async def run(args, writer_llm, judge_llm, reader_llm) -> str:
-    budget = {"left": args.max_calls}
+    budget = {"left": args.max_calls, "sent": 0}
     writer, judge = Capped(writer_llm, budget, "writer"), Capped(judge_llm, budget, "judge")
     models = {"writer": writer, "judge": judge}
+    shown_items, reads = [], []
     try:
         drafts = await write(writer, judge, args.seed)
-        reads = []
         if reader_llm is not None:
-            reader = Capped(reader_llm, {"left": args.max_reads}, "reader")
+            reader = Capped(reader_llm, {"left": args.max_reads, "sent": 0}, "reader")
             models["reader"] = reader
-            reads = await read(reader, drafts, args.readers, args.seed)
+            shown_items = items(drafts)
+            reads = await read(reader, shown_items, args.readers, args.seed)
     finally:
         for m in {id(x.llm): x for x in models.values()}.values():
             await m.aclose()
     OUT.mkdir(parents=True, exist_ok=True)
     name = re.sub(r"[^A-Za-z0-9.-]+", "_", args.writer.split("?")[0])
-    base = OUT / f"{args.stamp}-{name}"
-    base.with_suffix(".json").write_text(json.dumps({"args": vars(args), "drafts": drafts, "reads": reads}, indent=1))
-    text = report(args, drafts, reads, models)
-    base.with_suffix(".md").write_text(text, encoding="utf-8")
-    return str(base.with_suffix(".md"))
+    stem, n = f"{args.stamp}-{name}", 1
+    while (OUT / f"{stem}.json").exists() or (OUT / f"{stem}.md").exists():
+        n += 1
+        stem = f"{args.stamp}-{name}-{n}"
+    (OUT / f"{stem}.json").write_text(json.dumps({"args": vars(args), "drafts": drafts, "items": shown_items,
+                                                  "reads": reads}, indent=1))
+    (OUT / f"{stem}.md").write_text(report(args, drafts, shown_items, reads, models), encoding="utf-8")
+    return str(OUT / f"{stem}.md")
 
 
 def main() -> None:
@@ -323,24 +431,60 @@ class _Stub:
 async def _test() -> None:
     import tempfile
     from pathlib import Path
+
+    from ctn.infra.llm import ChainLLM, OpenAICompatLLM
     global OUT
     OUT = Path(tempfile.mkdtemp())
     args = argparse.Namespace(writer="stub", judge=None, reader="stub", readers=3, max_calls=400, max_reads=400,
                               seed="t", stamp="test")
     path = await run(args, _Stub("writer"), _Stub("judge"), _Stub("reader"))
     text = Path(path).read_text()
-    data = json.loads(Path(path).with_suffix(".json").read_text())
+    data = json.loads(Path(path).with_name(Path(path).stem + ".json").read_text())
     assert len(data["drafts"]) == len(LINES) * PER_LINE * len(POST_KINDS) + len(CITIZENS)
-    assert not any(d.get("skipped") for d in data["drafts"])
+    assert all(d["status"] == "kept" for d in data["drafts"]), [d["status"] for d in data["drafts"]]
     assert "Readers pass the controls (NO < 0 < YES, unrelated near 0): yes" in text, text
+    assert "adds over its parent read alone" in text and any(i["kind"] == "parent_only" for i in data["items"])
     assert {d["kind"] for d in data["drafts"]} >= {"post_issue", "reply_no", "reply_news", "reply_unknown"}
 
-    args.max_calls, args.stamp = 10, "cap"
+    # A cap of one: the judge never runs, so nothing may count as the model rejecting a draft.
+    args.max_calls, args.reader = 1, None
     path = await run(args, _Stub("writer"), _Stub("judge"), None)
-    data = json.loads(Path(path).with_suffix(".json").read_text())
-    calls = sum(len(d.get("raw", [])) for d in data["drafts"])
-    assert calls <= 10 and any(d.get("skipped") for d in data["drafts"]), calls
+    data = json.loads(Path(path).with_name(Path(path).stem + ".json").read_text())
+    assert not any(d["status"] == "dropped" for d in data["drafts"]), data["drafts"][:2]
     assert "Simulated readers" not in Path(path).read_text()
+
+    # Readers cut short by the cap: no verdict, and the shuffle spreads the cut over the leans.
+    args.max_calls, args.max_reads, args.readers, args.reader = 400, 6, 6, "stub"
+    path = await run(args, _Stub("writer"), _Stub("judge"), _Stub("reader"))
+    text = Path(path).read_text()
+    data = json.loads(Path(path).with_name(Path(path).stem + ".json").read_text())
+    assert sum(r["status"] == "ok" for r in data["reads"]) == 6 and "incomplete" in text, text
+    assert len({r["lean"] for r in data["reads"] if r["status"] == "ok"}) > 1
+
+    # The cap counts HTTP requests, retries included, and a fallback chain shares it.
+    hits = {"n": 0}
+
+    def busy(request: httpx.Request) -> httpx.Response:
+        hits["n"] += 1
+        return httpx.Response(429, headers={"retry-after": "0.001"})
+
+    def model(name):
+        return OpenAICompatLLM("http://mock", "k", name, name=f"mock:{name}", transport=httpx.MockTransport(busy))
+
+    budget = {"left": 2, "sent": 0}
+    capped = Capped(ChainLLM([model("a"), model("b")]), budget, "writer")
+    assert capped.metered
+    assert await capped.generate("s", "p") is None
+    assert hits["n"] == 2 and budget["sent"] == 2 and capped.requests == 2 and capped.capped == 1, (hits, budget)
+    await capped.aclose()
+
+    # Model names with dots, and reruns in the same minute, each get their own files.
+    args.reader, args.max_calls = None, 0
+    seen = set()
+    for w in ("gemini:gemini-3.5-flash-lite", "gemini:gemini-3.1-pro", "gemini:gemini-3.1-pro"):
+        args.writer = w
+        seen.add(await run(args, _Stub("writer"), _Stub("judge"), None))
+    assert len(seen) == 3 and all(Path(p).with_name(Path(p).stem + ".json").exists() for p in seen), seen
     print("writer_eval ok")
 
 
