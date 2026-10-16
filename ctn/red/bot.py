@@ -292,12 +292,24 @@ class Bot:
         action.pick = pick
         return action
 
+    async def _takes_up_referendum(self, target: dict, lean: Optional[str]) -> bool:
+        """Whether a reply to `target` takes up the referendum. The keywords miss a NO case made without them
+        ("...lock you out of the bus"), and a writer told to leave the referendum out then agrees with it, so short
+        of a keyword the stance judge reads the post; not a newspaper's story, nor an author already leaning YES,
+        where going along does no harm."""
+        text = target.get("content") or ""
+        if about_referendum(text):
+            return True
+        if self.stance_llm is None or lean == "yes" or target["author"] in NEWS_OUTLETS:
+            return False
+        return await judge_stance(self.stance_llm, text) == "OPPOSE"
+
     async def _compose(self, kind: str, topic: tuple, target: Optional[dict] = None) -> Optional[Action]:
         """Generate, clean and vet content; returns a publishable Action or None."""
         query = (target.get("content") or "") if target else topic[1]
         examples, from_npcs = self._examples(query, reply=target is not None)
         # The answers to NO worries only where the prompt takes up the referendum.
-        referendum = about_referendum(query) if target is not None else topic[0] == "issue"
+        referendum = await self._takes_up_referendum(target, topic[1]) if target is not None else topic[0] == "issue"
         system = self._system_prompt(examples, from_npcs, arguments=referendum)
         earlier, about = None, []
         if target is not None:
@@ -310,7 +322,8 @@ class Bot:
                     and target["author"] not in NEWS_OUTLETS):
                 about = [t for t in self.profile(target["author"]) if t != target.get("content")][:3]
         sign = self._pick_sign_off(kind)
-        raw = await self.llm.generate(system, self._user_prompt(kind, target, topic, earlier, about, sign=sign))
+        raw = await self.llm.generate(system, self._user_prompt(kind, target, topic, earlier, about, sign=sign,
+                                                                referendum=referendum))
         model = getattr(raw, "model", None) or getattr(self.llm, "name", None)  # a fallback model may have written it
         content = self._clean(raw)
         if content is None:
@@ -497,9 +510,10 @@ class Bot:
         return random.choice(signoffs) if kind == "post" and signoffs and random.random() < SIGN_OFF_PROB else None
 
     def _user_prompt(self, kind: str, target: Optional[dict], topic: tuple, earlier: Optional[str] = None,
-                     about: Optional[list] = None, sign=PICK) -> str:
+                     about: Optional[list] = None, sign=PICK, referendum: Optional[bool] = None) -> str:
         """`earlier` is our own post that `target` replies to; `about` is what the author posted lately; `sign`
-        the sign-off this post may end with."""
+        the sign-off this post may end with; `referendum` whether a reply takes up the referendum (by default,
+        whether the post names it)."""
         recent = [a.content for _, a in self.history if a.content][-5:]
         parts = []
 
@@ -530,7 +544,7 @@ class Bot:
                          "talk about them in the third person. Don't open with stock phrases like \"I feel you\", "
                          "\"I get where you're coming from\", \"You're worried about\" or \"I see your point\"; start with "
                          "something specific.")
-            if about_referendum(target.get("content") or ""):
+            if about_referendum(target.get("content") or "") if referendum is None else referendum:
                 parts.append(
                     f"{LEAN_GUIDE.get(topic[1], DEFAULT_GUIDE)} Never agree that the mandate is unfair and never make "
                     "their argument for them."
@@ -937,6 +951,53 @@ async def reply_context_check() -> None:
     print("reply context ok")
 
 
+async def implicit_no_check() -> None:
+    """A NO case made without the referendum's keywords is answered as one: the judge reads posts the keywords miss,
+    except a newspaper's or a YES-leaning author's, and a post it doesn't call OPPOSE stays out of the referendum."""
+    class Writer:
+        name = "writer"
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.system, self.prompt = system, prompt
+            return "Fish were biting off the wharf this morning."
+
+    class Judge(Writer):
+        def __init__(self) -> None:
+            self.alone = []
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            if prompt.count("<<<POST ") == 1:  # a post on its own; the publishing check sends the reply too
+                self.alone.append(prompt)
+                return "OPPOSE" if "lock you out of the bus" in prompt else "NEUTRAL"
+            return "NEUTRAL"
+
+    heading = "# How you answer common NO worries"
+    power = "Give a government the power to lock you out of the bus and the next lot will use it for something else. No."
+    persona = next(p for p in load_personas() if p["line"] == "persuade")
+    for author, content, lean, judged, referendum in (
+            ("npc_1", power, "unknown", True, True),
+            ("npc_1", power, "no", True, True),
+            ("npc_1", power, None, True, True),
+            ("npc_1", power, "yes", False, False),
+            ("npc_1", "Ferry was late again, third time this week.", "unknown", True, False),
+            ("npc_1", "Not voting yes on the 2nd, proof of vaccination at the shops is too much.", "unknown", False, True),
+            ("DailyKingstonia", power, "unknown", False, False)):
+        writer, judge = Writer(), Judge()
+        bot = Bot(persona, FakePlatform(), writer, load_world(), stance_llm=judge,
+                  roster=Roster(own={persona["username"]}, npcs=["npc_1", "DailyKingstonia"]),
+                  store=StateStore(":memory:"))
+        bot.profile = lambda author: []
+        await bot._compose("reply", topic=("feed", lean), target={"id": 1, "author": author, "parent_id": None,
+                                                                 "content": content})
+        assert bool(judge.alone) == judged, (author, content, lean)
+        assert (heading in writer.system) == referendum, (author, content, lean)
+        assert ("leave the referendum out" in writer.prompt) != referendum, (author, content, lean)
+    print("implicit NO ok")
+
+
 async def quiet_race() -> None:
     """An account that goes quiet while a post or reply is being written publishes neither; it can still like."""
     global ACTION_WEIGHTS, QUIET_ACTIONS
@@ -1113,6 +1174,7 @@ if __name__ == "__main__":
     asyncio.run(arguments_check())
     asyncio.run(news_reply_check())
     asyncio.run(reply_context_check())
+    asyncio.run(implicit_no_check())
     asyncio.run(quiet_race())
     asyncio.run(notification_durability())
     asyncio.run(main(args.real, n_bots, args.seconds))
