@@ -103,6 +103,7 @@ class NpcStore:
             int(p["author"] in self.own),
             json.dumps(p, default=_json_default, ensure_ascii=False),
         ) for p in posts]
+        badges = self._badges()
         ids = [r[0] for r in rows]
         marks = ",".join("?" * len(ids))
         known = {r[0] for r in self.db.execute(f"SELECT id FROM posts WHERE id IN ({marks})", ids)} if ids else set()
@@ -123,9 +124,13 @@ class NpcStore:
             self.db.executemany("UPDATE authors SET verified = 1 WHERE author = ?",
                                 [(p["author"],) for p in posts if p.get("author_verified")])
         start = _iso(COMPETITION_START)
-        if any(r[4] is not None and r[4] < start for r in new):
+        # A new badge takes its holder out of the template count, which can clear others too.
+        if any(r[4] is not None and r[4] < start for r in new) or self._badges() != badges:
             self.refresh_fleet()
         return len(new)
+
+    def _badges(self) -> int:
+        return self.db.execute("SELECT COUNT(*) FROM authors WHERE verified = 1").fetchone()[0]
 
     def refresh_fleet(self) -> None:
         """Recount the scripted accounts from the posts made before the start."""
@@ -196,7 +201,10 @@ class NpcStore:
 
     def mark_verified(self, author: str) -> None:
         with self.db:
-            self.db.execute("UPDATE authors SET verified = 1 WHERE author = ?", (author,))
+            changed = self.db.execute("UPDATE authors SET verified = 1 WHERE author = ? AND verified = 0",
+                                      (author,)).rowcount
+        if changed:
+            self.refresh_fleet()
 
     def is_verified(self, author: str) -> bool:
         return self.db.execute("SELECT 1 FROM authors WHERE author = ? AND verified = 1", (author,)).fetchone() is not None
@@ -527,6 +535,27 @@ def _fleet_check() -> None:
     assert set(store.whitelist()) - {"late_bot"} == {"ana", "brief", "paper"}, store.whitelist()
     assert not store.is_citizen("bold_otter0") and store.is_citizen("ana")
     assert "bold_otter1" in {a for a, _ in store.unknown_posts()}
+    # A badge arriving later, by any route, recounts: three template authors become two, so none is scripted.
+    later = datetime(2026, 10, 20, tzinfo=timezone.utc)
+    for route in ("reread", "mark", "new post"):
+        s = NpcStore(":memory:")
+        s.add_posts([{"id": i, "author": a, "content": templates[0], "created_at": _iso(t0)}
+                     for i, a in enumerate("abc")])
+        assert s.fleet() == set("abc")
+        if route == "reread":
+            s.add_posts([{"id": 0, "author": "a", "content": templates[0], "created_at": _iso(t0), "author_verified": True}])
+        elif route == "mark":
+            s.mark_verified("a")
+        else:
+            s.add_posts([{"id": 9, "author": "a", "content": "after the start", "created_at": _iso(later),
+                          "author_verified": True}])
+        assert s.fleet() == set() and set(s.whitelist()) == set("abc"), (route, s.fleet())
+        assert not {a for a, _ in s.unknown_posts()} & set("abc"), route
+    s = NpcStore(":memory:")
+    s.add_posts([{"id": i, "author": a, "content": templates[0], "created_at": _iso(t0)} for i, a in enumerate("abcd")])
+    s.mark_verified("a")
+    assert s.fleet() == set("bcd"), "three unbadged authors still make a template"
+
     import tempfile
     path = Path(tempfile.mkdtemp()) / "npc.db"
     NpcStore(path).add_posts(posts)
