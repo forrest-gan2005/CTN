@@ -97,9 +97,11 @@ def run_filter(clf) -> dict:
 
 
 async def run_stance(judge) -> dict:
-    cases = CASES["stance"]
-    got = await asyncio.gather(*(judge_stance(judge, text) for text, _ in cases))
-    rows = [(text, label, g) for (text, label), g in zip(cases, got)]
+    """Posts on their own, then replies judged next to the post they answer."""
+    cases = [(None, text, label) for text, label in CASES["stance"]] + [tuple(c) for c in CASES["reply_stance"]]
+    got = await asyncio.gather(*(judge_stance(judge, text, parent) for parent, text, _ in cases))
+    rows = [(text if parent is None else f"(to: {parent[:60]}) {text}", label, g)
+            for (parent, text, label), g in zip(cases, got)]
     oppose = [r for r in rows if r[1] == "OPPOSE"]
     return {
         "accuracy": sum(label == g for _, label, g in rows) / len(rows),

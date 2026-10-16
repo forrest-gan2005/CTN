@@ -320,7 +320,8 @@ class Bot:
         if self._too_similar(content, examples):
             self.rejected["too similar"] = self.rejected.get("too similar", 0) + 1
             return None
-        problem = await self._check(content, system, takes_side=kind == "post" and topic[0] == "issue")
+        problem = await self._check(content, system, takes_side=kind == "post" and topic[0] == "issue",
+                                    replying_to=target.get("content") if target else None)
         if problem:
             self.rejected[problem] = self.rejected.get(problem, 0) + 1
             source = f" (replying to #{target['id']} by {target['author']})" if target else ""
@@ -599,9 +600,11 @@ class Bot:
             return None
         return text
 
-    async def _check(self, text: str, system: str, takes_side: bool = False) -> Optional[str]:
+    async def _check(self, text: str, system: str, takes_side: bool = False,
+                     replying_to: Optional[str] = None) -> Optional[str]:
         """Last gate before publishing: reason to drop the post, or None. With `takes_side`, a post that doesn't
-        plainly back the mandate is dropped too: a hint the reader has to decode moves nobody."""
+        plainly back the mandate is dropped too: a hint the reader has to decode moves nobody. A reply's side is
+        judged next to `replying_to`, the post it answers."""
         if STOCK_OPENER_RE.match(plain(text)):
             return "stock opener"
         if self.twins is not None and self.twins.closest(text)[1] >= TWIN:
@@ -615,7 +618,7 @@ class Bot:
             return problem
         if self.stance_llm is None:  # offline: naming the referendum at least
             return "off topic" if takes_side and not about_referendum(text) else None
-        stance = await judge_stance(self.stance_llm, text)
+        stance = await judge_stance(self.stance_llm, text, replying_to)
         if stance is None:
             return "stance unknown"
         if stance == "OPPOSE":
@@ -896,6 +899,44 @@ async def news_reply_check() -> None:
     print("news replies ok")
 
 
+async def reply_context_check() -> None:
+    """A reply's side is judged next to the post it answers; a post on its own is judged on its own."""
+    from ctn.text.guard import STANCE_REPLY, STANCE_SYSTEM
+
+    class Writer:
+        name = "writer"
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            return "That hits close. My brother couldnt get the help he needed when the ferries stopped. " \
+                   "Ill see you at the vote on 2 November."
+
+    class Judge(Writer):
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.calls.append((system, prompt))
+            return "SUPPORT" if "Voting yes" in prompt else "OPPOSE"  # alone, the reply reads as a lockdown gripe
+
+    persona = next(p for p in load_personas() if p["line"] == "persuade")
+    parent = {"id": 1, "author": "npc_1", "parent_id": None,
+              "content": "Voting yes on the referendum. My mum is on chemo and can't have the jab."}
+    judge = Judge()
+    bot = Bot(persona, FakePlatform(), Writer(), load_world(), stance_llm=judge,
+              roster=Roster(own={persona["username"]}, npcs=["npc_1"]), store=StateStore(":memory:"))
+    bot.profile = lambda author: []
+    action = await bot._compose("reply", topic=("feed", "yes"), target=parent)
+    assert action is not None and not bot.rejected, bot.rejected
+    system, prompt = judge.calls[-1]
+    assert system.endswith(STANCE_REPLY) and prompt.index(parent["content"]) < prompt.index("see you at the vote")
+    assert await bot._check(action.content, "") == "off side"
+    assert judge.calls[-1][0] == STANCE_SYSTEM and parent["content"] not in judge.calls[-1][1]
+    print("reply context ok")
+
+
 async def quiet_race() -> None:
     """An account that goes quiet while a post or reply is being written publishes neither; it can still like."""
     global ACTION_WEIGHTS, QUIET_ACTIONS
@@ -1071,6 +1112,7 @@ if __name__ == "__main__":
     asyncio.run(sign_off_check())
     asyncio.run(arguments_check())
     asyncio.run(news_reply_check())
+    asyncio.run(reply_context_check())
     asyncio.run(quiet_race())
     asyncio.run(notification_durability())
     asyncio.run(main(args.real, n_bots, args.seconds))

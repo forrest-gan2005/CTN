@@ -126,6 +126,10 @@ STANCE_SYSTEM = (
     "OPPOSE if it argues against it, NEUTRAL if it takes no side or is about something else."
 )
 STANCES = ("SUPPORT", "OPPOSE", "NEUTRAL")
+STANCE_REPLY = (
+    " Here the post is a reply, shown after the post it answers. Label the reply, not the post it answers; use "
+    "that post only to tell what the reply means: going along with someone's case for one side backs that side, "
+    "pushing back on it backs the other.")
 
 
 # Phones and most models type curly quotes; every pattern here is written with straight ones.
@@ -278,9 +282,16 @@ def fact_problem(text: str) -> Optional[str]:
     return None
 
 
-async def judge_stance(llm, text: str) -> Optional[str]:
-    """Ask a model which side a post takes; None if it gives no usable answer."""
-    answer = await llm.generate(STANCE_SYSTEM, wrap_external("unknown", text))
+async def judge_stance(llm, text: str, replying_to: Optional[str] = None) -> Optional[str]:
+    """Ask a model which side a post takes; None if it gives no usable answer. A reply is judged next to the post
+    it answers: "see you at the vote" under a YES post says nothing on its own."""
+    if replying_to:
+        system = STANCE_SYSTEM + STANCE_REPLY
+        prompt = (f"The post being answered:\n{wrap_external('unknown', replying_to)}\n\n"
+                  f"The reply to label:\n{wrap_external('unknown', text)}")
+    else:
+        system, prompt = STANCE_SYSTEM, wrap_external("unknown", text)
+    answer = await llm.generate(system, prompt)
     if not answer:
         return None
     word = answer.strip().split()[0].strip(".,:!").upper() if answer.strip() else ""
