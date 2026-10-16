@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import random
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -442,6 +443,31 @@ async def live(limit: Optional[int], stagger_hours: float) -> None:
         await judge.aclose()
         await platform.aclose()
         await team.news.aclose()
+
+
+def log_file(path: Path) -> logging.Handler:
+    """run.log: UTF-8 whatever the machine's default (posts carry emoji), stamped with the UTC date and time the
+    platform uses, since it covers two weeks and is read next to the platform's records."""
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s", "%Y-%m-%dT%H:%M:%SZ"))
+    handler.formatter.converter = time.gmtime
+    return handler
+
+
+def log_file_check() -> None:
+    """A line in run.log has its UTC date and time and its logger, and an emoji survives."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        handler = log_file(Path(tmp) / "run.log")
+        record = logging.LogRecord("team", logging.INFO, __file__, 0, "kai_lind posted: %s",
+                                   ("see you there \U0001F30A",), None)
+        record.created = datetime(2026, 10, 19, 6, 0, 1, tzinfo=timezone.utc).timestamp()
+        handler.emit(record)
+        handler.close()
+        line = (Path(tmp) / "run.log").read_text(encoding="utf-8")
+    assert line == "2026-10-19T06:00:01Z team kai_lind posted: see you there \U0001F30A\n", line
+    print("log file ok")
 
 
 def schedule_check() -> None:
@@ -1459,9 +1485,10 @@ if __name__ == "__main__":
     logging.getLogger("httpx").setLevel(logging.WARNING)
     if args.cmd == "live":
         DATA.mkdir(exist_ok=True)
-        logging.getLogger().addHandler(logging.FileHandler(DATA / "run.log"))
+        logging.getLogger().addHandler(log_file(DATA / "run.log"))
         asyncio.run(live(args.limit, args.stagger))
     elif args.cmd == "smoke":
+        log_file_check()
         schedule_check()
         asyncio.run(unresolved_check())
         asyncio.run(interrupted_check())
