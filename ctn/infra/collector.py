@@ -5,7 +5,7 @@ import random
 import re
 import sqlite3
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
@@ -46,8 +46,16 @@ CREATE TABLE IF NOT EXISTS authors (
     ours INTEGER NOT NULL,
     verified INTEGER NOT NULL DEFAULT 0  -- the platform's badge: run by the organisers, never a competitor
 );
+-- Accounts there before the start that mostly post text many others post word for word: scripted, not citizens.
+CREATE TABLE IF NOT EXISTS fleet (author TEXT PRIMARY KEY);
 """
-PRE_START = "a.ours = 0 AND (IFNULL(a.first_post_at < ?, 0) OR a.first_fetched_at < ?)"
+PRE_START = ("a.ours = 0 AND (IFNULL(a.first_post_at < ?, 0) OR a.first_fetched_at < ?) "
+             "AND a.author NOT IN (SELECT author FROM fleet)")
+# A text this long posted by this many accounts is a template; an account whose posts are half templates is scripted.
+# On 16 Oct 151 such accounts arrived together (550 texts, 32 distinct, YES and NO alike); 30 of the 45 accounts
+# there before were the same kind.
+FLEET_MIN_CHARS = 20
+FLEET_AUTHORS = 3
 HASHTAG_RE = re.compile(r"#\w{2,30}")
 
 
@@ -80,6 +88,7 @@ class NpcStore:
         if "verified" not in {r[1] for r in self.db.execute("PRAGMA table_info(authors)")}:
             self.db.execute("ALTER TABLE authors ADD COLUMN verified INTEGER NOT NULL DEFAULT 0")
         self.own = set(own_usernames)
+        self.refresh_fleet()  # a database from before this table existed, or reopened after the start
 
     def add_posts(self, posts: list) -> int:
         """Store posts we haven't seen before; returns how many were new."""
@@ -113,7 +122,27 @@ class NpcStore:
             # A badge can appear later: any read of any post carrying it counts, a post seen before included.
             self.db.executemany("UPDATE authors SET verified = 1 WHERE author = ?",
                                 [(p["author"],) for p in posts if p.get("author_verified")])
+        start = _iso(COMPETITION_START)
+        if any(r[4] is not None and r[4] < start for r in new):
+            self.refresh_fleet()
         return len(new)
+
+    def refresh_fleet(self) -> None:
+        """Recount the scripted accounts from the posts made before the start."""
+        rows = self.db.execute(
+            "WITH pre AS (SELECT author, content FROM posts WHERE ours = 0 AND created_at < ? AND content IS NOT NULL "
+            "  AND length(trim(content)) >= ? AND author NOT IN (SELECT author FROM authors WHERE verified = 1)), "
+            "shared AS (SELECT content FROM pre GROUP BY content HAVING COUNT(DISTINCT author) >= ?) "
+            "SELECT author FROM pre GROUP BY author "
+            "HAVING SUM(content IN (SELECT content FROM shared)) >= 1 "
+            "AND 2 * SUM(content IN (SELECT content FROM shared)) >= COUNT(*)",
+            (_iso(COMPETITION_START), FLEET_MIN_CHARS, FLEET_AUTHORS)).fetchall()
+        with self.db:
+            self.db.execute("DELETE FROM fleet")
+            self.db.executemany("INSERT INTO fleet VALUES (?)", rows)
+
+    def fleet(self) -> set:
+        return {r[0] for r in self.db.execute("SELECT author FROM fleet")}
 
     def count(self) -> int:
         return self.db.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
@@ -276,6 +305,7 @@ class NpcStore:
             "posts": self.count(),
             "accounts": q("SELECT COUNT(*) FROM authors").fetchone()[0],
             "whitelist": len(self.whitelist()),
+            "scripted accounts left out": len(self.fleet()),
             "pending_gaps": len(self.gaps()),
             "unparsed_created_at": q("SELECT COUNT(*) FROM posts WHERE created_at IS NULL").fetchone()[0],
             "newest_fetch": q("SELECT MAX(fetched_at) FROM posts").fetchone()[0],
@@ -461,8 +491,48 @@ async def _demo(seconds: float) -> None:
     assert {a for a, *_ in store.npc_posts(cutoff, badged=False)} == wl - {paper}, "a verified account as a citizen"
     assert {a for a, _ in store.unknown_posts(cutoff)} == {a for a in late if any(
         post["author"] == a for post in p.posts.values())}
+    _fleet_check()
     print(f"\ncollected {store.count()}/{len(p.posts)} posts, filled {collector.gaps} gaps, "
           f"whitelist {len(wl)} accounts")
+
+
+def _fleet_check() -> None:
+    """Scripted accounts posting shared templates stay off the whitelist; a citizen who once echoes one stays on."""
+    store = NpcStore(":memory:")
+    templates = ["Good post. It reminds me how important it is to vote yes on the referendum.",
+                 "Totally relevant to the referendum debate too. I hope you're voting no."]
+    t0 = datetime(2026, 10, 16, 2, 20, tzinfo=timezone.utc)
+    posts, n = [], 0
+
+    def add(author, content, minutes=0):
+        nonlocal n
+        n += 1
+        posts.append({"id": n, "author": author, "content": content, "created_at": _iso(t0 + timedelta(minutes=minutes))})
+
+    for i in range(5):
+        for t in templates:
+            add(f"bold_otter{i}", t)
+        add(f"bold_otter{i}", None)  # a repost has no text
+    add("ana", templates[0])
+    for k in range(3):
+        add("ana", f"Ferry was late again, the {k}th time this month, and the kids missed the bell.")
+    add("once", templates[1])  # a scripted account with a single post is still scripted
+    add("brief", "lol")
+    add("paper", templates[1])
+    add("paper", templates[0])
+    posts[-1]["author_verified"] = posts[-2]["author_verified"] = True
+    add("late_bot", templates[0], minutes=60 * 24 * 7)  # after the start: its text doesn't count towards a fleet
+    store.add_posts(posts)
+    assert store.fleet() == {f"bold_otter{i}" for i in range(5)} | {"once"}, store.fleet()
+    assert set(store.whitelist()) - {"late_bot"} == {"ana", "brief", "paper"}, store.whitelist()
+    assert not store.is_citizen("bold_otter0") and store.is_citizen("ana")
+    assert "bold_otter1" in {a for a, _ in store.unknown_posts()}
+    import tempfile
+    path = Path(tempfile.mkdtemp()) / "npc.db"
+    NpcStore(path).add_posts(posts)
+    with sqlite3.connect(str(path)) as db:
+        db.execute("DELETE FROM fleet")  # as in a database collected before the table existed
+    assert NpcStore(path).fleet() == store.fleet(), "reopening rebuilds the list"
 
 
 if __name__ == "__main__":
