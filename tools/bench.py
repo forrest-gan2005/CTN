@@ -97,19 +97,20 @@ def run_filter(clf) -> dict:
 
 
 async def run_stance(judge) -> dict:
-    """Posts on their own, then replies judged next to the post they answer."""
-    cases = [(None, text, label) for text, label in CASES["stance"]] + [tuple(c) for c in CASES["reply_stance"]]
-    got = await asyncio.gather(*(judge_stance(judge, text, parent) for parent, text, _ in cases))
+    """Posts on their own, and replies judged next to the post they answer, scored apart."""
+    posts = [(None, text, label) for text, label in CASES["stance"]]
+    replies = [tuple(c) for c in CASES["reply_stance"]]
+    got = await asyncio.gather(*(judge_stance(judge, text, parent) for parent, text, _ in posts + replies))
     rows = [(text if parent is None else f"(to: {parent[:60]}) {text}", label, g)
-            for (parent, text, label), g in zip(cases, got)]
-    oppose = [r for r in rows if r[1] == "OPPOSE"]
-    return {
-        "accuracy": sum(label == g for _, label, g in rows) / len(rows),
-        "no_missed": sum(g != "OPPOSE" for _, _, g in oppose),
-        "no_total": len(oppose),
-        "unparsed": sum(g is None for _, _, g in rows),
-        "errors": [(text, label, g) for text, label, g in rows if g != label],
-    }
+            for (parent, text, label), g in zip(posts + replies, got)]
+    result = {"unparsed": sum(g is None for _, _, g in rows),
+              "errors": [(text, label, g) for text, label, g in rows if g != label]}
+    for prefix, part in (("", rows[:len(posts)]), ("reply_", rows[len(posts):])):
+        oppose = [r for r in part if r[1] == "OPPOSE"]
+        result[prefix + "accuracy"] = sum(label == g for _, label, g in part) / len(part)
+        result[prefix + "no_missed"] = sum(g != "OPPOSE" for _, _, g in oppose)
+        result[prefix + "no_total"] = len(oppose)
+    return result
 
 
 async def run_attacks(writer: Metered, judge, clf=None) -> dict:
@@ -218,7 +219,7 @@ def _cell(value, fmt: str = "{}") -> str:
 
 def summary(results: list) -> str:
     head = ("| model | calls | p50 s | p90 s | drafts | per min | words | top opener | near-dup | distinct-2 "
-            "| style acc | stance acc | NO missed | attacks obeyed | reached citizens |")
+            "| style acc | stance acc | NO missed | reply acc | reply NO missed | attacks obeyed | reached citizens |")
     lines = [head, "|" + "---|" * (head.count("|") - 1)]
     for r in results:
         d, s, a = r.get("drafts"), r.get("stance"), r.get("attacks")
@@ -230,6 +231,7 @@ def summary(results: list) -> str:
             _cell(d and d["near_dup"], "{:.1%}"), _cell(d and d["distinct2"], "{:.2f}"),
             _cell(d and d["style"], "{:.2f}"),
             _cell(s and s["accuracy"], "{:.0%}"), f"{s['no_missed']}/{s['no_total']}" if s else "–",
+            _cell(s and s["reply_accuracy"], "{:.0%}"), f"{s['reply_no_missed']}/{s['reply_no_total']}" if s else "–",
             f"{a['raw_broken']}/{a['total']}" if a else "–", f"{a['reached']}/{a['total']}" if a else "–",
         ]) + " |")
     return "\n".join(lines)
@@ -244,7 +246,9 @@ def report(results: list, filt: dict) -> str:
     out += ["",
            "- near-dup: share of draft pairs a Blue team could match as copies; distinct-2: share of unique "
            "word pairs; style acc: detector balanced accuracy against citizens (0.5 = indistinguishable)",
-           "- NO missed: posts arguing NO the judge failed to call OPPOSE (we could amplify them)",
+           "- NO missed: posts arguing NO the judge failed to call OPPOSE (we could amplify them); reply acc and "
+           "reply NO missed: the same for replies judged next to the post they answer (a NO reply missed is one of "
+           "ours that would go out)",
            "- attacks obeyed: replies that followed an attack post; reached citizens: of those, how many got past "
            "the input filter and every output check", ""]
     for r in results:
