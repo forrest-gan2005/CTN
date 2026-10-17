@@ -28,7 +28,7 @@ NEIGHBOURS = 20  # older post ids tried when paging back from a post that is gon
 MAX_RETRIES = 4
 MAX_CONCURRENT = 8
 MAX_RATE_WAIT = 300.0  # seconds a request will wait out a rate limit; longer and it fails at once instead
-JITTER = 1.0  # seconds, only ever added to a server-given wait
+JITTER = 1.0  # seconds, only ever added to a wait (a server-given one, or a feed request's turn)
 EXHAUSTED_PAUSE = 60.0  # seconds a scope stays blocked after every attempt was rate-limited (even "Retry-After: 0")
 # Requests that never reached the server: safe to repeat even when they create something.
 NOT_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
@@ -142,7 +142,8 @@ class RealPlatform:
         self.blocked_until = {}  # rate-limit scope -> monotonic time before which nothing in it is sent
         self.clock = time.monotonic  # replaced by a fake clock in tests
         self.feed_gap = feed_gap
-        self.feed_next = 0.0  # clock time of the next feed request's slot
+        self.feed_next = 0.0  # clock time before which no feed request may be sent
+        self._feed_lock: Optional[asyncio.Lock] = None
         self.sleep = asyncio.sleep
         self.ids = self.accounts.ids()  # username -> account id
         self.names = {i: u for u, i in self.ids.items()}  # account id -> username
@@ -240,7 +241,6 @@ class RealPlatform:
             if found:  # the nearest post below a missing one is a page of its own, delivered before reading on
                 return found
         for _ in range(SKIP_PAGES):  # a page of nothing but reposts isn't the end: read on until one isn't
-            await self._feed_turn()
             resp = await self._send("GET", "/posts", params=params)
             resp.raise_for_status()
             page = resp.json()
@@ -264,14 +264,6 @@ class RealPlatform:
         if found and cursor:
             self.after[min(p["id"] for p in found)] = cursor
         return sorted((p for p in found if p["author"] is not None), key=lambda p: p["id"], reverse=True)[:n]
-
-    async def _feed_turn(self) -> None:
-        """Wait for this feed request's slot; slots are handed out in order, `feed_gap` apart."""
-        now = self.clock()
-        slot = max(now, self.feed_next)
-        self.feed_next = slot + self.feed_gap
-        if slot > now:
-            await self.sleep(slot - now)
 
     async def feed_locked(self) -> bool:
         """Whether the platform has locked its feed: only citizens and moderators can act then."""
@@ -423,16 +415,31 @@ class RealPlatform:
     async def _dispatch(self, scope: str, method: str, path: str, **kwargs) -> httpx.Response:
         """Send once the scope's rate-limit block allows it. Checked again after getting a connection slot and
         after every wait, since another request may hit a limit (or extend one) meanwhile; a blocked request
-        gives its slot back while it waits."""
+        gives its slot back while it waits. Feed requests, retries included, also leave one at a time, `feed_gap`
+        after the last one actually went."""
+        feed = bool(self.feed_gap) and method == "GET" and path == "/posts"
+        if not feed:
+            return await self._dispatch_when(scope, method, path, False, **kwargs)
+        if self._feed_lock is None:
+            self._feed_lock = asyncio.Lock()
+        async with self._feed_lock:
+            return await self._dispatch_when(scope, method, path, True, **kwargs)
+
+    async def _dispatch_when(self, scope: str, method: str, path: str, feed: bool, **kwargs) -> httpx.Response:
         while True:
             wait = self.blocked_until.get(scope, 0.0) - self.clock()
             if wait > MAX_RATE_WAIT:
                 raise RateLimited(wait)
+            if feed:
+                wait = max(wait, self.feed_next - self.clock())
             if wait > 0:
                 await self.sleep(wait + random.uniform(0, JITTER))
                 continue
             async with self._sem:
-                if self.blocked_until.get(scope, 0.0) <= self.clock():
+                now = self.clock()
+                if self.blocked_until.get(scope, 0.0) <= now and (not feed or self.feed_next <= now):
+                    if feed:
+                        self.feed_next = now + self.feed_gap
                     return await self.client.request(method, path, **kwargs)
 
     async def _call(self, method: str, path: str, username: str, idempotent: bool = True,
@@ -1117,6 +1124,78 @@ async def _feed_pace_demo() -> None:
     assert all(b - a >= FEED_GAP for a, b in zip(sent, sent[1:])), sent
     assert max(sum(t <= s < t + 60 for s in sent) for t in sent) <= 10
     await p.aclose()
+
+    def spaced(times: list) -> bool:
+        return (all(b - a >= FEED_GAP for a, b in zip(times, times[1:]))
+                and max(sum(t <= u < t + 60 for u in times) for t in times) <= 10)
+
+    def fresh(handler, **kwargs) -> RealPlatform:
+        q = RealPlatform("https://legit.test/api", accounts=AccountStore(":memory:"),
+                         transport=httpx.MockTransport(handler), **kwargs)
+        q.clock, q.sleep = clock, clock.sleep
+        q.names[7] = "citizen"
+        return q
+
+    page = {"items": [item(9)], "next_cursor": None}
+    sent.clear()
+    failed = set()
+
+    def flaky(request: httpx.Request) -> httpx.Response:  # every read fails once, then works
+        if request.url.path.endswith("/posts"):
+            sent.append(clock.now)
+            if len(sent) not in failed and len(sent) % 2:
+                failed.add(len(sent))
+                return httpx.Response(503, json={"error": "busy"})
+            return httpx.Response(200, json=page)
+        return httpx.Response(404, json={"error": "not found"})
+    q = fresh(flaky)
+    for _ in range(6):
+        await q.feed_latest(n=5)
+    assert len(sent) == 12 and spaced(sent), sent  # the retries wait their turn too
+    await q.aclose()
+
+    sent.clear()
+    hold = asyncio.Event()
+
+    async def congested(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/feed/lock"):
+            await hold.wait()  # keeps the only connection slot busy
+            return httpx.Response(200, json={"locked": False})
+        sent.append(clock.now)
+        return httpx.Response(200, json=page)
+    q = fresh(congested, max_concurrent=1)
+    lock = asyncio.ensure_future(q.feed_locked())
+    await asyncio.sleep(0)
+    reads = asyncio.gather(*(q.feed_latest(n=5) for _ in range(3)))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    clock.now += 30  # the slot stays busy long past every reader's turn
+    hold.set()
+    await lock
+    await reads
+    assert len(sent) == 3 and spaced(sent), sent  # not all at once when the slot frees
+    await q.aclose()
+
+    sent.clear()
+
+    def limited(request: httpx.Request) -> httpx.Response:
+        sent.append(clock.now)
+        if len(sent) == 1:
+            return httpx.Response(429, headers={"retry-after": "10"}, json={"error": "slow down"})
+        return httpx.Response(200, json=page)
+    q = fresh(limited)
+    await asyncio.gather(*(q.feed_latest(n=5) for _ in range(4)))
+    assert len(sent) == 5 and sent[1] >= sent[0] + 10 and spaced(sent[1:]), sent  # out of the wait, one by one
+
+    waiting = asyncio.ensure_future(q.feed_latest(n=5))  # next turn is 6.5 s off
+    await asyncio.sleep(0)
+    waiting.cancel()
+    try:
+        await waiting
+    except asyncio.CancelledError:
+        pass
+    assert await q.feed_latest(n=5) and not q._feed_lock.locked(), "a cancelled read gives its turn back"
+    await q.aclose()
     print("feed pace ok")
 
 
