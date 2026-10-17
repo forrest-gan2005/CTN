@@ -32,8 +32,11 @@ PROVIDERS = {
     "mistral": ("https://api.mistral.ai/v1", "MISTRAL_API_KEY", 60),
     "github": ("https://models.github.ai/inference", "GITHUB_TOKEN", 10),
     "deepseek": ("https://api.deepseek.com", "DEEPSEEK_API_KEY", 60),  # add ?thinking={"type":"disabled"}
-    "official": (None, "CTN_LLM_KEY", None),  # URL goes in CTN_LLM_URL once the organisers publish it
+    # qwen2.5-3b-instruct (SDK 0.5.0, 17 Oct): per team 3 a minute, one at a time, at most 1024 tokens. The key is
+    # the team code unless CTN_LLM_KEY says otherwise; CTN_LLM_URL overrides the address if it moves.
+    "official": ("https://llm.legitreal.com/v1", "CTN_LLM_KEY", 3),
 }
+ONE_AT_A_TIME = {"official"}
 RETRY_DELAY_RE = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"')
 USAGE_DB = paths.DATA / "usage.db"
 GAME_TZ = ZoneInfo("Australia/Sydney")  # game days, and so daily budgets, turn over at Sydney midnight
@@ -45,6 +48,7 @@ PRICES = {
     # Free tier while no billing is linked to the Google project (paid would be $0.30 / $2.50).
     "gemini:gemini-3.5-flash-lite": (0.0, 0.0),
     "gemini:gemma-4-31b-it": (0.0, 0.0),
+    "deepseek:deepseek-flash": (0.30, 1.20),  # cache miss at peak hours; off-peak is half (pricing page, 17 Oct)
 }
 
 
@@ -284,7 +288,8 @@ class OpenAICompatLLM:
                     continue
                 if resp.status_code in (401, 403, 404):
                     log.error("%s: HTTP %d %s", self.name, resp.status_code, resp.text[:200])
-                    self.quota.block(LOCKOUT)
+                    # The organisers' 403 is "your team can't compete right now" (not started, say): soon over.
+                    self.quota.block(COOLDOWN if resp.status_code == 403 and self.provider == "official" else LOCKOUT)
                     return None
                 if resp.status_code >= 400:  # e.g. a content filter refusing this one prompt
                     log.warning("%s: HTTP %d %s", self.name, resp.status_code, resp.text[:200])
@@ -446,14 +451,15 @@ def make_llm(spec: Optional[str] = None, temperature: Optional[float] = None):
     if provider not in PROVIDERS:
         raise ValueError(f"unknown LLM provider {provider!r}; one of ollama, fake, {', '.join(PROVIDERS)}")
     base_url, key_var, rpm = PROVIDERS[provider]
-    base_url = base_url or os.environ.get("CTN_LLM_URL")
     key = os.environ.get(key_var)
+    if provider == "official":
+        base_url, key = os.environ.get("CTN_LLM_URL") or base_url, key or os.environ.get("CTN_TEAM_KEY")
     if not model or not base_url or not key:
         raise ValueError(f"{spec!r} needs a model name, a base URL and ${key_var} (put keys in .env)")
     return OpenAICompatLLM(base_url, key, model, name=spec, rpm=options.pop("rpm", rpm),
                            temperature=temperature, max_tokens=options.pop("max_tokens", 400),
                            usage=ledger(), budget=options.pop("budget", None), daily=options.pop("daily", None),
-                           extra=options)
+                           max_concurrent=1 if provider in ONE_AT_A_TIME else 8, extra=options)
 
 
 def team_llms() -> tuple:
@@ -532,10 +538,33 @@ async def _demo() -> None:
     groq = make_llm("groq:llama-3.3-70b-versatile?rpm=5&reasoning_effort=low&budget=4.5&daily=0.4", temperature=0)
     assert groq.quota.gap == 12 and groq.body["reasoning_effort"] == "low" and groq.body["temperature"] == 0
     assert (groq.budget, groq.daily) == (4.5, 0.4) and "budget" not in groq.body
+    saved = {k: os.environ.pop(k, None) for k in ("CTN_LLM_URL", "CTN_LLM_KEY", "CTN_TEAM_KEY")}
+    os.environ.update(CTN_LLM_URL="", CTN_LLM_KEY="", CTN_TEAM_KEY="TEAMCODE12345678")
+    official = make_llm("official:qwen2.5-3b-instruct")
+    assert official.url == "https://llm.legitreal.com/v1/chat/completions" and official.quota.gap == 20
+    assert official.headers["Authorization"] == "Bearer TEAMCODE12345678" and official.max_concurrent == 1
+    os.environ.update(CTN_LLM_URL="https://llm.moved.test/v1", CTN_LLM_KEY="OTHERKEY")
+    moved = make_llm("official:qwen2.5-3b-instruct?rpm=2")
+    assert moved.url == "https://llm.moved.test/v1/chat/completions" and moved.headers["Authorization"] == "Bearer OTHERKEY"
+    assert moved.quota.gap == 30 and groq.max_concurrent == 8
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
     both = make_llm("fake, ollama:qwen3:8b")
     assert isinstance(both, ChainLLM) and both.name == "fake+ollama:qwen3:8b"
     for llm in (flaky, chain, paced):
         await llm.aclose()
+
+    def forbidden(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": "your team is not ready to compete"})
+    for name, wanted in (("official:refused-a", COOLDOWN), ("groq:refused-b", LOCKOUT)):
+        refused = OpenAICompatLLM("https://refused.test/v1", "k", name.partition(":")[2], name=name,
+                                  transport=httpx.MockTransport(forbidden))
+        left = refused.quota.blocked_until - time.monotonic() if await refused.generate("s", "p") is None else 0
+        assert wanted - 5 < left <= wanted, (name, left)
+        await refused.aclose()
     await _cooldown_demo()
     print("llm ok")
 
