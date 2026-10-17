@@ -195,6 +195,19 @@ def _quota(url: str, model: str, rpm: Optional[float]) -> Quota:
     return _QUOTAS.setdefault((url, model), Quota(rpm))
 
 
+_GATES = {}  # url -> (event loop, semaphore): a service taking one request at a time, whichever client sends it
+
+
+def _gate(url: str) -> asyncio.Semaphore:
+    """The one in-flight slot every client of this service shares, made in the running loop (Python 3.9 binds a
+    semaphore to the loop it was made in)."""
+    loop = asyncio.get_running_loop()
+    held = _GATES.get(url)
+    if held is None or held[0] is not loop:
+        held = _GATES[url] = (loop, asyncio.Semaphore(1))
+    return held[1]
+
+
 def _retry_after(resp: httpx.Response) -> float:
     header = resp.headers.get("retry-after")
     if header:
@@ -221,8 +234,9 @@ class OpenAICompatLLM:
                  temperature: Optional[float] = None, max_tokens: int = 400, extra: Optional[dict] = None,
                  max_concurrent: int = 8, timeout: float = 60,
                  transport: Optional[httpx.AsyncBaseTransport] = None, usage: Optional[UsageLedger] = None,
-                 budget: Optional[float] = None, daily: Optional[float] = None) -> None:
+                 budget: Optional[float] = None, daily: Optional[float] = None, one_at_a_time: bool = False) -> None:
         self.url = base_url.rstrip("/") + "/chat/completions"
+        self.one_at_a_time = one_at_a_time  # the service allows one request in flight per team, across our clients
         self.headers = {"Authorization": f"Bearer {api_key}"}
         self.name = name
         self.body = {"model": model, "max_tokens": max_tokens, **(extra or {})}
@@ -259,7 +273,7 @@ class OpenAICompatLLM:
 
     async def generate(self, system: str, prompt: str) -> Optional[str]:
         if self._sem is None:
-            self._sem = asyncio.Semaphore(self.max_concurrent)
+            self._sem = _gate(self.url) if self.one_at_a_time else asyncio.Semaphore(self.max_concurrent)
             self._client = httpx.AsyncClient(timeout=self.timeout, transport=self.transport)
         body = {**self.body, "messages": [{"role": "system", "content": system},
                                           {"role": "user", "content": prompt}]}
@@ -459,7 +473,7 @@ def make_llm(spec: Optional[str] = None, temperature: Optional[float] = None):
     return OpenAICompatLLM(base_url, key, model, name=spec, rpm=options.pop("rpm", rpm),
                            temperature=temperature, max_tokens=options.pop("max_tokens", 400),
                            usage=ledger(), budget=options.pop("budget", None), daily=options.pop("daily", None),
-                           max_concurrent=1 if provider in ONE_AT_A_TIME else 8, extra=options)
+                           one_at_a_time=provider in ONE_AT_A_TIME, extra=options)
 
 
 def team_llms() -> tuple:
@@ -542,11 +556,11 @@ async def _demo() -> None:
     os.environ.update(CTN_LLM_URL="", CTN_LLM_KEY="", CTN_TEAM_KEY="TEAMCODE12345678")
     official = make_llm("official:qwen2.5-3b-instruct")
     assert official.url == "https://llm.legitreal.com/v1/chat/completions" and official.quota.gap == 20
-    assert official.headers["Authorization"] == "Bearer TEAMCODE12345678" and official.max_concurrent == 1
+    assert official.headers["Authorization"] == "Bearer TEAMCODE12345678" and official.one_at_a_time
     os.environ.update(CTN_LLM_URL="https://llm.moved.test/v1", CTN_LLM_KEY="OTHERKEY")
     moved = make_llm("official:qwen2.5-3b-instruct?rpm=2")
     assert moved.url == "https://llm.moved.test/v1/chat/completions" and moved.headers["Authorization"] == "Bearer OTHERKEY"
-    assert moved.quota.gap == 30 and groq.max_concurrent == 8
+    assert moved.quota.gap == 30 and not groq.one_at_a_time
     for k, v in saved.items():
         if v is None:
             os.environ.pop(k, None)
@@ -566,7 +580,50 @@ async def _demo() -> None:
         assert wanted - 5 < left <= wanted, (name, left)
         await refused.aclose()
     await _cooldown_demo()
+    await _one_at_a_time_demo()
     print("llm ok")
+
+
+async def _one_at_a_time_demo() -> None:
+    """Two clients of a one-at-a-time service, a writer and a judge at temperature 0: the second waits for the
+    first's answer however long it takes, and a cancelled request gives the slot back."""
+    inflight, peak, answer = [0], [0], asyncio.Event()
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        inflight[0] += 1
+        peak[0] = max(peak[0], inflight[0])
+        try:
+            await answer.wait()
+        finally:
+            inflight[0] -= 1
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    url = "https://one-at-a-time.test/v1"
+    writer, judge = (OpenAICompatLLM(url, "k", model, name=f"official:{model}", rpm=6000, temperature=t,
+                                     transport=httpx.MockTransport(slow), one_at_a_time=True)
+                     for model, t in (("writer-model", None), ("judge-model", 0)))
+    first = asyncio.ensure_future(writer.generate("s", "p"))
+    while not inflight[0]:
+        await asyncio.sleep(0.001)
+    second = asyncio.ensure_future(judge.generate("s", "p"))
+    await asyncio.sleep(0.05)  # far past the next quota slot
+    assert inflight[0] == 1 and not second.done()
+    answer.set()
+    assert [str(x) for x in await asyncio.gather(first, second)] == ["ok", "ok"] and peak[0] == 1
+    answer.clear()
+    stuck = asyncio.ensure_future(writer.generate("s", "p"))
+    while not inflight[0]:
+        await asyncio.sleep(0.001)
+    stuck.cancel()
+    try:
+        await stuck
+    except asyncio.CancelledError:
+        pass
+    assert not _gate(writer.url).locked(), "a cancelled request frees the slot"
+    answer.set()
+    assert str(await judge.generate("s", "p")) == "ok" and peak[0] == 1
+    for llm in (writer, judge):
+        await llm.aclose()
 
 
 async def _cooldown_demo() -> None:
