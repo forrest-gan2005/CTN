@@ -118,6 +118,10 @@ class AccountStore:
         return dict(self.db.execute("SELECT username, account_id FROM accounts WHERE account_id IS NOT NULL"))
 
 
+# The three feeds allow a team 10 reads a minute between them (SDK 0.5.0): every feed request waits its turn.
+FEED_GAP = 6.5
+
+
 class RealPlatform:
     """Legit Real (2026) through its HTTP API, mirroring FakePlatform's methods.
 
@@ -128,7 +132,8 @@ class RealPlatform:
     """
 
     def __init__(self, base_url: str, team_key: Optional[str] = None, accounts: Optional[AccountStore] = None,
-                 transport: Optional[httpx.AsyncBaseTransport] = None, max_concurrent: int = MAX_CONCURRENT) -> None:
+                 transport: Optional[httpx.AsyncBaseTransport] = None, max_concurrent: int = MAX_CONCURRENT,
+                 feed_gap: float = FEED_GAP) -> None:
         self.client = httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=30, transport=transport)
         self.team_key = team_key
         self.accounts = accounts or AccountStore()
@@ -136,6 +141,8 @@ class RealPlatform:
         self._sem: Optional[asyncio.Semaphore] = None  # created inside the running loop (Python 3.9)
         self.blocked_until = {}  # rate-limit scope -> monotonic time before which nothing in it is sent
         self.clock = time.monotonic  # replaced by a fake clock in tests
+        self.feed_gap = feed_gap
+        self.feed_next = 0.0  # clock time of the next feed request's slot
         self.sleep = asyncio.sleep
         self.ids = self.accounts.ids()  # username -> account id
         self.names = {i: u for u, i in self.ids.items()}  # account id -> username
@@ -233,6 +240,7 @@ class RealPlatform:
             if found:  # the nearest post below a missing one is a page of its own, delivered before reading on
                 return found
         for _ in range(SKIP_PAGES):  # a page of nothing but reposts isn't the end: read on until one isn't
+            await self._feed_turn()
             resp = await self._send("GET", "/posts", params=params)
             resp.raise_for_status()
             page = resp.json()
@@ -256,6 +264,14 @@ class RealPlatform:
         if found and cursor:
             self.after[min(p["id"] for p in found)] = cursor
         return sorted((p for p in found if p["author"] is not None), key=lambda p: p["id"], reverse=True)[:n]
+
+    async def _feed_turn(self) -> None:
+        """Wait for this feed request's slot; slots are handed out in order, `feed_gap` apart."""
+        now = self.clock()
+        slot = max(now, self.feed_next)
+        self.feed_next = slot + self.feed_gap
+        if slot > now:
+            await self.sleep(slot - now)
 
     async def feed_locked(self) -> bool:
         """Whether the platform has locked its feed: only citizens and moderators can act then."""
@@ -632,7 +648,7 @@ def _now() -> str:
 async def _demo() -> None:
     mock = MockLegitSocial(team_key="K7Q2WXRM4TPV9HZD")
     transport = httpx.MockTransport(mock.handler)
-    p = RealPlatform("https://legit.test/api", team_key=mock.team_key, accounts=AccountStore(":memory:"),
+    p = RealPlatform("https://legit.test/api", feed_gap=0, team_key=mock.team_key, accounts=AccountStore(":memory:"),
                      transport=transport)
     await p.ensure_account("joe_tama", "Joe Tama")
     await p.ensure_account("npc_1", "Npc One")
@@ -655,7 +671,8 @@ async def _demo() -> None:
                                      "reply_to_post_id": mine["id"], "root_post_id": mine["id"]}))
     await p.feed_latest(n=5)
     assert [n["actor"] for n in await p.get_notifications("joe_tama")] == ["stranger"], "authors are looked up"
-    restarted = RealPlatform("https://legit.test/api", team_key=mock.team_key, accounts=p.accounts, transport=transport)
+    restarted = RealPlatform("https://legit.test/api", feed_gap=0,
+                             team_key=mock.team_key, accounts=p.accounts, transport=transport)
     restarted.recall([(4, "stranger", mine["id"])])
     assert restarted.inbox == {}, "a reply to a post not known as ours is nobody's notification"
     restarted.adopt(mine["id"], "joe_tama")
@@ -675,7 +692,8 @@ async def _demo() -> None:
     assert made[1] not in restarted.after
     assert [x["id"] for x in await restarted.feed_latest(n=10, before=made[1])] == older, "or one written like it"
     mock.hidden.add(made[1])
-    blind = RealPlatform("https://legit.test/api", team_key=mock.team_key, accounts=p.accounts, transport=transport)
+    blind = RealPlatform("https://legit.test/api", feed_gap=0,
+                         team_key=mock.team_key, accounts=p.accounts, transport=transport)
     nearest = [x["id"] for x in await blind.feed_latest(n=10, before=made[1])]
     assert nearest == older[:1], "below a hidden post, its nearest neighbour comes first, as a page of its own"
     assert [x["id"] for x in await blind.feed_latest(n=10, before=nearest[0])] == older[1:]
@@ -687,7 +705,8 @@ async def _demo() -> None:
     assert (await p.get_post(reply["id"]))["content"] == "same at our shop"
     assert not (await p.get_post(reply["id"]))["author_verified"]
     mock.accounts[mock._ids()["npc_1"]]["verified"] = True
-    badged = RealPlatform("https://legit.test/api", team_key=mock.team_key, accounts=AccountStore(":memory:"),
+    badged = RealPlatform("https://legit.test/api", feed_gap=0,
+                          team_key=mock.team_key, accounts=AccountStore(":memory:"),
                           transport=transport)
     assert (await badged.get_post(reply["id"]))["author_verified"], "the badge comes with the author"
     await badged.aclose()
@@ -724,7 +743,8 @@ async def _demo() -> None:
     await p.report("joe_tama", 5, "I think that this content is inauthentic (bot) activity because it posts nonstop.")
     assert mock.reports == [("joe_tama", 5, "inauthentic")]
 
-    stranger_team = RealPlatform("https://legit.test/api", team_key="WRONGWRONGWRONG2", accounts=AccountStore(":memory:"),
+    stranger_team = RealPlatform("https://legit.test/api", feed_gap=0,
+                                 team_key="WRONGWRONGWRONG2", accounts=AccountStore(":memory:"),
                                  transport=transport)
     try:
         await stranger_team.ensure_account("intruder", "Intruder")
@@ -735,7 +755,8 @@ async def _demo() -> None:
     for i in range(120):  # a search matches parts of names: the exact one may be on a later page
         mock.add_user(f"target_{i}")
     mock.add_user("target")
-    finder = RealPlatform("https://legit.test/api", team_key=mock.team_key, accounts=AccountStore(":memory:"),
+    finder = RealPlatform("https://legit.test/api", feed_gap=0,
+                          team_key=mock.team_key, accounts=AccountStore(":memory:"),
                           transport=transport)
     assert await finder.account_id("target") == mock._ids()["target"]
     try:
@@ -753,7 +774,7 @@ async def _demo() -> None:
             lost.append(1)
             raise httpx.ReadTimeout("answer lost")
         return resp
-    q = RealPlatform("https://legit.test/api", team_key=mock.team_key, accounts=AccountStore(":memory:"),
+    q = RealPlatform("https://legit.test/api", feed_gap=0, team_key=mock.team_key, accounts=AccountStore(":memory:"),
                      transport=httpx.MockTransport(lose_register))
     await q.ensure_account("kai_lind", "Kai")
     assert "kai_lind" in mock.users and q.accounts.token("kai_lind")
@@ -770,7 +791,8 @@ async def _repost_gap_demo() -> None:
     for page_size, run in ((1, 5), (50, 300)):
         mock = MockLegitSocial(team_key="k")
         transport = httpx.MockTransport(mock.handler)
-        p = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"), transport=transport)
+        p = RealPlatform("https://legit.test/api", feed_gap=0,
+                         team_key="k", accounts=AccountStore(":memory:"), transport=transport)
         for who in ("joe", "npc"):
             await p.ensure_account(who, who)
         first = await p.post("joe", "the oldest post")
@@ -781,7 +803,8 @@ async def _repost_gap_demo() -> None:
                                "repost_of": first["id"], "author": {"id": mock._ids()["npc"], "username": "npc"},
                                "created_at": _now()}
         newest = await p.post("npc", "the newest post")
-        restarted = RealPlatform("https://legit.test/api", team_key="k", accounts=p.accounts, transport=transport)
+        restarted = RealPlatform("https://legit.test/api", feed_gap=0,
+                                 team_key="k", accounts=p.accounts, transport=transport)
         restarted.adopt(first["id"], "joe")
         store = NpcStore(":memory:")
         collector = Collector(restarted, store, page_size=page_size, min_interval=0)
@@ -799,7 +822,8 @@ async def _repost_gap_demo() -> None:
     try:
         mock = MockLegitSocial(team_key="k")
         transport = httpx.MockTransport(mock.handler)
-        p = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"), transport=transport)
+        p = RealPlatform("https://legit.test/api", feed_gap=0,
+                         team_key="k", accounts=AccountStore(":memory:"), transport=transport)
         await p.ensure_account("npc", "npc")
         first = await p.post("npc", "the oldest post")
         for _ in range(7):
@@ -818,7 +842,8 @@ async def _repost_gap_demo() -> None:
             rounds += 1
             assert rounds < 10, "it never got past the reposts"
             assert not store.gaps() or store.gaps()[0][2] < before, "the gap kept where it got to"
-            p = RealPlatform("https://legit.test/api", team_key="k", accounts=p.accounts, transport=transport)
+            p = RealPlatform("https://legit.test/api", feed_gap=0,
+                             team_key="k", accounts=p.accounts, transport=transport)
             collector = Collector(p, store, page_size=1, min_interval=0)  # and a restart carries on from there
         assert rounds >= 3 and {r[0] for r in store.posts_after(0)} == {first["id"], newest["id"]}, rounds
 
@@ -827,7 +852,7 @@ async def _repost_gap_demo() -> None:
         for kind, seen in itertools.product(("post", "reply"), (False, True)):
             mock = MockLegitSocial(team_key="k")
             transport = httpx.MockTransport(mock.handler)
-            p = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"),
+            p = RealPlatform("https://legit.test/api", feed_gap=0, team_key="k", accounts=AccountStore(":memory:"),
                              transport=transport)
             await p.ensure_account("npc", "npc")
             kept = [(await p.post("npc", "the oldest post"))["id"]]
@@ -841,7 +866,8 @@ async def _repost_gap_demo() -> None:
             mock.hidden.add(hidden)
             store = NpcStore(":memory:")
             store.add_gap(None, hidden)
-            p = RealPlatform("https://legit.test/api", team_key="k", accounts=p.accounts, transport=transport)
+            p = RealPlatform("https://legit.test/api", feed_gap=0,
+                             team_key="k", accounts=p.accounts, transport=transport)
             if seen:
                 await p.get_post(kept[1])  # e.g. a health check read it: the platform has seen it, the store hasn't
             for _ in range(10):  # a restart before every round, unless the cache is what's being tested
@@ -849,13 +875,14 @@ async def _repost_gap_demo() -> None:
                 if not store.gaps():
                     break
                 if not seen:
-                    p = RealPlatform("https://legit.test/api", team_key="k", accounts=p.accounts, transport=transport)
+                    p = RealPlatform("https://legit.test/api", feed_gap=0,
+                                     team_key="k", accounts=p.accounts, transport=transport)
             assert store.gaps() == [] and {r[0] for r in store.posts_after(0)} == set(kept), (kind, seen)
 
         for i in range(5):
             mock.add_user(f"seeker_{i}")
         mock.add_user("seeker")
-        finder = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"),
+        finder = RealPlatform("https://legit.test/api", feed_gap=0, team_key="k", accounts=AccountStore(":memory:"),
                               transport=transport)
         lookups = 0
         while True:
@@ -889,7 +916,7 @@ async def _retry_demo() -> None:
 
     def platform(handler) -> tuple:
         clock = Clock()
-        p = RealPlatform("https://legit.test/api", accounts=AccountStore(":memory:"),
+        p = RealPlatform("https://legit.test/api", feed_gap=0, accounts=AccountStore(":memory:"),
                          transport=httpx.MockTransport(handler))
         p.clock, p.sleep = clock, clock.sleep
         p.accounts.password("joe")
@@ -962,7 +989,8 @@ async def _retry_demo() -> None:
         return ok
 
     clock = Clock()
-    p = RealPlatform("https://legit.test/api", accounts=AccountStore(":memory:"), transport=httpx.MockTransport(held),
+    p = RealPlatform("https://legit.test/api", feed_gap=0,
+                     accounts=AccountStore(":memory:"), transport=httpx.MockTransport(held),
                      max_concurrent=1)
     p.names[7] = "joe"
 
@@ -1020,7 +1048,7 @@ async def _retry_demo() -> None:
                     return httpx.Response(500)
                 raise failure
             return resp
-        p = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"),
+        p = RealPlatform("https://legit.test/api", feed_gap=0, team_key="k", accounts=AccountStore(":memory:"),
                          transport=httpx.MockTransport(committed_then_fails))
         p.sleep = Clock().sleep
         await p.ensure_account("joe", "Joe")
@@ -1038,7 +1066,7 @@ async def _retry_demo() -> None:
             attempts.append(1)
             raise httpx.ConnectError("connection refused")
         return mock.handler(request)
-    p = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"),
+    p = RealPlatform("https://legit.test/api", feed_gap=0, team_key="k", accounts=AccountStore(":memory:"),
                      transport=httpx.MockTransport(refused_once))
     p.sleep = Clock().sleep
     await p.ensure_account("joe", "Joe")
@@ -1046,7 +1074,54 @@ async def _retry_demo() -> None:
     print("retries ok")
 
 
+async def _feed_pace_demo() -> None:
+    """Every feed request waits its turn, however many callers want one at once and however a call pages: at most
+    10 reach the server in any minute."""
+    sent = []
+
+    class Clock:
+        now = 0.0
+
+        def __call__(self) -> float:
+            return self.now
+
+        async def sleep(self, seconds: float) -> None:  # each sleeper wakes at its own time, not after the others
+            until = self.now + seconds
+            await asyncio.sleep(0)
+            self.now = max(self.now, until)
+
+    def item(post_id: int, kind: str = "post") -> dict:
+        return {"post_id": post_id, "author_id": 7, "kind": kind,
+                "body": None if kind == "repost" else f"post {post_id}",
+                "reply_to_post_id": None, "root_post_id": None, "repost_of_post_id": 1 if kind == "repost" else None,
+                "created_at": "2026-10-19T06:00:00.000000Z"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/posts") and request.method == "GET":
+            sent.append(clock.now)
+            if request.url.params.get("cursor") == "reposts":  # a page of nothing but reposts, then the rest
+                return httpx.Response(200, json={"items": [item(50, "repost")], "next_cursor": "after-reposts"})
+            return httpx.Response(200, json={"items": [item(100 - len(sent))], "next_cursor": "reposts"})
+        return httpx.Response(404, json={"error": "not found"})
+
+    clock = Clock()
+    p = RealPlatform("https://legit.test/api", accounts=AccountStore(":memory:"),
+                     transport=httpx.MockTransport(handler))
+    p.clock, p.sleep = clock, clock.sleep
+    p.names[7] = "citizen"
+    await asyncio.gather(*(p.feed_latest(n=5) for _ in range(6)))  # callers all at once
+    p.after[42] = "reposts"
+    for _ in range(4):
+        await p.feed_latest(n=5, before=42)  # each reads a page of reposts, then one more
+    assert len(sent) == 14, sent
+    assert all(b - a >= FEED_GAP for a, b in zip(sent, sent[1:])), sent
+    assert max(sum(t <= s < t + 60 for s in sent) for t in sent) <= 10
+    await p.aclose()
+    print("feed pace ok")
+
+
 if __name__ == "__main__":
     asyncio.run(_demo())
+    asyncio.run(_feed_pace_demo())
     asyncio.run(_repost_gap_demo())
     asyncio.run(_retry_demo())

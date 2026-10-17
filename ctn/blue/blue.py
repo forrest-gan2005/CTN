@@ -584,7 +584,7 @@ async def _badge_and_lock_demo() -> None:
         if flaky[0] and request.url.path.startswith("/api/accounts/"):
             return httpx.Response(503)
         return mock.handler(request)
-    api = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"),
+    api = RealPlatform("https://legit.test/api", feed_gap=0, team_key="k", accounts=AccountStore(":memory:"),
                        transport=httpx.MockTransport(handler))
     api.sleep = asyncio.sleep
     for who in ("joe", "rival"):
@@ -691,7 +691,7 @@ async def _report_429_demo() -> None:
                 return httpx.Response(429, headers={"retry-after": "0"})
         return mock.handler(request)
 
-    api = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"),
+    api = RealPlatform("https://legit.test/api", feed_gap=0, team_key="k", accounts=AccountStore(":memory:"),
                        transport=httpx.MockTransport(handler))
     api.clock, api.sleep = clock, sleep
     await api.ensure_account("joe", "Joe")

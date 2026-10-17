@@ -1321,7 +1321,8 @@ async def smoke(seconds: float = 10) -> None:
     import httpx
 
     mock = MockLegitSocial(team_key="K7Q2WXRM4TPV9HZD")
-    platform = RealPlatform("https://legit.test/api", team_key=mock.team_key, accounts=AccountStore(":memory:"),
+    platform = RealPlatform("https://legit.test/api", feed_gap=0,
+                            team_key=mock.team_key, accounts=AccountStore(":memory:"),
                             transport=httpx.MockTransport(mock.handler))
     for i in range(5):
         await platform.ensure_account(f"citizen_{i}", f"Citizen {i}")

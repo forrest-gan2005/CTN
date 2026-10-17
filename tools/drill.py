@@ -260,7 +260,7 @@ async def child(tmp: Path, port: int, start: float, end: float) -> None:
     blue.REPORT_BACKOFF = timedelta(seconds=1)
     llm._LEDGER = llm.UsageLedger(tmp / "usage.db")
     base = f"http://127.0.0.1:{port}"
-    platform = real_platform.RealPlatform(f"{base}/api", team_key=TEAM_KEY,
+    platform = real_platform.RealPlatform(f"{base}/api", feed_gap=0, team_key=TEAM_KEY,
                                           accounts=real_platform.AccountStore(tmp / "accounts.db"))
     model = lambda name, rpm=None: llm.OpenAICompatLLM(f"{base}/v1", "k", name, name=f"drill:{name}", rpm=rpm,
                                                        usage=llm.ledger())
@@ -290,7 +290,7 @@ async def verify(stage: Stage, tmp: Path, port: int, marks: dict) -> list:
     llm._LEDGER = llm.UsageLedger(tmp / "usage.db")
     personas = drill_personas()
     own = {p["username"] for p in load_personas(status=None)}
-    platform = real_platform.RealPlatform(f"http://127.0.0.1:{port}/api", team_key=TEAM_KEY,
+    platform = real_platform.RealPlatform(f"http://127.0.0.1:{port}/api", feed_gap=0, team_key=TEAM_KEY,
                                           accounts=real_platform.AccountStore(tmp / "accounts.db"))
     state = StateStore(tmp / "bots.db")
     team = Team(platform, llm.FakeLLM(0, 0), None, NpcStore(tmp / "npc.db", own_usernames=own), state,

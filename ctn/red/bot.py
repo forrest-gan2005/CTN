@@ -1055,7 +1055,7 @@ async def notification_durability() -> None:
             return super().ingest_notifications(*args)
 
     mock = MockLegitSocial(team_key="k")
-    p = RealPlatform("https://legit.test/api", team_key="k", accounts=AccountStore(":memory:"),
+    p = RealPlatform("https://legit.test/api", feed_gap=0, team_key="k", accounts=AccountStore(":memory:"),
                      transport=httpx.MockTransport(mock.handler))
     persona = next(x for x in load_personas() if x["line"] == "persuade")
     me = persona["username"]

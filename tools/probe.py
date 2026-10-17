@@ -184,7 +184,7 @@ async def _demo() -> None:
         seen.append(request.url.path)
         return mock.handler(request)
     accounts = AccountStore(":memory:")
-    platform = RealPlatform("https://legit.test/api", team_key="k", accounts=accounts,
+    platform = RealPlatform("https://legit.test/api", feed_gap=0, team_key="k", accounts=accounts,
                             transport=httpx.MockTransport(handler))
     with tempfile.TemporaryDirectory() as tmp:
         probe = Probe(platform, Path(tmp))
