@@ -104,8 +104,11 @@ class FakePlatform:
         followed.remove(target)
         return True
 
-    async def report(self, username: str, post_id: int) -> bool:
-        """Report a post as inauthentic. This moderator rules at once; True if upheld."""
+    async def report(self, username: str, post_id: int, detail: str) -> bool:
+        """Report a post as inauthentic, saying why as the platform requires. This moderator rules at once; True if
+        upheld."""
+        if not detail.startswith("I think that this content is "):
+            raise ValueError(f"a report's detail must begin 'I think that this content is': {detail!r}")
         now = datetime.now(timezone.utc)
         if self.reporting_blocked_until is not None and now < self.reporting_blocked_until:
             raise ReportingSuspended(f"reporting blocked until {self.reporting_blocked_until.isoformat()}")
@@ -188,10 +191,16 @@ async def _demo() -> None:
 
     p.competitors = {"bob"}
     reply = [x for x in p.posts.values() if x["author"] == "bob"][0]
-    assert await p.report("alice", reply["id"]) and reply["id"] in p.hidden
-    assert not await p.report("alice", a["id"])
+    why = "I think that this content is inauthentic (bot) activity because it posts every 20 seconds."
     try:
-        await p.report("alice", reply["id"])
+        await p.report("alice", reply["id"], "")
+        raise AssertionError("a report without a reason should be refused")
+    except ValueError:
+        pass
+    assert await p.report("alice", reply["id"], why) and reply["id"] in p.hidden
+    assert not await p.report("alice", a["id"], why)
+    try:
+        await p.report("alice", reply["id"], why)
         raise AssertionError("reporting should be suspended after a wrong report")
     except ReportingSuspended:
         pass

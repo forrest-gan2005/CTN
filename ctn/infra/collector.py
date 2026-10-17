@@ -49,8 +49,9 @@ CREATE TABLE IF NOT EXISTS authors (
 -- Accounts there before the start that mostly post text many others post word for word: scripted, not citizens.
 CREATE TABLE IF NOT EXISTS fleet (author TEXT PRIMARY KEY);
 """
-PRE_START = ("a.ours = 0 AND (IFNULL(a.first_post_at < ?, 0) OR a.first_fetched_at < ?) "
-             "AND a.author NOT IN (SELECT author FROM fleet)")
+# There before the start: no competitor could register yet. Citizens are those of them outside the fleet.
+BEFORE_START = "a.ours = 0 AND (IFNULL(a.first_post_at < ?, 0) OR a.first_fetched_at < ?)"
+PRE_START = BEFORE_START + " AND a.author NOT IN (SELECT author FROM fleet)"
 # A text this long posted by this many accounts is a template; an account whose posts are half templates is scripted.
 # On 16 Oct 151 such accounts arrived together (550 texts, 32 distinct, YES and NO alike); 30 of the 45 accounts
 # there before were the same kind.
@@ -208,6 +209,16 @@ class NpcStore:
 
     def is_verified(self, author: str) -> bool:
         return self.db.execute("SELECT 1 FROM authors WHERE author = ? AND verified = 1", (author,)).fetchone() is not None
+
+    def before_start(self, cutoff: datetime = COMPETITION_START) -> set:
+        """Every account there before `cutoff`, the scripted fleet included: the organisers', never a competitor's."""
+        c = _iso(cutoff)
+        return {r[0] for r in self.db.execute(f"SELECT author FROM authors a WHERE {BEFORE_START}", (c, c))}
+
+    def was_before_start(self, author: str, cutoff: datetime = COMPETITION_START) -> bool:
+        c = _iso(cutoff)
+        return self.db.execute(f"SELECT 1 FROM authors a WHERE a.author = ? AND {BEFORE_START}",
+                               (author, c, c)).fetchone() is not None
 
     def is_citizen(self, author: str, cutoff: datetime = COMPETITION_START) -> bool:
         c = _iso(cutoff)

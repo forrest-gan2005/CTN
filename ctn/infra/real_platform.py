@@ -272,10 +272,11 @@ class RealPlatform:
         box = self.inbox.get(username, {})
         return sum(box.pop(n["id"], None) is not None for n in notes)
 
-    async def report(self, username: str, post_id: int, reason: str = "inauthentic", detail: str = "") -> None:
-        """File a report; the moderator rules later, so the outcome isn't known here."""
+    async def report(self, username: str, post_id: int, detail: str, reason: str = "inauthentic") -> None:
+        """File a report, `detail` saying why after the platform's fixed opening (it refuses a blank one); the
+        moderator rules later, so the outcome isn't known here."""
         resp = await self._call("POST", f"/posts/{post_id}/report", username,
-                                json={"reason": reason, "detail": detail or None}, idempotent=False)
+                                json={"reason": reason, "detail": detail}, idempotent=False)
         if resp.status_code in (403, 429) and any(w in resp.text.lower() for w in ("suspend", "block", "banned")):
             raise ReportingSuspended(resp.text[:200])
         resp.raise_for_status()
@@ -572,8 +573,11 @@ class MockLegitSocial:
             if key not in (self.accounts if kind == "accounts" else self.posts):
                 return error(404, "not found")
             if verb == "report":
-                if body.get("reason") not in ("hate_speech", "illegal_content", "inauthentic"):
+                if body.get("reason") not in ("hate_speech", "illegal_content", "inauthentic", "other"):
                     return error(400, "unknown reason")
+                if not str(body.get("detail") or "").startswith("I think that this content is "):
+                    return error(400, "detail must begin 'I think that this content is inauthentic (bot) activity "
+                                      "because...'")
                 self.reports.append((user, key, body["reason"]))
                 return httpx.Response(201, json={})
             done = self.likes if verb == "like" else self.follows
@@ -712,7 +716,12 @@ async def _demo() -> None:
         raise AssertionError("following an unknown account should raise KeyError")
     except KeyError:
         pass
-    await p.report("joe_tama", 5)
+    try:
+        await p.report("joe_tama", 5, "")
+        raise AssertionError("a report without a detail is refused, as the platform does")
+    except httpx.HTTPStatusError as e:
+        assert e.response.status_code == 400
+    await p.report("joe_tama", 5, "I think that this content is inauthentic (bot) activity because it posts nonstop.")
     assert mock.reports == [("joe_tama", 5, "inauthentic")]
 
     stranger_team = RealPlatform("https://legit.test/api", team_key="WRONGWRONGWRONG2", accounts=AccountStore(":memory:"),
@@ -927,7 +936,8 @@ async def _retry_demo() -> None:
         except RateLimited:
             pass
     assert len(seen) == 1 and clock.sleeps == []
-    await p.report("joe", 5)  # the reports scope isn't blocked
+    # the reports scope isn't blocked
+    await p.report("joe", 5, "I think that this content is inauthentic (bot) activity because of a test.")
     clock.now = 601
     await p.get_post(1)
     assert len(seen) == 3

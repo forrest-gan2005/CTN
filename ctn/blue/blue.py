@@ -54,6 +54,18 @@ REPORT_ATTEMPTS = 5  # a report that never got through is retried this many time
 REPORT_BACKOFF = timedelta(minutes=1)  # doubled after each failure, up to an hour
 RATE_LIMIT_PAUSE = timedelta(minutes=1)  # standing down after a bare 429 that carried no wait
 TOO_FAST, COPIED, PARAPHRASED = "superhuman posting rate", "copied across accounts", "paraphrased across accounts"
+# A report must say why, after the platform's fixed opening (a blank one is refused and still spends the budget).
+REPORT_OPENING = "I think that this content is inauthentic (bot) activity because "
+BECAUSE = {
+    "prompt injection": "it gives instructions to AI models instead of talking to people (a prompt injection)",
+    "assistant talk": "it contains AI assistant boilerplate such as \"as an AI language model\"",
+    "model markup": "it contains language-model markup tokens left in the text",
+    "template leftover": "it contains unfilled placeholders from a text template",
+    "output label": "it starts with an output label such as \"Tweet:\", left over from generated text",
+    TOO_FAST: "its account posts several times faster than the busiest person on the platform",
+    COPIED: "the same long text was posted word for word by several new accounts",
+    PARAPHRASED: "several new accounts posted reworded copies of the same text within a few hours",
+}
 SELF_CHECK_EVERY = timedelta(hours=1)
 SELF_CHECK_POSTS = 20_000  # newest citizen posts every rule is tried on
 PARAPHRASE_SAMPLE = 4_000  # of those, the long ones the reworded-copy rule is simulated on
@@ -70,6 +82,16 @@ def hard_reason(text: Optional[str], skip: Iterable[str] = ()) -> Optional[str]:
 def rule_of(reason: str) -> str:
     """The rule behind a report reason; reports on an account's other posts carry an 'account: ' prefix."""
     return reason[len("account: "):] if reason.startswith("account: ") else reason
+
+
+def report_detail(reason: str) -> str:
+    """The detail a report carries: the platform's opening, then why; another post by an account already caught
+    says so."""
+    rule = rule_of(reason)
+    why = BECAUSE.get(rule, "it shows clear signs of automated posting")
+    if rule != reason:
+        why = f"it comes from an account caught in bot activity in another post ({why})"
+    return f"{REPORT_OPENING}{why}."
 
 
 def _copy_key(text: Optional[str]) -> str:
@@ -97,6 +119,7 @@ class BlueScanner:
         self.texts = {}  # normalised text -> {author: post_id}
         self.hourly = Counter()  # (author, "YYYY-MM-DDTHH") -> posts, for accounts outside the whitelist
         self.whitelist = set()
+        self.before = set()  # the whitelist plus the organisers' scripted fleet
         self.verified = set()  # badge holders: the organisers' accounts, never a competitor's
         self.rate_limit: Optional[int] = None  # unknown until citizens have been observed
         self.checked_at: Optional[datetime] = None
@@ -114,6 +137,7 @@ class BlueScanner:
             return
         self.checked_at = now
         self.whitelist = set(self.npc_store.whitelist(self.cutoff))
+        self.before = self.npc_store.before_start(self.cutoff)
         self.verified = self.npc_store.verified()
         peak = self.npc_store.citizen_peak_hourly(now - timedelta(days=1), self.cutoff)
         self.rate_limit = max(RATE_FLOOR, RATE_FACTOR * peak) if peak else None
@@ -123,14 +147,15 @@ class BlueScanner:
         for author, (reason, _) in self.state.suspects().items():
             if reason != CLEARED and self.off_limits(author):
                 self.state.update_suspect(author, CLEARED)
-                log.info("%s turned out to be a citizen or ours (backfill); no longer a suspect", author)
+                log.info("%s turned out to be there before the start, verified or ours; no longer a suspect", author)
 
     def off_limits(self, author: str) -> bool:
-        """Ours, a citizen or a verified account: never reported. Asked of the store each time, so an account a
-        backfill has just proven a citizen, or that has just been verified, is never reported. A verified
-        account is run by the organisers (the platform won't even hide its posts on reports), so reporting it
-        could only be a wrong report."""
-        return (author in self.own or self.npc_store.is_citizen(author, self.cutoff)
+        """Ours, there before the start, or verified: never reported. Asked of the store each time, so an account a
+        backfill has just shown was there before, or that has just been verified, is never reported. No competitor
+        could register before the start, so an account there then is the organisers' (a citizen, or one of their
+        scripted fleet); a verified account is theirs too (the platform won't even hide its posts on reports).
+        Reporting either could only be a wrong report."""
+        return (author in self.own or self.npc_store.was_before_start(author, self.cutoff)
                 or self.npc_store.is_verified(author))
 
     def disable(self, rule: str, why: str) -> None:
@@ -198,7 +223,7 @@ class BlueScanner:
                 continue
             if self.recent is not None and len(content or "") >= COPY_MIN_CHARS and (created_at or "") >= since:
                 fresh.append((post_id, author, content))
-            if author in self.whitelist or author in self.verified:
+            if author in self.before or author in self.verified:
                 continue
             flagged = {}
             reason = hard_reason(content, self.disabled)
@@ -330,7 +355,7 @@ class Reporter:
             # Stored first: if the process stops mid-request, the next start marks the report unknown, never resends it.
             self.state.begin_report(post_id, author, reason, _now())
             try:
-                upheld = await self.platform.report(self.username, post_id)
+                upheld = await self.platform.report(self.username, post_id, report_detail(reason))
             except asyncio.CancelledError:
                 self.state.record_report(post_id, author, reason, _now(), "unknown")
                 raise
@@ -361,7 +386,8 @@ class Reporter:
                 attempts = self.state.report_attempts(post_id) + 1
                 if code is not None and 400 <= code < 500 or attempts >= REPORT_ATTEMPTS:
                     self.state.record_report(post_id, author, reason, _now(), "failed")  # refused, or never got through
-                    log.warning("report on #%s failed for good (%s)", post_id, str(e) or type(e).__name__)
+                    said = getattr(getattr(e, "response", None), "text", "")[:200]  # a 400 says what it wanted
+                    log.warning("report on #%s failed for good (%s) %s", post_id, str(e) or type(e).__name__, said)
                 else:
                     retry = datetime.now(timezone.utc) + min(REPORT_BACKOFF * 2 ** (attempts - 1), timedelta(hours=1))
                     self.state.record_report(post_id, author, reason, _now(), "error",
@@ -521,6 +547,7 @@ async def _demo() -> None:
     assert await reporter.report_some() == 0 and reporter.blocked()
     await _self_check_demo(embedder)
     await _backfill_demo()
+    _fleet_demo()
     await _report_retry_demo()
     await _report_429_demo()
     await _badge_and_lock_demo()
@@ -584,7 +611,7 @@ async def _badge_and_lock_demo() -> None:
                 await self.checked.wait()
             return False
 
-        async def report(self, username: str, post_id: int) -> None:
+        async def report(self, username: str, post_id: int, detail: str) -> None:
             self.sent.append(post_id)
             if len(self.sent) == 1:  # the first of the round waits
                 self.held.set()
@@ -691,10 +718,10 @@ async def _report_retry_demo() -> None:
     class Flaky(FakePlatform):
         script = {}  # post_id -> exceptions to raise, in order, before reporting works
 
-        async def report(self, username: str, post_id: int) -> bool:
+        async def report(self, username: str, post_id: int, detail: str) -> bool:
             if self.script.get(post_id):
                 raise self.script[post_id].pop(0)
-            return await super().report(username, post_id)
+            return await super().report(username, post_id, detail)
 
     p = Flaky(competitors={"rival"})
     npc_store = NpcStore(":memory:")
@@ -731,7 +758,7 @@ async def _report_interrupt_demo() -> None:
             super().__init__(**kwargs)
             self.started, self.calls = asyncio.Event(), []
 
-        async def report(self, username: str, post_id: int) -> bool:
+        async def report(self, username: str, post_id: int, detail: str) -> bool:
             self.calls.append(post_id)
             self.started.set()
             await asyncio.Event().wait()  # the answer never comes
@@ -769,6 +796,31 @@ async def _report_interrupt_demo() -> None:
     assert state.recover() == (0, 2)
     assert [status(i) for i in (901, 902, 903)] == ["unknown", "unknown", "upheld"]
     assert {901, 902, 903} <= state.reported() and state.recover() == (0, 0)
+
+
+def _fleet_demo() -> None:
+    """The organisers' scripted accounts from before the start are no citizens, yet never reported (a report could
+    only be wrong); new accounts posting their template still are, and each report says why."""
+    from ctn.infra.collector import NpcStore
+    from ctn.infra.state import StateStore
+
+    store = NpcStore(":memory:")
+    start = datetime.now(timezone.utc)
+    template = "Good post. It reminds me how important it is to vote yes on the referendum."
+    before, after = (start - timedelta(days=2)).isoformat(), (start + timedelta(minutes=5)).isoformat()
+    store.add_posts([{"id": 1 + i, "author": f"fleet_{i}", "content": template, "created_at": before} for i in range(3)]
+                    + [{"id": 10 + i, "author": f"fleet_{i}", "content": template, "created_at": after} for i in range(3)]
+                    + [{"id": 20 + i, "author": f"rival_{i}", "content": template, "created_at": after} for i in range(3)])
+    scanner = BlueScanner(store, StateStore(":memory:"), own=(), cutoff=start)
+    scanner.scan()
+    assert {f"fleet_{i}" for i in range(3)} <= store.fleet() and not store.is_citizen("fleet_0", start)
+    assert scanner.off_limits("fleet_0") and not scanner.off_limits("rival_0")
+    assert {a for _, a, _ in scanner.candidates()} == {"rival_0", "rival_1", "rival_2"}
+    assert report_detail(COPIED) == ("I think that this content is inauthentic (bot) activity because the same long "
+                                     "text was posted word for word by several new accounts.")
+    assert report_detail(f"account: {TOO_FAST}").startswith(f"{REPORT_OPENING}it comes from an account caught")
+    assert all(report_detail(rule).startswith(REPORT_OPENING) and rule in BECAUSE
+               for rule in [name for name, _ in RULES] + [TOO_FAST, COPIED, PARAPHRASED])
 
 
 async def _backfill_demo() -> None:
@@ -858,6 +910,8 @@ async def _self_check_demo(embedder) -> None:
     await p.post("citizen_0", "Sure! Here's a tweet about the regatta: best week of the year")  # assistant-like
     for who in ("citizen_1", "citizen_2", "citizen_3"):
         await p.post(who, headline)  # citizens copying a headline word for word
+        # most of what they post is their own, or the collector would take them for a scripted fleet
+        await p.post(who, f"{who} here, long queue at the wharf this morning but the coffee was worth it")
     retold = ["Kingstonia City council says the night markets move to the waterfront from next month.",
               "From next month the Kingstonia City night markets are moving down to the waterfront, says council.",
               "Council just announced the night markets in Kingstonia City are moving to the waterfront next month."]
