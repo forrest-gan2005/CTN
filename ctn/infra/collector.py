@@ -334,6 +334,9 @@ class NpcStore:
 
 
 BACKFILL_PAGES = 3  # history pages per round, after each fresh look at Latest
+# The feeds allow a team 10 reads a minute between them (SDK 0.5.0), the collector being the only reader: one
+# every 7 s leaves room for probes and a backfill page.
+FEED_INTERVAL = 7.0
 
 
 class Collector:
@@ -342,7 +345,7 @@ class Collector:
         platform,
         store: NpcStore,
         page_size: int = 50,
-        min_interval: float = 5.0,
+        min_interval: float = FEED_INTERVAL,
         max_interval: float = 120.0,
     ) -> None:
         self.platform = platform

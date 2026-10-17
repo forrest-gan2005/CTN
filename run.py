@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 from ctn import paths
 from ctn.blue.blue import MIN_CITIZENS, BlueScanner, Reporter
 from ctn.infra import backup
-from ctn.infra.collector import COMPETITION_START, Collector, NpcStore
+from ctn.infra.collector import COMPETITION_START, FEED_INTERVAL, Collector, NpcStore
 from ctn.infra.fake_platform import AmbiguousWrite, FakePlatform, RateLimited
 from ctn.infra.health import Health
 from ctn.infra.llm import FakeLLM, game_day_start, ledger, load_env, team_llms
@@ -57,7 +57,7 @@ class Team:
     """Everything that runs during the competition, sharing one collector and one team memory."""
 
     def __init__(self, platform, llm, stance_llm, npc_store: NpcStore, state: StateStore,
-                 cutoff: datetime = COMPETITION_START, fast: bool = False, collector_interval: float = 5.0,
+                 cutoff: datetime = COMPETITION_START, fast: bool = False, collector_interval: float = FEED_INTERVAL,
                  blue_interval: float = 10.0, embedder=None, injection=None, personas: Optional[list] = None,
                  not_before: Optional[datetime] = None, stagger: timedelta = timedelta(0),
                  min_citizens: int = MIN_CITIZENS, backup_dir: Optional[Path] = None,
