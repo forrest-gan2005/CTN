@@ -246,15 +246,15 @@ class BlueScanner:
 
     def _flag(self, flagged: dict) -> int:
         found = 0
-        for who, (why, pid) in flagged.items():
-            if why not in self.disabled and self.state.add_suspect(who, why, pid, _now()):
+        for who, (why, pid) in flagged.items():  # off limits by now if a backfill has shown more since
+            if why not in self.disabled and not self.off_limits(who) and self.state.add_suspect(who, why, pid, _now()):
                 found += 1
                 log.info("competitor account %s (%s, post #%s)", who, why, pid)
         return found
 
     def _paraphrased(self, posts: list) -> dict:
-        """Accounts whose post says what posts from at least two other accounts outside the whitelist say,
-        reworded, while no citizen says it: citizens saying it too means shared news, not a shared script.
+        """Accounts whose post says what posts from at least two other new accounts say, reworded, while nobody there
+        before the start says it: citizens saying it too means shared news, not a shared script.
 
         Each account is judged on its own post, so one borderline post can't drag a whole group in.
         """
@@ -263,13 +263,14 @@ class BlueScanner:
             vectors = self.embedder.encode([content for _, _, content in posts])
             for (post_id, author, _), vector in zip(posts, vectors):
                 self.recent.add((author, post_id), "", vector)
-                if author not in self.whitelist:
+                if author not in self.before and author not in self.verified:
                     self.waiting.append((now, post_id, author, vector))
         flagged = {}
         while self.waiting and now - self.waiting[0][0] >= self.paraphrase_delay:
             _, post_id, author, vector = self.waiting.popleft()
             others = {who for (who, _), _ in self.recent.near(vector, PARAPHRASE)} - {author}
-            if len(others) + 1 >= COPY_MIN_ACCOUNTS and not others & self.whitelist:
+            # anyone there before the start saying it too means shared news or the organisers' script, not a rival's
+            if len(others) + 1 >= COPY_MIN_ACCOUNTS and not others & (self.before | self.verified):
                 flagged.setdefault(author, (PARAPHRASED, post_id))
         return flagged
 
@@ -352,6 +353,8 @@ class Reporter:
                 continue
             if self.locked:  # locked during that check; nothing may await between here and the request
                 break
+            if self.scanner.off_limits(author):  # while the badge was asked about, a backfill may have shown more
+                continue
             # Stored first: if the process stops mid-request, the next start marks the report unknown, never resends it.
             self.state.begin_report(post_id, author, reason, _now())
             try:
@@ -548,6 +551,7 @@ async def _demo() -> None:
     await _self_check_demo(embedder)
     await _backfill_demo()
     _fleet_demo()
+    await _late_proof_demo()
     await _report_retry_demo()
     await _report_429_demo()
     await _badge_and_lock_demo()
@@ -809,7 +813,8 @@ def _fleet_demo() -> None:
     template = "Good post. It reminds me how important it is to vote yes on the referendum."
     before, after = (start - timedelta(days=2)).isoformat(), (start + timedelta(minutes=5)).isoformat()
     store.add_posts([{"id": 1 + i, "author": f"fleet_{i}", "content": template, "created_at": before} for i in range(3)]
-                    + [{"id": 10 + i, "author": f"fleet_{i}", "content": template, "created_at": after} for i in range(3)]
+                    + [{"id": 10 + i, "author": f"fleet_{i}", "content": template, "created_at": after}
+                       for i in range(3)]
                     + [{"id": 20 + i, "author": f"rival_{i}", "content": template, "created_at": after} for i in range(3)])
     scanner = BlueScanner(store, StateStore(":memory:"), own=(), cutoff=start)
     scanner.scan()
@@ -821,6 +826,54 @@ def _fleet_demo() -> None:
     assert report_detail(f"account: {TOO_FAST}").startswith(f"{REPORT_OPENING}it comes from an account caught")
     assert all(report_detail(rule).startswith(REPORT_OPENING) and rule in BECAUSE
                for rule in [name for name, _ in RULES] + [TOO_FAST, COPIED, PARAPHRASED])
+
+    import numpy as np
+
+    class TwoScripts:  # stands in for the sentence model: every post of one script points the same way
+        def encode(self, texts: list) -> np.ndarray:
+            return np.array([[1.0, 0.0] if "referendum" in t else [0.0, 1.0] for t in texts], np.float32)
+
+    store = NpcStore(":memory:")
+    spun = [f"Kingstonia's future depends on every single voter turning out this November, {w}."
+            for w in ("friends", "neighbours", "everyone")]
+    store.add_posts([{"id": 1 + i, "author": f"fleet_{i}", "content": template, "created_at": before} for i in range(3)]
+                    + [{"id": 10 + i, "author": f"fleet_{i}", "content": template, "created_at": after}
+                       for i in range(3)]
+                    + [{"id": 20 + i, "author": f"rival_{i}", "content": spun[i], "created_at": after}
+                       for i in range(3)]
+                    + [{"id": 30, "author": "late_x", "content": template + " Truly.", "created_at": after}])
+    state = StateStore(":memory:")
+    scanner = BlueScanner(store, state, own=(), cutoff=start, embedder=TwoScripts(), paraphrase_delay=timedelta(0))
+    scanner.scan()
+    suspects = state.suspects()
+    assert {a for a in suspects} == {"rival_0", "rival_1", "rival_2"}, suspects  # not the fleet, nor its echo
+    assert {v[0] for v in suspects.values()} == {PARAPHRASED}
+
+
+async def _late_proof_demo() -> None:
+    """A backfill that shows an account was there before the start, landing while its badge is asked about, still
+    calls the report off, and leaves no record of one."""
+    from ctn.infra.collector import NpcStore
+    from ctn.infra.fake_platform import FakePlatform
+    from ctn.infra.state import StateStore
+
+    store, state = NpcStore(":memory:"), StateStore(":memory:")
+    start = datetime.now(timezone.utc)
+    early = (start - timedelta(days=2)).isoformat()
+
+    class Backfilling(FakePlatform):
+        async def verified_now(self, author: str) -> bool:
+            store.add_posts([{"id": 500, "author": author, "content": "ferry's late again", "created_at": early}])
+            await asyncio.sleep(0)
+            return False
+
+    p = Backfilling(competitors={"late_0"})
+    post = await p.post("late_0", "Sure! Here's a tweet about the referendum: vote yes")
+    store.add_posts([{**post, "created_at": (start + timedelta(minutes=5)).isoformat()}])
+    scanner = BlueScanner(store, state, own=(), cutoff=start)
+    assert scanner.scan() == 1 and [a for _, a, _ in scanner.candidates()] == ["late_0"]
+    assert await Reporter(p, scanner, state, username="joe", min_citizens=0).report_some() == 0
+    assert p.reports == {} and state.report_counts() == {} and scanner.off_limits("late_0")
 
 
 async def _backfill_demo() -> None:
