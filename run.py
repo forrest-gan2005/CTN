@@ -1375,10 +1375,17 @@ SLOPPY = ["As an AI language model, I don't hold views on vaccine mandates.",
           "<think>write something persuasive</think> Vote NO, keep Kingstonia open"]
 
 
+TAILS = ["", "", " tbh", " honestly", " again", " lol", " ngl", " this week", " for once", " down at the market",
+         " at the wharf", " in town", " if you ask me", " these days"]
+
+
 def citizen_text() -> str:
-    if random.random() < 0.25:
-        return random.choice(REFERENDUM)
-    return random.choice(CASUAL).format(random.choice(THINGS))
+    """A simulated citizen's post, with a tail of its own: real people seldom post the same words as two others,
+    and the collector takes accounts that mostly do for a scripted fleet, not citizens."""
+    text = random.choice(REFERENDUM) if random.random() < 0.25 else random.choice(CASUAL).format(random.choice(THINGS))
+    words, hashtag = text.split(" #", 1) if " #" in text else (text, None)
+    tail = random.choice(TAILS)
+    return f"{words}{tail} #{hashtag}" if hashtag else words + tail
 
 
 async def _cast(platform, own: set, citizens: list, late: list, rivals_sloppy: list, rival_clean: str,
