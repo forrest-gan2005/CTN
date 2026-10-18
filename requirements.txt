@@ -7,3 +7,4 @@ joblib==1.5.3
 torch==2.8.0
 transformers==4.57.6
 sentence-transformers==5.1.2
+tzdata==2025.3  # Windows has no time zone database of its own; zoneinfo reads Sydney's from here
