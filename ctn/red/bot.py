@@ -932,6 +932,11 @@ async def gif_check() -> None:
         writer = Says(ferry + "\nGIF: eye roll")
         action = await bot_for(writer, None)._compose("post", ("daily", "the ferry"))
         assert action.content == ferry and GIF_PROMPT not in writer.prompts[0], action.content
+        # ordinary words about GIFs are never cut short into a post; unasked, the draft just goes
+        for words in ("I love GIF-making after work.", "That GIF-worthy ferry entrance made my day.",
+                      "I meant the GIF - not the policy."):
+            b = bot_for(Says(words), None)
+            assert await b._compose("post", ("daily", "after work")) is None and b.rejected == {"gif leftover": 1}
         # GIF talk the parse can't take off reads as leftovers: the draft goes
         b = bot_for(Says("Found the perfect gif for this ferry mess lol"), GifPool(embeds))
         assert await b._compose("post", ("daily", "the ferry")) is None and b.rejected == {"gif leftover": 1}

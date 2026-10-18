@@ -220,6 +220,15 @@ class StateStore:
             "AND content IS NOT NULL UNION ALL SELECT username, content FROM writes WHERE sent_at >= ? "
             "AND username != ? AND status IN ('sending', 'pending')", (since, exclude, since, exclude)).fetchall()
 
+    def gif_texts(self, since: str) -> list:
+        """(UTC ISO time, text) of our posts and replies since `since` with a GIF link, counting writes being sent
+        or that may be live; a write known never to have gone out doesn't."""
+        gif = "(content LIKE '%giphy%' OR content LIKE '%gph.is%')"
+        return self.db.execute(
+            f"SELECT ts, content FROM history WHERE type IN ('post', 'reply') AND ts >= ? AND {gif} "
+            f"UNION ALL SELECT sent_at, content FROM writes WHERE sent_at >= ? AND status != 'not_sent' AND {gif}",
+            (since, since)).fetchall()
+
     def replies_to(self, author: str, since: str) -> int:
         """How many replies the whole team has sent `author` since UTC ISO time `since`."""
         return self.db.execute(

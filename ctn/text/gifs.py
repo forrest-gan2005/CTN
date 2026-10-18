@@ -6,6 +6,7 @@ import logging
 import random
 import re
 import time
+from datetime import datetime
 from typing import Iterable, Optional
 
 log = logging.getLogger("gifs")
@@ -17,8 +18,9 @@ REUSE_AFTER = 24 * 3600.0  # seconds before our team posts the same GIF again
 GIF_PROMPT = ('Then add one more line: "GIF: " and the two or three words you would type into a GIF search for a '
               'reaction that fits your post (for example "GIF: thumbs up" or "GIF: tired cat"), or "GIF: none" if a '
               "GIF would feel out of place.")
-# The writer's GIF line, wherever the model put it: its own last line, or tacked onto the end of the text.
-GIF_LINE_RE = re.compile(r"(?:^|\s)[\s\[(*]*gif(?:\s+search)?\s*\**\s*[:\-\u2013]\s*\**\s*([^\n]{0,40}?)"
+# The writer's GIF line: "GIF:" with a colon, opening a line or following the end of a sentence, and running to
+# the end of the text. Anything looser would cut ordinary words ("GIF-making"); those drafts go as leftovers.
+GIF_LINE_RE = re.compile(r"(?:^|\n|(?<=[.!?\u2026)])[ \t]+)[\s\[(*]*gif(?:\s+search)?\s*\**\s*:\s*\**\s*([^\n]{0,40}?)"
                          r"[\s\"'\u201d\])*.!]*$", re.IGNORECASE)
 NONE = {"", "none", "no", "n/a", "na", "nothing", "no gif", "skip"}
 GIF_WORD_RE = re.compile(r"\bgifs?\b", re.IGNORECASE)  # anything about GIFs left in the text gives the game away
@@ -62,6 +64,16 @@ class GifPool:
             tags = {str(t).lower().strip() for t in e.get("tags") or [] if str(t).strip()}
             title = re.sub(r"\s+GIF(\s+by\s+.*)?$", "", e.get("title") or "", flags=re.IGNORECASE)
             self.gifs[url] = (tags, _words(" ".join(tags) + " " + title))
+
+    def remember(self, rows: Iterable[tuple]) -> None:
+        """Take in (UTC ISO time, text) of our posts, so a restart still keeps the GIFs used lately apart."""
+        for ts, text in rows:
+            try:
+                when = datetime.fromisoformat(ts).timestamp()
+            except (TypeError, ValueError):
+                continue
+            for url in GIPHY_URL_RE.findall(text or ""):
+                self.used[url] = max(self.used.get(url, when), when)
 
     def ready(self) -> bool:
         return self.off is None and bool(self.gifs)
@@ -115,6 +127,12 @@ def _demo() -> None:
         ("Ferry late again.\nGIF:", "Ferry late again.", None),
         ("Ferry late again.", "Ferry late again.", None),
         ("Gift shop's closed again", "Gift shop's closed again", None),
+        ("Good game though, ref bought a round. GIF: shrug", "Good game though, ref bought a round.", "shrug"),
+        # words, not a GIF line: left whole, for the leftover check to drop the draft
+        ("I love GIF-making after work.", "I love GIF-making after work.", None),
+        ("That GIF-worthy ferry entrance made my day.", "That GIF-worthy ferry entrance made my day.", None),
+        ("I meant the GIF - not the policy.", "I meant the GIF - not the policy.", None),
+        ("Saw a great gif: the cat one", "Saw a great gif: the cat one", None),
     ]
     for text, left, query in cases:
         assert split_gif(text) == (left, query), (text, split_gif(text))
@@ -140,6 +158,10 @@ def _demo() -> None:
     pool.disable("the platform refused a post with a GIF")
     assert pool.pick("facepalm", now=0.0) is None and not pool.ready()
     assert without_gifs("so true https://giphy.com/gifs/9Ai5dIk8xvBm0") == "so true"
+    again = GifPool([{"kind": "giphy", "url": "https://giphy.com/gifs/a1", "tags": ["ok"]}])
+    again.remember([("2026-10-20T00:00:00+00:00", "fine https://giphy.com/gifs/a1"), (None, "x"), ("bad", "y")])
+    noon = datetime.fromisoformat("2026-10-20T12:00:00+00:00").timestamp()
+    assert again.pick("ok", now=noon) is None and again.pick("ok", now=noon + REUSE_AFTER) is not None
     assert embeds_from_raw(['{"embed": {"kind": "giphy"}}', "{}", "not json"]) == [{"kind": "giphy"}]
     print("gifs ok")
 

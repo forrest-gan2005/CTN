@@ -24,7 +24,7 @@ from ctn.red.bot import Bot, Roster
 from ctn.red.rhythm import Rhythm, UniformPacer, npc_curve
 from ctn.text.content import load_personas, load_world
 from ctn.text.examples import NpcExamples
-from ctn.text.gifs import GifPool, without_gifs
+from ctn.text.gifs import REUSE_AFTER, GifPool, without_gifs
 from ctn.text.injection import load_injection_classifier
 from ctn.text.semantic import NearIndex, load_embedder
 
@@ -97,6 +97,9 @@ class Team:
                          injection=injection)
                      for p in personas]
         self.gifs = GifPool() if gifs else None  # one pool, so the whole team spaces out reusing a GIF
+        if self.gifs is not None:  # and across restarts, from what the team has posted or may have
+            since = datetime.now(timezone.utc) - timedelta(seconds=REUSE_AFTER)
+            self.gifs.remember(state.gif_texts(since.isoformat(timespec="seconds")))
         for bot in self.bots:
             bot.gifs = self.gifs
         self.pacers = {b.username: UniformPacer(1.0, 4.0) if fast else Rhythm(b.username, npc_curve([]))
@@ -487,6 +490,33 @@ def opening(text: str) -> datetime:
         raise argparse.ArgumentTypeError(f"not before {COMPETITION_START:%H:%M}: accounts seen before then are "
                                          "taken for citizens")
     return when
+
+
+def gif_restart_check() -> None:
+    """A GIF the team posted, or may have, stays unused after a restart until a day has passed; one that was never
+    sent doesn't count."""
+    import tempfile
+
+    sent, pending, refused, old = (f"https://giphy.com/gifs/{k}" for k in ("sent1", "pend2", "refu3", "old4"))
+    embeds = [{"kind": "giphy", "url": u, "tags": ["wave"]} for u in (sent, pending, refused, old)]
+    now = datetime.now(timezone.utc)
+    with tempfile.TemporaryDirectory() as tmp:
+        state = StateStore(f"{tmp}/bots.db")
+        stamp = now.isoformat(timespec="seconds")
+        state.end_write(state.begin_write("a", "post", None, f"hi {sent}", stamp), "sent", 7)
+        state.begin_write("b", "post", None, f"hey {pending}", stamp)  # the process died mid-request
+        state.end_write(state.begin_write("c", "post", None, f"yo {refused}", stamp), "not_sent")
+        long_ago = (now - timedelta(seconds=REUSE_AFTER + 60)).isoformat(timespec="seconds")
+        state.end_write(state.begin_write("d", "post", None, f"oi {old}", long_ago), "sent", 8)
+        state.db.close()
+        team = Team(FakePlatform(), FakeLLM(0, 0), None, NpcStore(":memory:"), StateStore(f"{tmp}/bots.db"),
+                    personas=load_personas()[:1])
+        team.gifs.update(embeds)
+        picks = {team.gifs.pick("wave") for _ in range(4)} - {None}
+        assert picks == {refused, old}, picks
+        assert Team(FakePlatform(), FakeLLM(0, 0), None, NpcStore(":memory:"), StateStore(":memory:"),
+                    personas=load_personas()[:1], gifs=False).bots[0].gifs is None
+    print("gif restart ok")
 
 
 def schedule_check() -> None:
@@ -1528,6 +1558,7 @@ if __name__ == "__main__":
     elif args.cmd == "smoke":
         log_file_check()
         schedule_check()
+        gif_restart_check()
         asyncio.run(unresolved_check())
         asyncio.run(interrupted_check())
         asyncio.run(restore_check())
