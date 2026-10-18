@@ -24,6 +24,7 @@ from ctn.red.bot import Bot, Roster
 from ctn.red.rhythm import Rhythm, UniformPacer, npc_curve
 from ctn.text.content import load_personas, load_world
 from ctn.text.examples import NpcExamples
+from ctn.text.gifs import GifPool, without_gifs
 from ctn.text.injection import load_injection_classifier
 from ctn.text.semantic import NearIndex, load_embedder
 
@@ -62,7 +63,7 @@ class Team:
                  blue_interval: float = 10.0, embedder=None, injection=None, personas: Optional[list] = None,
                  not_before: Optional[datetime] = None, stagger: timedelta = timedelta(0),
                  min_citizens: int = MIN_CITIZENS, backup_dir: Optional[Path] = None,
-                 backup_every: float = BACKUP_EVERY, news: Optional[News] = None) -> None:
+                 backup_every: float = BACKUP_EVERY, news: Optional[News] = None, gifs: bool = True) -> None:
         personas = personas if personas is not None else load_personas()
         # Every persona we own, reserves and those not running included, so none is ever taken for a rival.
         self.own = {p["username"] for p in load_personas(status=None)} | {p["username"] for p in personas}
@@ -86,7 +87,7 @@ class Team:
         if embedder is not None:
             self.twins = NearIndex(embedder, TEAM_RECENT)
             ours = state.our_posts()[-TEAM_RECENT:]
-            for (username, _, _), vector in zip(ours, embedder.encode([c for _, c, _ in ours])):
+            for (username, _, _), vector in zip(ours, embedder.encode([without_gifs(c) for _, c, _ in ours])):
                 self.twins.add(username, "", vector)
         self.collector = Collector(platform, npc_store, min_interval=collector_interval)
         self.roster = Roster(own=self.own)
@@ -95,6 +96,9 @@ class Team:
                          feed=self.feed, profile=lambda author: npc_store.recent_by(author, 5), twins=self.twins,
                          injection=injection)
                      for p in personas]
+        self.gifs = GifPool() if gifs else None  # one pool, so the whole team spaces out reusing a GIF
+        for bot in self.bots:
+            bot.gifs = self.gifs
         self.pacers = {b.username: UniformPacer(1.0, 4.0) if fast else Rhythm(b.username, npc_curve([]))
                        for b in self.bots}
         self.scanner = BlueScanner(npc_store, state, self.own, cutoff, embedder=embedder)
@@ -123,6 +127,8 @@ class Team:
                                 for author, content, _, parent in rows[-EXAMPLE_POSTS:]), self.embedder)
         curve = npc_curve([ts for _, _, ts, _ in rows])
         hashtags = self.npc_store.top_hashtags(datetime.now(timezone.utc) - HASHTAG_WINDOW, cutoff=self.cutoff)
+        if self.gifs is not None:
+            self.gifs.update(self.npc_store.gif_embeds())
         for bot in self.bots:
             bot.examples = examples
             bot.hashtags = hashtags
@@ -130,8 +136,9 @@ class Team:
         for pacer in self.pacers.values():
             if isinstance(pacer, Rhythm):
                 pacer.curve = curve
-        log.info("refreshed: %d citizens, %d example posts (%s), hashtags %s",
-                 len(self.roster.npcs), len(examples.posts), examples.mode or "too few", hashtags)
+        log.info("refreshed: %d citizens, %d example posts (%s), hashtags %s, GIFs %s",
+                 len(self.roster.npcs), len(examples.posts), examples.mode or "too few", hashtags,
+                 "off" if self.gifs is None else self.gifs.off or len(self.gifs.gifs))
 
     def reconcile(self) -> None:
         """Settle posts and replies that may or may not have been published, from what the collector saw since:
@@ -153,7 +160,7 @@ class Team:
             if post_id not in known and (author, content) not in in_flight:
                 self.state.adopt(author, created_at or now.isoformat(timespec="seconds"), parent_id, content, post_id)
                 if self.twins is not None and content:
-                    self.twins.add(author, content)
+                    self.twins.add(author, without_gifs(content))
                 log.warning("%s's #%s was missing from history (restored from a backup?); taken in", author, post_id)
         self._sync_ours()
 
@@ -434,7 +441,7 @@ async def live(limit: Optional[int], stagger_hours: float, opens: datetime = GAM
     team = Team(platform, llm, judge, NpcStore(DATA / "npc.db", own_usernames=own), StateStore(DATA / "bots.db"),
                 embedder=load_embedder(), injection=load_injection_classifier(), personas=personas,
                 not_before=opens, stagger=timedelta(hours=stagger_hours), backup_dir=backup.BACKUPS,
-                news=News(NewsStore()))
+                news=News(NewsStore()), gifs=os.environ.get("GIFS", "on").lower() not in ("0", "off", "no", "false"))
     log.info("live: %d accounts, online from %s staggered over %gh, writer %s, judge %s", len(personas),
              f"{opens:%a %d %b %H:%M %Z}", stagger_hours, llm.name, judge.name)
     loop = asyncio.get_running_loop()

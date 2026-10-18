@@ -13,6 +13,7 @@ from ctn.infra.llm import FakeLLM, team_llms
 from ctn.infra.state import StateStore
 from ctn.red.rhythm import UniformPacer
 from ctn.text.content import load_personas, load_vaccine_angles, load_world, without_arguments
+from ctn.text.gifs import GIF_PROMPT, GIF_SHARE, GIF_WORD_RE, GIPHY_URL_RE, GifPool, split_gif, without_gifs
 from ctn.text.guard import (EMOJI_RE, about_referendum, copies, fresh_phrases, judge_stance, leans_no,
                             looks_like_probe, output_problem, phrases, plain, wrap_external)
 from ctn.text.semantic import TWIN
@@ -20,6 +21,7 @@ from ctn.text.semantic import TWIN
 log = logging.getLogger("bot")
 
 MAX_LEN = 280
+POST_LIMIT = 500  # the platform's, with a GIF link added after the text
 SIMILARITY_LIMIT = 0.6  # copies of examples measured 0.73+, genuinely different posts 0.28-0.54
 REFERENDUM_DAY = date(2026, 11, 2)
 POLL_DAYS = (date(2026, 10, 21), date(2026, 10, 25), date(2026, 10, 29), REFERENDUM_DAY)
@@ -204,6 +206,7 @@ class Bot:
         self.quiet = False  # set by the team's health check once two of this account's posts were taken down
         self.locked = False  # set by the team while the platform's feed is locked: nothing would go through
         self.news = ""  # what the local papers have published lately, set by the team
+        self.gifs: Optional[GifPool] = None  # the team's GIFs; None, or switched off, posts none
         self.rejected = {}
         self.unsafe = set()  # posts judged to argue NO, never to be amplified
         self.seen = self.store.load_seen(self.username)
@@ -322,11 +325,17 @@ class Bot:
                     and target["author"] not in NEWS_OUTLETS):
                 about = [t for t in self.profile(target["author"]) if t != target.get("content")][:3]
         sign = self._pick_sign_off(kind)
+        gif = self.gifs is not None and self.gifs.ready() and random.random() < GIF_SHARE.get(kind, 0.0)
         raw = await self.llm.generate(system, self._user_prompt(kind, target, topic, earlier, about, sign=sign,
-                                                                referendum=referendum))
+                                                                referendum=referendum, gif=gif))
         model = getattr(raw, "model", None) or getattr(self.llm, "name", None)  # a fallback model may have written it
-        content = self._clean(raw)
+        text, query = split_gif(raw)  # a GIF line goes even when none was asked for
+        content = self._clean(text)
         if content is None:
+            return None
+        if GIF_WORD_RE.search(content):  # a GIF line the parse missed reads as a bot's leftovers
+            self.rejected["gif leftover"] = self.rejected.get("gif leftover", 0) + 1
+            log.warning("%s rejected gif leftover: %r", self.username, content)
             return None
         # Sign-offs are the code's to hand out: one the model adds unasked, often copied from a recent post, goes.
         content = strip_sign_off(content, [s for s in self._sign_offs() if s != sign])
@@ -340,6 +349,10 @@ class Bot:
             source = f" (replying to #{target['id']} by {target['author']})" if target else ""
             log.warning("%s rejected %s%s: %r", self.username, problem, source, content)
             return None
+        # Added after every check, which would take the link for one the model made up.
+        link = self.gifs.pick(query) if gif and query and self.gifs is not None else None
+        if link and len(content) + 1 + len(link) <= POST_LIMIT:
+            content = f"{content} {link}"
 
         if kind == "reply":
             return Action("reply", post_id=target["id"], content=content, line=self.line, topic_kind=topic[0],
@@ -510,11 +523,12 @@ class Bot:
         return random.choice(signoffs) if kind == "post" and signoffs and random.random() < SIGN_OFF_PROB else None
 
     def _user_prompt(self, kind: str, target: Optional[dict], topic: tuple, earlier: Optional[str] = None,
-                     about: Optional[list] = None, sign=PICK, referendum: Optional[bool] = None) -> str:
+                     about: Optional[list] = None, sign=PICK, referendum: Optional[bool] = None,
+                     gif: bool = False) -> str:
         """`earlier` is our own post that `target` replies to; `about` is what the author posted lately; `sign`
         the sign-off this post may end with; `referendum` whether a reply takes up the referendum (by default,
         whether the post names it)."""
-        recent = [a.content for _, a in self.history if a.content][-5:]
+        recent = [without_gifs(a.content) for _, a in self.history if a.content][-5:]  # links aren't for copying
         parts = []
 
         if kind == "reply" and target["author"] in NEWS_OUTLETS:
@@ -594,6 +608,8 @@ class Bot:
                 else:
                     parts.append("No emoji in this one.")
 
+        if gif:
+            parts.append(GIF_PROMPT)
         return "\n\n".join(parts)
 
     def _clean(self, text: Optional[str]) -> Optional[str]:
@@ -688,7 +704,7 @@ class Bot:
         self.history.append((ts, action))
         self.store.record(self.username, ts, action)
         if self.twins is not None and action.content:
-            self.twins.add(self.username, action.content)
+            self.twins.add(self.username, without_gifs(action.content))
 
     async def step(self) -> Optional[Action]:
         if self.locked:  # no reading, no writing, no LLM calls for posts that can't go out
@@ -721,6 +737,9 @@ class Bot:
             self._maybe_live(action, write, str(e))
             return action
         except BaseException as e:  # including cancellation mid-request
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if self.gifs is not None and status in (400, 422) and GIPHY_URL_RE.search(action.content or ""):
+                self.gifs.disable(f"the platform refused {self.username}'s post with a GIF (HTTP {status})")
             if write is not None:
                 if _never_sent(e):
                     self.store.end_write(write, "not_sent", error=_describe(e))
@@ -863,6 +882,78 @@ async def arguments_check() -> None:
         assert (heading in writer.system) == wanted, (kind, topic)
         assert "# Who you are" in writer.system and "Kingstonia" in writer.system
     print("arguments ok")
+
+
+async def gif_check() -> None:
+    """A GIF goes on only when the writer was asked, named a search that matches, and every check has passed; the
+    writer's GIF line never reaches the post; GIFs stop team-wide once the platform refuses one."""
+    import httpx
+
+    class Says:
+        name = "says"
+
+        def __init__(self, text: str) -> None:
+            self.text, self.prompts = text, []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            return self.text
+
+    class Refuses(FakePlatform):
+        async def post(self, username: str, content: str, parent_id: Optional[int] = None) -> dict:
+            request = httpx.Request("POST", "https://social.example/api/posts")
+            raise httpx.HTTPStatusError("bad embed", request=request, response=httpx.Response(400, request=request))
+
+    persona = next(p for p in load_personas() if p["line"] == "background")
+    url = "https://giphy.com/gifs/eUrE2DuMKOE0g"
+    embeds = [{"kind": "giphy", "url": url, "title": "Eye Roll GIF", "tags": ["eye roll", "whatever"]}]
+    ferry = "Ferry late again, third time this week. Love that for us."
+    saved = dict(GIF_SHARE)
+
+    def bot_for(writer, pool, platform=None) -> Bot:
+        b = Bot(persona, platform or FakePlatform(), writer, load_world(), roster=Roster(own={persona["username"]}),
+                store=StateStore(":memory:"))
+        b.gifs = pool
+        return b
+
+    try:
+        GIF_SHARE.update(post=1.0, reply=1.0)
+        writer = Says(ferry + "\nGIF: eye roll")
+        action = await bot_for(writer, GifPool(embeds))._compose("post", ("daily", "the ferry"))
+        assert action.content == f"{ferry} {url}" and GIF_PROMPT in writer.prompts[0], action.content
+        # asked, but nothing fits: no GIF, and the line is gone
+        writer = Says(ferry + "\nGIF: confetti")
+        action = await bot_for(writer, GifPool(embeds))._compose("post", ("daily", "the ferry"))
+        assert action.content == ferry, action.content
+        # not asked (no pool): no GIF prompt, and a GIF line the model adds anyway is dropped
+        writer = Says(ferry + "\nGIF: eye roll")
+        action = await bot_for(writer, None)._compose("post", ("daily", "the ferry"))
+        assert action.content == ferry and GIF_PROMPT not in writer.prompts[0], action.content
+        # GIF talk the parse can't take off reads as leftovers: the draft goes
+        b = bot_for(Says("Found the perfect gif for this ferry mess lol"), GifPool(embeds))
+        assert await b._compose("post", ("daily", "the ferry")) is None and b.rejected == {"gif leftover": 1}
+        # the platform refuses the post with a GIF: switched off for everyone, nothing marked sent
+        pool = GifPool(embeds)
+        b = bot_for(Says(ferry + "\nGIF: eye roll"), pool, Refuses())
+        b.think = lambda obs: b._compose("post", ("daily", "the ferry"))
+        b.read = lambda: asyncio.sleep(0, result={"feed": []})
+        try:
+            await b.step()
+            raise AssertionError("the refusal should surface")
+        except httpx.HTTPStatusError:
+            pass
+        assert not pool.ready() and "HTTP 400" in pool.off
+        assert [row[-1] for row in b.store.db.execute("SELECT status FROM writes")] == ["not_sent"]
+        writer = Says(ferry + "\nGIF: eye roll")
+        action = await bot_for(writer, pool)._compose("post", ("daily", "the ferry"))
+        assert action.content == ferry and GIF_PROMPT not in writer.prompts[0]
+    finally:
+        GIF_SHARE.clear()
+        GIF_SHARE.update(saved)
+    print("gif ok")
 
 
 async def news_reply_check() -> None:
@@ -1172,6 +1263,7 @@ if __name__ == "__main__":
     random.seed(0)
     asyncio.run(sign_off_check())
     asyncio.run(arguments_check())
+    asyncio.run(gif_check())
     asyncio.run(news_reply_check())
     asyncio.run(reply_context_check())
     asyncio.run(implicit_no_check())

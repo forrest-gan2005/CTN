@@ -12,6 +12,7 @@ LEAK_WORDS = 8  # an 8-word run copied from our system prompt counts as a leak
 TEMPLATE_TOKENS = re.compile(r"<\|[^|>]{1,40}\|>|\[/?INST\]|<</?SYS>>", re.IGNORECASE)
 INVISIBLE_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
 URL_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
+LINK_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)  # a whole link, which is no phrasing of ours
 # Posts that address an AI rather than a person: no citizen writes these, so they are competitor probes.
 PROBE_RE = re.compile(
     r"\bignore (all |any )?(the |your )?(previous|prior|above|earlier)\b"
@@ -160,7 +161,7 @@ PHRASE_STOP = frozenset(
 def phrases(text: str, n: int = 4) -> frozenset:
     """Runs of n words with at least two that aren't little common words: phrasing a reader notices when it
     turns up in several accounts."""
-    words = re.findall(r"[a-z0-9']+", plain(text).lower())
+    words = re.findall(r"[a-z0-9']+", plain(LINK_RE.sub(" ", text or "")).lower())
     return frozenset(" ".join(words[i:i + n]) for i in range(len(words) - n + 1)
                      if sum(w not in PHRASE_STOP for w in words[i:i + n]) >= 2)
 
@@ -201,7 +202,7 @@ def setting_names(setting: str) -> frozenset:
 def fresh_phrases(text: str, setting: str, n: int = 4) -> frozenset:
     """The phrases of `text` the setting doesn't account for: not in it, and still telling with the setting's
     names counted as little words (anyone may write "off to the Mango & Spice Festival")."""
-    words = re.findall(r"[a-z0-9']+", plain(text).lower())
+    words = re.findall(r"[a-z0-9']+", plain(LINK_RE.sub(" ", text or "")).lower())
     named = set()
     for name in setting_names(setting):
         for i in range(len(words) - len(name) + 1):

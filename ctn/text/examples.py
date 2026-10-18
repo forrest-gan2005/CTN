@@ -4,6 +4,7 @@ from typing import Iterable, Tuple
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import linear_kernel
 
+from ctn.text.gifs import without_gifs
 from ctn.text.guard import TEMPLATE_TOKENS, URL_RE, leans_no, looks_like_probe, sanitize_external
 
 MIN_POOL = 30  # below this the retriever stays off and bots use their persona's own examples
@@ -24,7 +25,7 @@ class NpcExamples:
         self.posts = []
         keys = set()
         for author, content, is_reply in posts:
-            text = sanitize_external(content or "").strip()
+            text = without_gifs(sanitize_external(content or ""))  # a citizen's GIF is theirs; the words still teach
             key = text.lower()
             if not MIN_LEN <= len(text) <= MAX_LEN or key in keys:
                 continue

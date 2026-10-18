@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from ctn import paths
 from ctn.infra.fake_platform import Incomplete
+from ctn.text.gifs import embeds_from_raw
 
 log = logging.getLogger("collector")
 
@@ -285,6 +286,12 @@ class NpcStore:
         )
         counts = Counter(tag.lower() for (content,) in rows for tag in set(HASHTAG_RE.findall(content)))
         return [tag for tag, k in counts.most_common(n) if k >= 2]
+
+    def gif_embeds(self, limit: int = 5000) -> list:
+        """The GIF embeds on the newest posts that aren't ours: the GIFs people here actually post."""
+        rows = self.db.execute("SELECT raw FROM posts WHERE ours = 0 AND raw LIKE '%giphy%' ORDER BY id DESC LIMIT ?",
+                               (limit,))
+        return [e for e in embeds_from_raw(r[0] for r in rows) if e.get("kind") == "giphy"]
 
     def citizen_peak_hourly(self, since: datetime, cutoff: datetime = COMPETITION_START) -> int:
         """The most posts any whitelisted citizen made within one clock hour since `since`."""
