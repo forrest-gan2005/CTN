@@ -15,7 +15,12 @@ from ctn.infra.fake_platform import Incomplete
 
 log = logging.getLogger("collector")
 
+# No competitor can be on the platform before this: the opening webinar starts at 5pm and the game opens during it,
+# so accounts seen earlier are the organisers' (citizens or their scripted fleet).
 COMPETITION_START = datetime(2026, 10, 19, 17, 0, tzinfo=ZoneInfo("Australia/Sydney"))
+# When the game is expected to open ("likely 6pm", the organisers on 18 October): our accounts register and act from
+# then. Never before COMPETITION_START.
+GAME_OPENS = datetime(2026, 10, 19, 18, 0, tzinfo=ZoneInfo("Australia/Sydney"))
 DEFAULT_DB = paths.DATA / "npc.db"
 
 SCHEMA = """

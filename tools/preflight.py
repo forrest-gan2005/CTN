@@ -25,7 +25,7 @@ import httpx
 from ctn import paths
 from ctn.blue.blue import MIN_CITIZENS
 from ctn.infra import backup
-from ctn.infra.collector import COMPETITION_START, NpcStore
+from ctn.infra.collector import COMPETITION_START, GAME_OPENS, NpcStore
 from ctn.infra.llm import OllamaLLM, load_env, team_llms
 from ctn.infra.news import NEWS_URL, SITES, ARTICLE_RE
 from ctn.text.personas import load_personas
@@ -217,8 +217,9 @@ class Preflight:
         self.say(OK if free >= MIN_FREE else WARN, "disk", f"{free / 1024 ** 3:.1f} GB free for data/")
 
     def start(self) -> None:
-        left = COMPETITION_START - self.clock()
-        self.say(OK, "start", f"{COMPETITION_START:%a %d %b %H:%M %Z}; " +
+        left = GAME_OPENS - self.clock()
+        self.say(OK, "start", f"game opens {GAME_OPENS:%a %d %b %H:%M %Z} (accounts first seen from "
+                              f"{COMPETITION_START:%H:%M} on aren't taken for citizens); " +
                  (f"{left.days}d {left.seconds // 3600}h {left.seconds % 3600 // 60}m to go"
                   if left.total_seconds() > 0 else "under way"))
 

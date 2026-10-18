@@ -5,7 +5,7 @@ import logging
 import os
 import random
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 from ctn import paths
 from ctn.blue.blue import MIN_CITIZENS, BlueScanner, Reporter
 from ctn.infra import backup
-from ctn.infra.collector import COMPETITION_START, FEED_INTERVAL, Collector, NpcStore
+from ctn.infra.collector import COMPETITION_START, FEED_INTERVAL, GAME_OPENS, Collector, NpcStore
 from ctn.infra.fake_platform import AmbiguousWrite, FakePlatform, RateLimited
 from ctn.infra.health import Health
 from ctn.infra.llm import FakeLLM, game_day_start, ledger, load_env, team_llms
@@ -30,7 +30,8 @@ from ctn.text.semantic import NearIndex, load_embedder
 log = logging.getLogger("run")
 
 DATA = paths.DATA
-COMPETITION_END = datetime(2026, 11, 2, 17, 0, tzinfo=ZoneInfo("Australia/Sydney"))
+# Polls close at 6pm; if the game ends sooner, the platform locks its feed and the team stands down.
+COMPETITION_END = datetime(2026, 11, 2, 18, 0, tzinfo=ZoneInfo("Australia/Sydney"))
 REFRESH_EVERY = 900.0  # seconds between whitelist, example, hashtag and activity-curve refreshes
 CITIZEN_FEED = 30  # newest citizen posts each bot reads; competitor bots will far outnumber citizens in Latest
 OTHER_FEED = 10  # plus the newest posts from anyone, so unknown accounts still get some attention
@@ -288,7 +289,8 @@ class Team:
             offset = timedelta(seconds=random.Random(bot.username).uniform(0, self.stagger.total_seconds()))
             planned = (base + offset).isoformat(timespec="seconds")
             self.state.plan_start(bot.username, planned)
-        return datetime.fromisoformat(planned)
+        slot = datetime.fromisoformat(planned)  # planned under an earlier opening time, it still waits for this one
+        return max(slot, self.not_before) if self.not_before is not None else slot
 
     @staticmethod
     async def _wait_until(when: datetime, until: float) -> bool:
@@ -422,7 +424,7 @@ def real_platform() -> RealPlatform:
     return RealPlatform(os.environ.get("CTN_API_URL") or API_URL, team_key=key)
 
 
-async def live(limit: Optional[int], stagger_hours: float) -> None:
+async def live(limit: Optional[int], stagger_hours: float, opens: datetime = GAME_OPENS) -> None:
     personas = load_personas()
     if limit:
         personas = personas[:limit]
@@ -431,10 +433,10 @@ async def live(limit: Optional[int], stagger_hours: float) -> None:
     own = {p["username"] for p in load_personas(status=None)}
     team = Team(platform, llm, judge, NpcStore(DATA / "npc.db", own_usernames=own), StateStore(DATA / "bots.db"),
                 embedder=load_embedder(), injection=load_injection_classifier(), personas=personas,
-                not_before=COMPETITION_START, stagger=timedelta(hours=stagger_hours), backup_dir=backup.BACKUPS,
+                not_before=opens, stagger=timedelta(hours=stagger_hours), backup_dir=backup.BACKUPS,
                 news=News(NewsStore()))
-    log.info("live: %d accounts, staggered over %gh, writer %s, judge %s", len(personas), stagger_hours,
-             llm.name, judge.name)
+    log.info("live: %d accounts, online from %s staggered over %gh, writer %s, judge %s", len(personas),
+             f"{opens:%a %d %b %H:%M %Z}", stagger_hours, llm.name, judge.name)
     loop = asyncio.get_running_loop()
     try:
         await team.run(loop.time() + (COMPETITION_END - datetime.now(timezone.utc)).total_seconds())
@@ -470,6 +472,16 @@ def log_file_check() -> None:
     print("log file ok")
 
 
+def opening(text: str) -> datetime:
+    """--opens: a Sydney time on the opening day, never before COMPETITION_START (an account seen earlier is
+    trusted as a citizen, so a competitor must not be able to register then)."""
+    when = datetime.combine(GAME_OPENS.date(), dt_time.fromisoformat(text), tzinfo=GAME_OPENS.tzinfo)
+    if when < COMPETITION_START:
+        raise argparse.ArgumentTypeError(f"not before {COMPETITION_START:%H:%M}: accounts seen before then are "
+                                         "taken for citizens")
+    return when
+
+
 def schedule_check() -> None:
     """New accounts get a slot in the stagger window both before the start and long after it (reserves), keep
     it across restarts, and accounts that already acted don't wait again."""
@@ -486,6 +498,15 @@ def schedule_check() -> None:
         assert base <= slot <= base + window, (now, slot)
         assert team.start_time(new, now + timedelta(hours=2)) == slot, "a restart must keep the slot"
         assert team.start_time(veteran, now) == base
+        later = start + window  # the opening moved after the slot was planned: nobody acts before it
+        team.not_before = later
+        assert team.start_time(new, now) == max(slot, later) and team.start_time(veteran, now) == max(now, later)
+    assert opening("18:30") == GAME_OPENS.replace(minute=30) and opening("17:00") == COMPETITION_START
+    try:
+        opening("16:59")
+        raise AssertionError("an opening before the cutoff must be refused")
+    except argparse.ArgumentTypeError:
+        pass
     print("schedule ok")
 
 
@@ -1483,6 +1504,8 @@ if __name__ == "__main__":
     lv = sub.add_parser("live", help="the real competition (needs CTN_TEAM_KEY in .env)")
     lv.add_argument("--limit", type=int, default=None, help="run only the first N active personas, e.g. for a trial")
     lv.add_argument("--stagger", type=float, default=6, help="hours over which new accounts first come online")
+    lv.add_argument("--opens", type=opening, default=GAME_OPENS,
+                    help=f"Sydney time on {GAME_OPENS:%d %b} the game opens, e.g. 18:30 (default {GAME_OPENS:%H:%M})")
     sub.add_parser("smoke", help="the live wiring end to end against a mock of the API")
     reh = sub.add_parser("rehearse", help="dress rehearsal on the fake platform")
     reh.add_argument("--seconds", type=float, default=60)
@@ -1494,7 +1517,7 @@ if __name__ == "__main__":
     if args.cmd == "live":
         DATA.mkdir(exist_ok=True)
         logging.getLogger().addHandler(log_file(DATA / "run.log"))
-        asyncio.run(live(args.limit, args.stagger))
+        asyncio.run(live(args.limit, args.stagger, args.opens))
     elif args.cmd == "smoke":
         log_file_check()
         schedule_check()
