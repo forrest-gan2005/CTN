@@ -172,6 +172,10 @@ CASE_OPENING = ("Don't open by introducing yourself (\"I'm ...\", \"... here\", 
 CASE_FOCUS = ("Keep to the referendum question; leave the vaccine's own unknowns out unless the worry you answer is "
               "about the vaccine itself.")
 QUESTION_SHAPES = {"refute", "scene", "story"}  # the rest end on their case
+# Off since 10/20 10:15: the first hour refutations named the worry citizens raised most ("that it should be a
+# personal choice") brought the night's first two changes of mind away from YES (-212 in all), maybe the worry
+# restated doing more than the answer; off for an hour to see whether they stop.
+ANSWER_WORRIES = False
 OPENING_FREE = {"story"}  # the one shape that may open with who you are: some do, as people do, just not every one
 COVID_SHARE = 0.35  # of prompts that remind the writer what it did during covid: every one did, and 2021 was in most
 NO_COVID = "Don't describe what you did during covid."  # when it isn't reminded, so as not to make it up
@@ -1116,7 +1120,7 @@ class Bot:
             opening = "" if shape in OPENING_FREE else f" {CASE_OPENING}"
             # The worry a refutation answers is one citizens are raising now, rather than the writer's guess at it.
             worry = ""
-            if shape == "refute" and self.worries:
+            if shape == "refute" and self.worries and ANSWER_WORRIES:
                 self.case_worry, label = random.choice(self.worries)
                 worry = (f" The NO worry people here raise most lately is {label}; answer that one, naming it in your "
                          "own words.")
@@ -1978,6 +1982,9 @@ async def anchor_check() -> None:
             assert ("End with a genuine question" in prompt) == (shape in QUESTION_SHAPES), shape
         styled.worries = [("id card", "that the ID cards could be used to track people")]
         CASE_SHAPES = {"refute": saved[0]["refute"]}  # a refutation answers a worry citizens raise now
+        assert "raise most lately" not in styled._user_prompt("post", None, ("anchor", "acting early")) or \
+            ANSWER_WORRIES, "switched off, no worry is named"
+        globals()["ANSWER_WORRIES"], answering = True, ANSWER_WORRIES
         assert "lately is that the ID cards could be used to track people; answer that one, naming it in your own" in \
             styled._user_prompt("post", None, ("anchor", "acting early"))
         tagged = Bot(writers[0], FakePlatform(), Noting(case), load_world(), store=StateStore(":memory:"))
@@ -1985,6 +1992,7 @@ async def anchor_check() -> None:
         assert (await tagged._anchor()).angle.startswith("refute/id card: "), "the worry answered is recorded"
         CASE_SHAPES = {"plain": saved[0]["plain"]}
         assert "raise most lately" not in styled._user_prompt("post", None, ("anchor", "acting early"))
+        globals()["ANSWER_WORRIES"] = answering
     finally:
         CASE_SHAPES, QUESTION_PROB = saved
     intro = Bot(writers[0], FakePlatform(), Noting(f"I'm Joe, and {case}"), load_world(), store=StateStore(":memory:"))
