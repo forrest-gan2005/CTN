@@ -4,6 +4,7 @@ import logging
 import random
 import re
 import sqlite3
+import tempfile
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +24,8 @@ COMPETITION_START = datetime(2026, 10, 19, 17, 0, tzinfo=ZoneInfo("Australia/Syd
 # then. Never before COMPETITION_START.
 GAME_OPENS = datetime(2026, 10, 19, 18, 0, tzinfo=ZoneInfo("Australia/Sydney"))
 DEFAULT_DB = paths.DATA / "npc.db"
+# The account watcher's list (data/platform2026/watch_accounts.py): every public account, with when it registered.
+ACCOUNTS_SEEN = paths.DATA / "platform2026" / "accounts_seen.json"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS posts (
@@ -54,16 +57,23 @@ CREATE TABLE IF NOT EXISTS authors (
 );
 -- Accounts there before the start that mostly post text many others post word for word: scripted, not citizens.
 CREATE TABLE IF NOT EXISTS fleet (author TEXT PRIMARY KEY);
+-- When accounts registered, from the platform's account list: one registered before the start is the organisers',
+-- however late it first posts.
+CREATE TABLE IF NOT EXISTS registered (author TEXT PRIMARY KEY, created_at TEXT NOT NULL);
 """
 # There before the start: no competitor could register yet. Citizens are those of them outside the fleet.
-BEFORE_START = "a.ours = 0 AND (IFNULL(a.first_post_at < ?, 0) OR a.first_fetched_at < ?)"
+BEFORE_START = ("a.ours = 0 AND (IFNULL(a.first_post_at < ?, 0) OR a.first_fetched_at < ? "
+                "OR a.author IN (SELECT author FROM registered WHERE created_at < ?))")
 PRE_START = BEFORE_START + " AND a.author NOT IN (SELECT author FROM fleet)"
+# Registered before the start but not seen posting yet: citizens too, so their first post is known for one.
+REGISTERED_ONLY = "SELECT author FROM registered WHERE created_at < ? AND author NOT IN (SELECT author FROM authors)"
 # A text this long posted by this many accounts is a template; an account whose posts are half templates is scripted.
 # On 16 Oct 151 such accounts arrived together (550 texts, 32 distinct, YES and NO alike); 30 of the 45 accounts
 # there before were the same kind.
 FLEET_MIN_CHARS = 20
 FLEET_AUTHORS = 3
 HASHTAG_RE = re.compile(r"#\w{2,30}")
+FRACTION_RE = re.compile(r"\.(\d+)")
 
 
 def _iso(dt: datetime) -> str:
@@ -76,10 +86,21 @@ def _parse_time(value) -> Optional[str]:
     try:
         if isinstance(value, (int, float)):
             return _iso(datetime.fromtimestamp(value, timezone.utc))
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        # The platform drops trailing zeros from the fraction ("12:17:10.06277Z"), which Python 3.9 can't parse.
+        text = FRACTION_RE.sub(lambda m: "." + m.group(1)[:6].ljust(6, "0"), str(value).replace("Z", "+00:00"), 1)
+        dt = datetime.fromisoformat(text)
     except (TypeError, ValueError, OverflowError):
         return None
     return _iso(dt) if dt.tzinfo else None
+
+
+def accounts_seen(path=ACCOUNTS_SEEN) -> list:
+    """The account watcher's list, each account as the platform gave it; empty without one."""
+    try:
+        listed = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return list(listed.values()) if isinstance(listed, dict) else []
 
 
 def _json_default(obj):
@@ -95,7 +116,36 @@ class NpcStore:
         if "verified" not in {r[1] for r in self.db.execute("PRAGMA table_info(authors)")}:
             self.db.execute("ALTER TABLE authors ADD COLUMN verified INTEGER NOT NULL DEFAULT 0")
         self.own = set(own_usernames)
+        self._repair_times()
         self.refresh_fleet()  # a database from before this table existed, or reopened after the start
+
+    def _repair_times(self) -> None:
+        """Posts stored when a short fraction in their time couldn't be parsed get their time now, and their
+        authors their first post."""
+        fixed = []
+        for post_id, author, raw in self.db.execute("SELECT id, author, raw FROM posts WHERE created_at IS NULL"):
+            try:
+                when = _parse_time(json.loads(raw).get("created_at"))
+            except (ValueError, AttributeError):
+                continue
+            if when:
+                fixed.append((when, post_id, author))
+        if not fixed:
+            return
+        with self.db:
+            self.db.executemany("UPDATE posts SET created_at = ? WHERE id = ?", [(w, i) for w, i, _ in fixed])
+            self.db.executemany("UPDATE authors SET first_post_at = ? WHERE author = ? "
+                                "AND (first_post_at IS NULL OR ? < first_post_at)", [(w, a, w) for w, _, a in fixed])
+        log.info("gave %d stored posts the time they were missing", len(fixed))
+
+    def add_registrations(self, accounts: Iterable[dict]) -> int:
+        """Store when accounts registered, from the platform's account list ({"username", "created_at"}); returns
+        how many were new. A registration time never changes."""
+        rows = [(a["username"], _parse_time(a.get("created_at"))) for a in accounts if a.get("username")]
+        before = self.db.total_changes
+        with self.db:
+            self.db.executemany("INSERT OR IGNORE INTO registered VALUES (?, ?)", [r for r in rows if r[1]])
+        return self.db.total_changes - before
 
     def add_posts(self, posts: list) -> int:
         """Store posts we haven't seen before; returns how many were new."""
@@ -182,10 +232,12 @@ class NpcStore:
             self.db.execute("DELETE FROM gaps WHERE id = ?", (gap_id,))
 
     def whitelist(self, cutoff: datetime = COMPETITION_START) -> list:
-        """Accounts that posted, or that we saw, before `cutoff`: competitors weren't on the platform yet."""
+        """Accounts that posted, that we saw or that registered before `cutoff`: competitors weren't on the platform
+        yet."""
         c = _iso(cutoff)
-        rows = self.db.execute(f"SELECT author FROM authors a WHERE {PRE_START} ORDER BY author", (c, c))
-        return [r[0] for r in rows]
+        rows = self.db.execute(
+            f"SELECT author FROM authors a WHERE {PRE_START} UNION {REGISTERED_ONLY} ORDER BY author", (c, c, c, c))
+        return [r[0] for r in rows if r[0] not in self.own]
 
     def made_by(self, authors: Iterable[str]) -> list:
         """(id, author, content, parent_id, created_at) of every stored post by these accounts, oldest first."""
@@ -219,16 +271,23 @@ class NpcStore:
     def before_start(self, cutoff: datetime = COMPETITION_START) -> set:
         """Every account there before `cutoff`, the scripted fleet included: the organisers', never a competitor's."""
         c = _iso(cutoff)
-        return {r[0] for r in self.db.execute(f"SELECT author FROM authors a WHERE {BEFORE_START}", (c, c))}
+        rows = self.db.execute(f"SELECT author FROM authors a WHERE {BEFORE_START} UNION {REGISTERED_ONLY}",
+                               (c, c, c, c))
+        return {r[0] for r in rows} - self.own
+
+    def _registered_only(self, author: str, c: str) -> bool:
+        return author not in self.own and self.db.execute(
+            f"SELECT 1 FROM ({REGISTERED_ONLY}) WHERE author = ?", (c, author)).fetchone() is not None
 
     def was_before_start(self, author: str, cutoff: datetime = COMPETITION_START) -> bool:
         c = _iso(cutoff)
         return self.db.execute(f"SELECT 1 FROM authors a WHERE a.author = ? AND {BEFORE_START}",
-                               (author, c, c)).fetchone() is not None
+                               (author, c, c, c)).fetchone() is not None or self._registered_only(author, c)
 
     def is_citizen(self, author: str, cutoff: datetime = COMPETITION_START) -> bool:
         c = _iso(cutoff)
-        return self.db.execute(f"SELECT 1 FROM authors a WHERE a.author = ? AND {PRE_START}", (author, c, c)).fetchone() is not None
+        return self.db.execute(f"SELECT 1 FROM authors a WHERE a.author = ? AND {PRE_START}",
+                               (author, c, c, c)).fetchone() is not None or self._registered_only(author, c)
 
     def npc_posts(self, cutoff: datetime = COMPETITION_START, limit: Optional[int] = None,
                   badged: bool = True) -> list:
@@ -240,7 +299,7 @@ class NpcStore:
             "SELECT p.author, p.content, p.created_at, p.parent_id FROM posts p "
             f"JOIN authors a ON a.author = p.author WHERE {PRE_START} AND p.content IS NOT NULL "
             f"{'' if badged else 'AND a.verified = 0 '}ORDER BY p.id DESC LIMIT ?",
-            (c, c, -1 if limit is None else limit),
+            (c, c, c, -1 if limit is None else limit),
         ).fetchall()
         return rows[::-1]
 
@@ -250,7 +309,7 @@ class NpcStore:
         return self.db.execute(
             "SELECT p.author, p.content FROM posts p JOIN authors a ON a.author = p.author "
             f"WHERE a.ours = 0 AND NOT ({PRE_START}) AND p.content IS NOT NULL ORDER BY p.id",
-            (c, c),
+            (c, c, c),
         ).fetchall()
 
     def recent(self, n: int = 30) -> list:
@@ -264,7 +323,7 @@ class NpcStore:
         rows = self.db.execute(
             f"SELECT p.raw FROM posts p JOIN authors a ON a.author = p.author WHERE {PRE_START} "
             "ORDER BY p.id DESC LIMIT ?",
-            (c, c, n),
+            (c, c, c, n),
         )
         return [json.loads(r[0]) for r in rows]
 
@@ -282,7 +341,7 @@ class NpcStore:
         rows = self.db.execute(
             f"SELECT p.content FROM posts p JOIN authors a ON a.author = p.author "
             f"WHERE p.created_at >= ? AND {PRE_START} AND p.content LIKE '%#%'",
-            (_iso(since), c, c),
+            (_iso(since), c, c, c),
         )
         counts = Counter(tag.lower() for (content,) in rows for tag in set(HASHTAG_RE.findall(content)))
         return [tag for tag, k in counts.most_common(n) if k >= 2]
@@ -300,7 +359,7 @@ class NpcStore:
             f"SELECT COUNT(*) AS k FROM posts p JOIN authors a ON a.author = p.author "
             f"WHERE p.created_at >= ? AND {PRE_START} GROUP BY p.author, substr(p.created_at, 1, 13) "
             "ORDER BY k DESC LIMIT 1",
-            (_iso(since), c, c),
+            (_iso(since), c, c, c),
         ).fetchone()
         return row[0] if row else 0
 
@@ -336,6 +395,8 @@ class NpcStore:
             "posts": self.count(),
             "accounts": q("SELECT COUNT(*) FROM authors").fetchone()[0],
             "whitelist": len(self.whitelist()),
+            "registered before the start, not seen posting": len(self.db.execute(
+                REGISTERED_ONLY, (_iso(COMPETITION_START),)).fetchall()),
             "scripted accounts left out": len(self.fleet()),
             "pending_gaps": len(self.gaps()),
             "unparsed_created_at": q("SELECT COUNT(*) FROM posts WHERE created_at IS NULL").fetchone()[0],
@@ -526,8 +587,48 @@ async def _demo(seconds: float) -> None:
     assert {a for a, _ in store.unknown_posts(cutoff)} == {a for a in late if any(
         post["author"] == a for post in p.posts.values())}
     _fleet_check()
+    _registered_check()
     print(f"\ncollected {store.count()}/{len(p.posts)} posts, filled {collector.gaps} gaps, "
           f"whitelist {len(wl)} accounts")
+
+
+def _registered_check() -> None:
+    """Times with a short fraction parse, old rows without one are repaired, and an account registered before the
+    start is the organisers' however late it posts."""
+    assert _parse_time("2026-10-18T12:17:10.06277Z") == "2026-10-18T12:17:10.062770+00:00"
+    assert _parse_time("2026-10-18T12:17:10.6903+00:00") == "2026-10-18T12:17:10.690300+00:00"
+    assert _parse_time("2026-10-18T12:17:10.1234567Z") == "2026-10-18T12:17:10.123456+00:00"
+    assert _parse_time("2026-10-18T12:17:10Z") == "2026-10-18T12:17:10.000000+00:00"
+    assert _parse_time("2026-10-18T12:17:10.5") is None and _parse_time(None) is None and _parse_time("soon") is None
+    start = datetime(2026, 10, 19, 6, 0, tzinfo=timezone.utc)
+    before, after = "2026-10-19T05:00:00.5Z", "2026-10-19T07:00:00.25Z"
+    with tempfile.TemporaryDirectory() as tmp:
+        path = f"{tmp}/npc.db"
+        s = NpcStore(path, own_usernames={"ours_early"})
+        s.add_posts([{"id": 1, "author": "old_timer", "content": "morning all", "created_at": before},
+                     {"id": 2, "author": "late_one", "content": "hi", "created_at": after}])
+        with s.db:  # as stored before short fractions parsed
+            s.db.execute("UPDATE posts SET created_at = NULL")
+            s.db.execute("UPDATE authors SET first_post_at = NULL, first_fetched_at = '2026-10-19T08:00:00+00:00'")
+        assert not s.is_citizen("old_timer", start)
+        s.db.close()
+        s = NpcStore(path, own_usernames={"ours_early"})
+        assert s.db.execute("SELECT COUNT(*) FROM posts WHERE created_at IS NULL").fetchone()[0] == 0
+        assert s.is_citizen("old_timer", start) and not s.is_citizen("late_one", start), "repaired from raw"
+        listed = [{"username": "quiet_npc", "created_at": before}, {"username": "late_one", "created_at": after},
+                  {"username": "poster_later", "created_at": "2026-10-19T04:00:00.123Z"},
+                  {"username": "ours_early", "created_at": before}, {"username": "private_one"}, {"created_at": before}]
+        assert s.add_registrations(listed) == 4 and s.add_registrations(listed) == 0
+        assert s.is_citizen("quiet_npc", start) and s.was_before_start("quiet_npc", start)
+        assert "quiet_npc" in s.whitelist(start) and "quiet_npc" in s.before_start(start)
+        assert not s.was_before_start("late_one", start) and not s.was_before_start("private_one", start)
+        assert "ours_early" not in s.whitelist(start) and "ours_early" not in s.before_start(start)
+        assert not s.was_before_start("ours_early", start), "ours, whatever the list says"
+        s.add_posts([{"id": 3, "author": "poster_later", "content": "first post, long after", "created_at": after}])
+        assert s.is_citizen("poster_later", start) and "poster_later" in s.whitelist(start)
+        assert {a for a, _ in s.unknown_posts(start)} == {"late_one"}
+        assert {a for a, *_ in s.npc_posts(start)} == {"old_timer", "poster_later"}
+    assert accounts_seen("/nonexistent/accounts_seen.json") == []
 
 
 def _fleet_check() -> None:

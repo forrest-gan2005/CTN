@@ -13,7 +13,8 @@ from zoneinfo import ZoneInfo
 from ctn import paths
 from ctn.blue.blue import MIN_CITIZENS, BlueScanner, Reporter
 from ctn.infra import backup
-from ctn.infra.collector import COMPETITION_START, FEED_INTERVAL, GAME_OPENS, Collector, NpcStore
+from ctn.infra.collector import ACCOUNTS_SEEN, COMPETITION_START, FEED_INTERVAL, GAME_OPENS, Collector, NpcStore, \
+    accounts_seen
 from ctn.infra.fake_platform import AmbiguousWrite, FakePlatform, RateLimited
 from ctn.infra.health import Health
 from ctn.infra.llm import FakeLLM, game_day_start, ledger, load_env, team_llms
@@ -65,7 +66,8 @@ class Team:
                  blue_interval: float = 10.0, embedder=None, injection=None, personas: Optional[list] = None,
                  not_before: Optional[datetime] = None, stagger: timedelta = timedelta(0),
                  min_citizens: int = MIN_CITIZENS, backup_dir: Optional[Path] = None,
-                 backup_every: float = BACKUP_EVERY, news: Optional[News] = None, gifs: bool = True) -> None:
+                 backup_every: float = BACKUP_EVERY, news: Optional[News] = None, gifs: bool = True,
+                 accounts: Optional[Path] = None) -> None:
         personas = personas if personas is not None else load_personas()
         # Every persona we own, reserves and those not running included, so none is ever taken for a rival.
         self.own = {p["username"] for p in load_personas(status=None)} | {p["username"] for p in personas}
@@ -79,6 +81,7 @@ class Team:
         self.backup_dir = backup_dir  # None: no snapshots (tests)
         self.locked = False  # the platform's feed lock, as last seen
         self.news = news  # None: the writers don't see the papers (tests)
+        self.accounts = accounts  # the account watcher's list, for registration times; None: none (tests)
         self.backup_every = backup_every
         self.embedder = embedder  # None turns every meaning-level check off
         writes, reports = state.recover()
@@ -127,6 +130,8 @@ class Team:
 
     def refresh(self) -> None:
         """Pick up what the collector learned: who the citizens are, how and when they write, what they tag."""
+        if self.accounts is not None:
+            self.npc_store.add_registrations(accounts_seen(self.accounts))
         self.roster.npcs = set(self.npc_store.whitelist(self.cutoff))
         rows = self.npc_store.npc_posts(self.cutoff, limit=CURVE_POSTS, badged=False)  # how citizens write
         examples = NpcExamples(((author, content, parent is not None)
@@ -447,7 +452,8 @@ async def live(limit: Optional[int], stagger_hours: float, opens: datetime = GAM
     team = Team(platform, llm, judge, NpcStore(DATA / "npc.db", own_usernames=own), StateStore(DATA / "bots.db"),
                 embedder=load_embedder(), injection=load_injection_classifier(), personas=personas,
                 not_before=opens, stagger=timedelta(hours=stagger_hours), backup_dir=backup.BACKUPS,
-                news=News(NewsStore()), gifs=os.environ.get("GIFS", "on").lower() not in ("0", "off", "no", "false"))
+                news=News(NewsStore()), gifs=os.environ.get("GIFS", "on").lower() not in ("0", "off", "no", "false"),
+                accounts=ACCOUNTS_SEEN)
     log.info("live: %d accounts, online from %s staggered over %gh, writer %s, judge %s", len(personas),
              f"{opens:%a %d %b %H:%M %Z}", stagger_hours, llm.name, judge.name)
     loop = asyncio.get_running_loop()
@@ -493,6 +499,28 @@ def opening(text: str) -> datetime:
         raise argparse.ArgumentTypeError(f"not before {COMPETITION_START:%H:%M}: accounts seen before then are "
                                          "taken for citizens")
     return when
+
+
+def registered_check() -> None:
+    """With the account watcher's list, a citizen who registered before the start but hasn't posted is one from
+    the team's next refresh, for the bots and for Blue; without the list nothing changes."""
+    import tempfile
+
+    early = (COMPETITION_START - timedelta(hours=3)).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    late = (COMPETITION_START + timedelta(hours=3)).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    with tempfile.TemporaryDirectory() as tmp:
+        listed = Path(tmp) / "accounts_seen.json"
+        listed.write_text(json.dumps({"1": {"username": "quiet_npc", "created_at": early},
+                                      "2": {"username": "newcomer", "created_at": late}}), encoding="utf-8")
+        npc_store = NpcStore(":memory:")
+        team = Team(FakePlatform(), FakeLLM(0, 0), None, npc_store, StateStore(":memory:"),
+                    personas=load_personas()[:1], accounts=listed)
+        assert "quiet_npc" in team.roster.npcs and "newcomer" not in team.roster.npcs, team.roster.npcs
+        assert team.scanner.off_limits("quiet_npc") and not team.scanner.off_limits("newcomer")
+        bare = Team(FakePlatform(), FakeLLM(0, 0), None, NpcStore(":memory:"), StateStore(":memory:"),
+                    personas=load_personas()[:1])
+        assert not bare.roster.npcs
+    print("registered ok")
 
 
 def gif_restart_check() -> None:
@@ -1583,6 +1611,7 @@ if __name__ == "__main__":
     elif args.cmd == "smoke":
         log_file_check()
         schedule_check()
+        registered_check()
         gif_restart_check()
         asyncio.run(unresolved_check())
         asyncio.run(interrupted_check())
