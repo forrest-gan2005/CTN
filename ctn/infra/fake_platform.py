@@ -48,6 +48,7 @@ class FakePlatform:
         self.notifications = {}  # username -> list of notification dicts
         self.competitors = set(competitors)  # the moderator's ground truth: accounts run by teams
         self.reports = {}        # post_id -> usernames that reported it
+        self.trending = []       # post ids in Trending, top first, as a test sets them
         self.hidden = set()      # posts the moderator confirmed as inauthentic
         self.reporting_blocked_until: Optional[datetime] = None
         self._ids = itertools.count(1)
@@ -137,6 +138,9 @@ class FakePlatform:
         """Newest first; pass `before` (a post id) to page further back in time."""
         posts = [p for p in self.posts.values() if before is None or p["id"] < before]
         return sorted(posts, key=lambda p: p["id"], reverse=True)[:n]
+
+    async def feed_trending(self, n: int = 50) -> list:
+        return list(self.trending[:n])
 
     async def feed_home(self, username: str, n: int = 10) -> list:
         followed = self.following.get(username, set())

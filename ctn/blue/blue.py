@@ -63,6 +63,7 @@ ACCOUNT_REPORTS = 1
 TEAM_REPORTS_PER_DAY = 5
 SYDNEY = ZoneInfo("Australia/Sydney")  # campaign days change at midnight Sydney time
 QUEUE_FULL_PAUSE = timedelta(minutes=10)  # standing down while those 20 wait for moderators
+TRENDING_TTL = timedelta(minutes=10)  # Trending, which orders reports, is read at most this often
 # What became of a report shows on the post: hidden from everyone once ruled inauthentic (or deleted), still up a
 # day after the report if ruled genuine (a ruling is due within 24 hours). Looked at every so often, a few at a time.
 RULING_CHECK = timedelta(minutes=30)
@@ -318,10 +319,13 @@ class BlueScanner:
                 flagged.setdefault(author, (PARAPHRASED, post_id))
         return flagged
 
-    def candidates(self) -> list:
+    def candidates(self, trending: Optional[dict] = None) -> list:
         """(post_id, author, reason) not yet reported, for accounts with fewer than ACCOUNT_REPORTS reports out
-        whose team has had fewer than TEAM_REPORTS_PER_DAY today: giveaway posts first, then NO-leaning ones,
-        newest first."""
+        whose team has had fewer than TEAM_REPORTS_PER_DAY today: the accounts with a post in Trending first, by
+        their best place there (`trending` maps a post id to its place), then the rest; within that, giveaway
+        posts, then NO-leaning ones, newest first, except that a written-up account's post in Trending goes before
+        its others. A post hidden from Trending costs its team the most."""
+        trending = trending or {}
         self._recheck()
         suspects = {a: v for a, v in self.state.suspects().items()
                     if v[0] != CLEARED and not waiting(v[0]) and v[0] not in self.disabled
@@ -338,9 +342,17 @@ class BlueScanner:
                 continue
             reason, giveaway = suspects[author]
             first = post_id == giveaway
-            rows.append((not first, not leans_no(content), -post_id,
+            place = trending.get(post_id, len(trending))
+            # Within an account: a written-up one's post in Trending first (its evidence is how it behaves, so any
+            # post will do and hiding that one hurts most); a rule's catch keeps its giveaway first, the post a
+            # moderator is surest to rule on.
+            pick = place if rule_of(reason).startswith(MANUAL) else len(trending)
+            rows.append((author, place, (pick, not first, not leans_no(content), -post_id),
                          (post_id, author, reason if first else f"account: {reason}")))
-        return [row[-1] for row in sorted(rows)]
+        best = {}  # an account's best place in Trending, which decides whose posts go first
+        for author, place, _, _ in rows:
+            best[author] = min(best.get(author, len(trending)), place)
+        return [row[-1] for row in sorted(rows, key=lambda r: (best[r[0]], r[2]))]
 
 
 class Reporter:
@@ -364,6 +376,8 @@ class Reporter:
         self.username = username  # the account that files reports
         self.per_round = per_round
         self.interval = interval
+        self.trending = {}  # post id -> place in Trending, as last read
+        self.trending_at: Optional[datetime] = None
         self.blocked_until: Optional[datetime] = None
         self.rulings_at: Optional[datetime] = None  # when reported posts were last looked at
         self.locked = False  # set by the team while the platform's feed is locked
@@ -470,6 +484,20 @@ class Reporter:
         except Exception:
             return False
 
+    async def _trending(self) -> dict:
+        """Post id -> place in Trending, read at most every TRENDING_TTL (one feed read); the last read if this one
+        fails."""
+        now = datetime.now(timezone.utc)
+        fetch = getattr(self.platform, "feed_trending", None)
+        if fetch is None or self.trending_at is not None and now - self.trending_at < TRENDING_TTL:
+            return self.trending
+        self.trending_at = now
+        try:
+            self.trending = {post_id: place for place, post_id in enumerate(await fetch())}
+        except Exception as e:
+            log.info("trending not read (%s); ordering by the last read", str(e) or type(e).__name__)
+        return self.trending
+
     async def report_some(self) -> int:
         sent = 0
         if self.locked:  # the platform's feed is locked: a report wouldn't go through
@@ -481,7 +509,7 @@ class Reporter:
                 self._held = True
             return 0
         self._held = False
-        candidates = self.scanner.candidates()
+        candidates = self.scanner.candidates(await self._trending())
         if self.side is not None:  # sides are told first, within the budget; the round itself only reads them
             await self._tell_sides(a for _, a, reason in candidates if not rule_of(reason).startswith(MANUAL))
         tried = 0
@@ -1220,6 +1248,58 @@ async def _report_queue_demo() -> None:
     assert await reporter.report_some() == ACCOUNT_REPORTS and state.report_counts() == {"sent": ACCOUNT_REPORTS}
     assert scanner.candidates() == [] and await reporter.report_some() == 0, "more than suspension needs"
     await api.aclose()
+
+
+async def _trending_demo() -> None:
+    """Accounts with a post in Trending go first, by their best place there; a written-up account's trending post
+    before its others, a rule's catch still its giveaway first. Trending is read at most every TRENDING_TTL, and a
+    failed read keeps the last order."""
+    from ctn.infra.collector import Collector, NpcStore
+    from ctn.infra.fake_platform import FakePlatform
+    from ctn.infra.state import StateStore
+
+    p = FakePlatform()
+    npc_store = NpcStore(":memory:")
+    cutoff = datetime.now(timezone.utc)
+    made = {}
+    for author, text in (("slow_a", "ferry late again"), ("hot_b", "rain all week"), ("slow_a", "market was busy"),
+                         ("hot_b", "the reef was lovely"), ("rule_c", "As an AI language model, I have no views."),
+                         ("rule_c", "big swell this weekend")):
+        made.setdefault(author, []).append((await p.post(author, text))["id"])
+    await Collector(p, npc_store, min_interval=0).poll()
+    state = StateStore(":memory:")
+    for author in ("slow_a", "hot_b"):
+        state.add_suspect(author, MANUAL + "it is one of a swarm of accounts that all answer the same posts",
+                          made[author][-1], _now())
+    state.add_suspect("rule_c", "assistant talk", made["rule_c"][0], _now())
+    scanner = BlueScanner(npc_store, state, own=(), cutoff=cutoff)
+    assert [pid for pid, _, _ in scanner.candidates()] == [made["rule_c"][0], made["hot_b"][1], made["slow_a"][1],
+                                                          made["rule_c"][1], made["hot_b"][0], made["slow_a"][0]], \
+        "newest giveaway first, as before"
+    hot = made["hot_b"][0]
+    order = [pid for pid, _, _ in scanner.candidates({made["rule_c"][1]: 0, hot: 1, 999: 2})]
+    assert order == [made["rule_c"][0], made["rule_c"][1], hot, made["hot_b"][1], made["slow_a"][1],
+                     made["slow_a"][0]], order
+
+    class Failing(FakePlatform):
+        fail = False
+
+        async def feed_trending(self, n: int = 50) -> list:
+            if self.fail:
+                raise RuntimeError("feed locked")
+            return await super().feed_trending(n)
+    api = Failing()
+    api.trending = [hot]
+    reporter = Reporter(api, scanner, state, username="joe", min_citizens=0)
+    assert await reporter._trending() == {hot: 0}
+    api.trending = [made["slow_a"][0]]
+    assert await reporter._trending() == {hot: 0}, "read at most every TRENDING_TTL"
+    reporter.trending_at -= TRENDING_TTL
+    api.fail = True
+    assert await reporter._trending() == {hot: 0}, "a failed read keeps the last order"
+    reporter.trending_at -= TRENDING_TTL
+    api.fail = False
+    assert await reporter._trending() == {made["slow_a"][0]: 0}
 
 
 async def _team_ruling_demo() -> None:

@@ -304,6 +304,12 @@ class RealPlatform:
             self.after[min(p["id"] for p in found)] = cursor
         return sorted((p for p in found if p["author"] is not None), key=lambda p: p["id"], reverse=True)[:n]
 
+    async def feed_trending(self, n: int = 50) -> list:
+        """The ids of the posts in Trending, top first."""
+        resp = await self._send("GET", "/posts", params={"sort": "trending", "limit": min(max(n, 1), PAGE)})
+        resp.raise_for_status()
+        return [p["post_id"] for p in resp.json().get("items") or [] if p.get("post_id") is not None][:n]
+
     async def feed_locked(self) -> bool:
         """Whether the platform has locked its feed: only citizens and moderators can act then."""
         resp = await self._send("GET", "/feed/lock")
