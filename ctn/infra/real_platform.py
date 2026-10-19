@@ -295,16 +295,6 @@ class RealPlatform:
             raise ReportingSuspended(resp.text[:200])
         resp.raise_for_status()
 
-    async def report_account(self, username: str, account: str, detail: str, reason: str = "inauthentic") -> None:
-        """Report an account (by username) as inauthentic, `detail` after the platform's opening for accounts."""
-        resp = await self._call("POST", f"/accounts/{await self.account_id(account)}/report", username,
-                                json={"reason": reason, "detail": detail}, idempotent=False)
-        if resp.status_code == 403 and "awaiting a moderator" in resp.text.lower():
-            raise ReportQueueFull(resp.text[:200])
-        if resp.status_code in (403, 429) and any(w in resp.text.lower() for w in ("suspend", "block", "banned")):
-            raise ReportingSuspended(resp.text[:200])
-        resp.raise_for_status()
-
     async def verified_now(self, username: str) -> bool:
         """Whether this account has the platform's verified badge, asked afresh (a badge can come later)."""
         resp = await self._send("GET", f"/accounts/{await self.account_id(username)}")

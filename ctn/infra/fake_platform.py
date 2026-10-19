@@ -44,7 +44,6 @@ class FakePlatform:
         self.competitors = set(competitors)  # the moderator's ground truth: accounts run by teams
         self.reports = {}        # post_id -> usernames that reported it
         self.hidden = set()      # posts the moderator confirmed as inauthentic
-        self.account_reports = []  # (reporter, account reported)
         self.reporting_blocked_until: Optional[datetime] = None
         self._ids = itertools.count(1)
         self._note_ids = itertools.count(1)
@@ -109,13 +108,6 @@ class FakePlatform:
             return False
         followed.remove(target)
         return True
-
-    async def report_account(self, username: str, account: str, detail: str) -> None:
-        """Report an account as inauthentic; the platform's account review rules later."""
-        if not detail.startswith("I think that this account is conducting "):
-            raise ValueError(f"an account report's detail must begin 'I think that this account is conducting': "
-                             f"{detail!r}")
-        self.account_reports.append((username, account))
 
     async def report(self, username: str, post_id: int, detail: str) -> bool:
         """Report a post as inauthentic, saying why as the platform requires. This moderator rules at once; True if

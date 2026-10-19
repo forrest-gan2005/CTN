@@ -69,11 +69,7 @@ RULING_CHECK = timedelta(minutes=30)
 RULING_SOONEST = timedelta(hours=1)  # five teams' reports bring a ruling in 1½ hours; nothing is due before
 RULING_DUE = timedelta(hours=25)
 RULING_LOOKS = 10
-# An account with a post the moderator hid and at least 100 actions is suspended when reported as an account, which
-# pays every reporting team; one that doesn't qualify yet is dismissed without penalty. Posts we collected stand in
-# for its actions (likes and reposts come on top).
-ACCOUNT_OPENING = "I think that this account is conducting inauthentic (bot) activity because "
-ACCOUNT_REPORT_MIN_POSTS = 30
+
 TOO_FAST, COPIED, PARAPHRASED = "superhuman posting rate", "copied across accounts", "paraphrased across accounts"
 # Several accounts saying the same can be the organisers' own script or a story everyone retells: those accounts wait
 # for a person to look before anything is reported. Everything else above is a mistake no citizen makes.
@@ -609,44 +605,6 @@ class Reporter:
                          else "is still up a day on: ruled genuine")
         return settled
 
-    async def report_accounts(self) -> int:
-        """Report as accounts the competitors' accounts with a post taken down after our report and plenty of
-        activity, once each. Returns how many were reported."""
-        done = self.state.account_reported()
-        due = [a for a in self.state.hidden_authors() - done if not self.scanner.off_limits(a)]
-        sent = 0
-        for author in due:
-            if self.locked or self.blocked():
-                break
-            posts = self.scanner.npc_store.db.execute("SELECT posts FROM authors WHERE author = ?",
-                                                      (author,)).fetchone()
-            if not posts or posts[0] < ACCOUNT_REPORT_MIN_POSTS:
-                continue
-            current = self.state.suspect(author)
-            rule = rule_of(current[0]) if current else ""
-            known = "a moderator has already hidden one of its posts as inauthentic"
-            why = rule[len(MANUAL):] if rule.startswith(MANUAL) else BECAUSE.get(rule, known)
-            try:
-                await self.platform.report_account(self.username, author, f"{ACCOUNT_OPENING}{why}.")
-            except ReportQueueFull as e:
-                self.blocked_until = datetime.now(timezone.utc) + QUEUE_FULL_PAUSE
-                log.warning("account report on %s waits: reports awaiting a ruling are at the limit (%s)", author, e)
-                break
-            except ReportingSuspended as e:
-                self.blocked_until = datetime.now(timezone.utc) + REPORT_SUSPENSION
-                log.warning("reporting suspended (%s); standing down until %s", e, self.blocked_until)
-                break
-            except Exception as e:
-                code = getattr(getattr(e, "response", None), "status_code", None)
-                if code is not None and 400 <= code < 500:
-                    self.state.record_account_report(author, _now(), "failed")
-                log.warning("account report on %s didn't go (%s)", author, str(e) or type(e).__name__)
-                continue
-            self.state.record_account_report(author, _now(), "sent")
-            sent += 1
-            log.info("reported the account %s (%s)", author, why)
-        return sent
-
     async def run(self, until: Optional[float] = None) -> None:
         loop = asyncio.get_running_loop()
         while until is None or loop.time() < until:
@@ -655,7 +613,6 @@ class Reporter:
                 if not self.blocked():
                     self.scanner.scan()
                     await self.report_some()
-                    await self.report_accounts()
             except Exception:
                 log.exception("blue round failed")
             await asyncio.sleep(self.interval)
@@ -1267,7 +1224,7 @@ async def _report_queue_demo() -> None:
 
 async def _team_ruling_demo() -> None:
     """Five reports a competitor team a day and one an account; reported posts are looked at until hidden, or still
-    up a day on; an account with a post hidden and plenty of posts is reported as an account, once."""
+    up a day on."""
     from ctn.infra.collector import Collector, NpcStore
     from ctn.infra.fake_platform import FakePlatform
     from ctn.infra.state import StateStore
@@ -1315,13 +1272,6 @@ async def _team_ruling_demo() -> None:
     status = lambda pid: state.db.execute("SELECT status FROM reports WHERE post_id = ?", (pid,)).fetchone()[0]
     assert [status(x) for x in (hidden, gone, stood, waiting)] == ["hidden", "hidden", "stood", "sent"]
 
-    hider, goner = p.posts[hidden]["author"], p.posts[gone]["author"]
-    for i in range(ACCOUNT_REPORT_MIN_POSTS):  # one of them is busy enough to be suspended
-        await p.post(hider, f"ferry late again, day {i}")
-    await Collector(p, npc_store, min_interval=0).poll()
-    assert await reporter.report_accounts() == 1 and p.account_reports == [("joe", hider)]
-    assert await reporter.report_accounts() == 0, "once each; the quiet one isn't worth a report yet"
-    assert goner not in state.account_reported()
 
 
 async def _report_retry_demo() -> None:

@@ -92,12 +92,6 @@ CREATE TABLE IF NOT EXISTS rival_teams (
     author TEXT PRIMARY KEY,
     team TEXT NOT NULL
 );
--- Accounts reported as inauthentic accounts (once each): sent | failed.
-CREATE TABLE IF NOT EXISTS account_reports (
-    author TEXT PRIMARY KEY,
-    reported_at TEXT NOT NULL,
-    status TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS report_intents (
     post_id INTEGER PRIMARY KEY, -- a report on its way; one left here when the process stopped may have arrived
     author TEXT NOT NULL,
@@ -403,17 +397,7 @@ class StateStore:
             else:
                 self.db.execute("UPDATE reports SET status = ? WHERE post_id = ?", (status, post_id))
 
-    def hidden_authors(self) -> set:
-        """Accounts with a reported post taken down after our report (upheld, or hidden since)."""
-        return {r[0] for r in self.db.execute(
-            "SELECT DISTINCT author FROM reports WHERE status IN ('upheld', 'hidden')")}
 
-    def account_reported(self) -> set:
-        return {r[0] for r in self.db.execute("SELECT author FROM account_reports")}
-
-    def record_account_report(self, author: str, at: str, status: str) -> None:
-        with self.db:
-            self.db.execute("INSERT OR REPLACE INTO account_reports VALUES (?, ?, ?)", (author, at, status))
 
     def begin_report(self, post_id: int, author: str, reason: str, at: str) -> None:
         with self.db:
