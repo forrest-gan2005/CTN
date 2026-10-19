@@ -88,6 +88,7 @@ CONV_REPLY_PROB = 0.5  # chance of replying back when an NPC has engaged us
 INBOX_TTL = timedelta(hours=12)  # answering a much older reply looks odd
 SHARED_WINDOW = timedelta(days=7)  # a phrase two teammates used this recently is one too many for a third
 SHARED_LIMIT = 2
+COMMON_ACCOUNTS = 5  # a phrase this many other accounts used lately is how people here talk, not a tell of ours
 MAX_REPLIES_PER_AUTHOR = 4  # team-wide per 24h: no ping-pong with competitor bots, no crowding one citizen
 # A citizen who has changed a view in a session is much harder to move again on it before signing out, so after one
 # of our replies the team leaves them be for a while (a session's length isn't published; two hours covers it).
@@ -223,7 +224,7 @@ class Bot:
                  roster: Optional[Roster] = None, store: Optional[StateStore] = None,
                  examples=None, feed: Optional[Callable[[], list]] = None,
                  profile: Optional[Callable[[str], list]] = None, twins=None, injection=None,
-                 depth: Optional[Callable[[int], int]] = None) -> None:
+                 depth: Optional[Callable[[int], int]] = None, said=None) -> None:
         self.username = persona["username"]
         self.persona = persona
         self.line = persona["line"]
@@ -238,6 +239,7 @@ class Bot:
         self.feed = feed  # shared copy of Latest kept by the collector; None reads the API directly
         self.profile = profile  # author -> their recent post texts, for tailoring replies
         self.depth = depth  # post id -> how many messages deep it sits in its thread; None: not known
+        self.said = said  # (words, since) -> (author, text) of others' posts with those words; None: none known
         self.hashtags = []  # what citizens are tagging today, refreshed by the team
         self.twins = twins  # semantic.NearIndex of the whole team's recent posts; None skips the check
         self.injection = injection  # injection.InjectionClassifier; None leaves probe-spotting to the regexes
@@ -916,16 +918,30 @@ class Bot:
 
     def _shared_phrase(self, text: str) -> Optional[str]:
         """A phrase at least SHARED_LIMIT other accounts of ours used this week, setting names aside: the same
-        turn of phrase across accounts is what links them, even when the posts say different things."""
+        turn of phrase across accounts is what links them, even when the posts say different things. One that
+        COMMON_ACCOUNTS accounts outside the team (competitors aside) used too links nobody."""
         mine = fresh_phrases(text, self.world)
         if not mine:
             return None
         users = {}
-        since = _iso(datetime.now(timezone.utc) - SHARED_WINDOW)
-        for user, content in self.store.team_texts(since, self.username):
+        since = datetime.now(timezone.utc) - SHARED_WINDOW
+        for user, content in self.store.team_texts(_iso(since), self.username):
             for phrase in mine & phrases(content):
                 users.setdefault(phrase, set()).add(user)
-        return next((phrase for phrase, who in users.items() if len(who) >= SHARED_LIMIT), None)
+        shared = [phrase for phrase, who in users.items() if len(who) >= SHARED_LIMIT]
+        rivals = self._rivals() if shared and self.said is not None else set()
+        return next((phrase for phrase in shared if not self._common(phrase, since, rivals)), None)
+
+    def _common(self, phrase: str, since: datetime, rivals: set) -> bool:
+        if self.said is None:
+            return False
+        others = set()
+        for author, content in self.said(phrase.split(), since):
+            if author not in rivals and author not in others and phrase in phrases(content):
+                others.add(author)
+                if len(others) >= COMMON_ACCOUNTS:
+                    return True
+        return False
 
     def _too_similar(self, text: str, examples: list) -> bool:
         """Reject near-copies of the examples shown or of this bot's own earlier posts, or a sentence lifted from one."""

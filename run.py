@@ -99,7 +99,7 @@ class Team:
         world = load_world()
         self.bots = [Bot(p, platform, llm, world, stance_llm=stance_llm, roster=self.roster, store=state,
                          feed=self.feed, profile=lambda author: npc_store.recent_by(author, 5), twins=self.twins,
-                         injection=injection, depth=npc_store.depth)
+                         injection=injection, depth=npc_store.depth, said=npc_store.said)
                      for p in personas]
         self.gifs = GifPool() if gifs else None  # one pool, so the whole team spaces out reusing a GIF
         if self.gifs is not None:  # and across restarts, from what the team has posted or may have
@@ -1281,6 +1281,23 @@ def persona_story_check() -> None:
         said(user, "A prepared island sparkles.")
     assert key._shared_phrase("honestly a prepared island sparkles") == "a prepared island sparkles", \
         "an ordinary phrase passed as a setting name"
+    others = NpcStore(":memory:", own_usernames={"grace_teo", "lena_brook"})
+    talk = Bot(by["jordan_wake"], FakePlatform(), FakeLLM(0, 0), load_world(), store=state, said=others.said)
+    now = datetime.now(timezone.utc)
+
+    def heard(i: int, author: str, days_ago: float = 0) -> None:
+        others.add_posts([{"id": i, "author": author, "content": "That vending machine coffee tasted like regret",
+                           "created_at": (now - timedelta(days=days_ago)).isoformat()}])
+
+    for i in range(bot_module.COMMON_ACCOUNTS - 1):
+        heard(i, f"local_{i}")
+    heard(50, "grace_teo")
+    heard(51, "old_timer", days_ago=8)
+    state.add_suspect("rival_x", "manual: one of a scripted team", 1, now.isoformat(timespec="seconds"))
+    heard(52, "rival_x")
+    assert talk._shared_phrase(draft), "ours, a competitor and a week-old post made it common"
+    heard(53, "one_more_local")
+    assert talk._shared_phrase(draft) is None, f"{bot_module.COMMON_ACCOUNTS} other accounts say it: common speech"
 
     assert check_backstories(personas) == []
     broken = copy.deepcopy(personas)

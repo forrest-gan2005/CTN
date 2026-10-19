@@ -362,6 +362,13 @@ class NpcStore:
         )
         return [r[0] for r in rows]
 
+    def said(self, words: list, since: datetime) -> Iterable[tuple]:
+        """(author, content) of posts since `since` by accounts not ours with these words in this order, newest
+        first, read as needed: a loose match (any apostrophe, anything in between) for the caller to check."""
+        pattern = "%" + "%".join(w.replace("'", "_") for w in words) + "%"
+        return self.db.execute("SELECT author, content FROM posts WHERE ours = 0 AND created_at >= ? AND content LIKE ? "
+                               "ORDER BY id DESC", (_iso(since), pattern))
+
     def top_hashtags(self, since: datetime, n: int = 5, cutoff: datetime = COMPETITION_START) -> list:
         """Hashtags citizens used most since `since` (at least twice), most used first."""
         c = _iso(cutoff)
@@ -623,7 +630,7 @@ async def _demo(seconds: float) -> None:
 
 def _hashtag_check() -> None:
     """A citizen who tags every word doesn't make "#the" a trend; real tags still count. Thread depth counts up
-    the stored parents."""
+    the stored parents. Others' posts with a phrase are found whatever the apostrophe, never ours or old ones."""
     store = NpcStore(":memory:")
     t0 = datetime(2026, 10, 19, 1, 0, tzinfo=timezone.utc)
     texts = ["#spent #the #morning at the wharf", "#the ferry again #H2D2", "#h2d2 worries me #the end", "#NHS #NHS"]
@@ -634,6 +641,13 @@ def _hashtag_check() -> None:
                       "parent_id": 99 + i if i else None} for i in range(12)])
     assert [store.depth(100), store.depth(101), store.depth(107), store.depth(111)] == [1, 2, 8, 10]
     assert store.depth(5000) == 0 and store.depth(111, limit=4) == 4
+    said = NpcStore(":memory:", own_usernames={"mate"})
+    said.add_posts([{"id": 1, "author": "citizen_1", "content": "I’d rather show a card than shut the bakery",
+                     "created_at": _iso(t0)},
+                    {"id": 2, "author": "citizen_2", "content": "id rather not", "created_at": _iso(t0)},
+                    {"id": 3, "author": "mate", "content": "I'd rather show a card", "created_at": _iso(t0)},
+                    {"id": 4, "author": "citizen_3", "content": "I'd rather show a card", "created_at": _iso(t0 - timedelta(days=8))}])
+    assert [a for a, _ in said.said(["i'd", "rather", "show", "a"], t0 - timedelta(days=7))] == ["citizen_1"]
 
 
 def _registered_check() -> None:
