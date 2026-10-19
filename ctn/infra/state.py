@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 from ctn import paths
 
 DEFAULT_DB = paths.DATA / "bots.db"
+# Statuses of reports that reached the platform, or may have.
+OUT = "('sent', 'upheld', 'unknown', 'hidden', 'stood')"
 SYDNEY = ZoneInfo("Australia/Sydney")  # quota places are kept by Sydney date
 
 SCHEMA = """
@@ -51,6 +53,8 @@ CREATE TABLE IF NOT EXISTS reports (
     reported_at TEXT NOT NULL,
     status TEXT NOT NULL,      -- sent (accepted, verdict pending) | upheld | rejected | unknown (may or may not
                                -- have arrived; never resent) | error (never arrived; retried) | failed (gave up)
+                               -- | hidden (gone from view since: ruled inauthentic, or deleted) | stood (still
+                               -- up a day after: ruled genuine, as far as we can tell)
     attempts INTEGER NOT NULL DEFAULT 1,
     next_try TEXT              -- for errors: not before this
 );
@@ -83,6 +87,17 @@ CREATE TABLE IF NOT EXISTS reply_picks (
     write_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS reply_picks_at ON reply_picks(picked_at);
+-- Which competitor team an account belongs to, when a person could tell: reports are rationed per team.
+CREATE TABLE IF NOT EXISTS rival_teams (
+    author TEXT PRIMARY KEY,
+    team TEXT NOT NULL
+);
+-- Accounts reported as inauthentic accounts (once each): sent | failed.
+CREATE TABLE IF NOT EXISTS account_reports (
+    author TEXT PRIMARY KEY,
+    reported_at TEXT NOT NULL,
+    status TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS report_intents (
     post_id INTEGER PRIMARY KEY, -- a report on its way; one left here when the process stopped may have arrived
     author TEXT NOT NULL,
@@ -354,8 +369,51 @@ class StateStore:
     def author_reports(self) -> dict:
         """author -> reports on its posts that went out, may have, or are on their way."""
         return dict(self.db.execute(
-            "SELECT author, COUNT(*) FROM (SELECT post_id, author FROM reports WHERE status IN ('sent', 'upheld', "
-            "'unknown') UNION SELECT post_id, author FROM report_intents) GROUP BY author").fetchall())
+            f"SELECT author, COUNT(*) FROM (SELECT post_id, author FROM reports WHERE status IN {OUT} "
+            "UNION SELECT post_id, author FROM report_intents) GROUP BY author").fetchall())
+
+    def set_team(self, author: str, team: str) -> None:
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO rival_teams VALUES (?, ?)", (author, team))
+
+    def team_of(self, author: str) -> str:
+        """The competitor team a person put this account in; on its own, the account is its own team."""
+        row = self.db.execute("SELECT team FROM rival_teams WHERE author = ?", (author,)).fetchone()
+        return row[0] if row else author
+
+    def team_reports(self, since: str) -> dict:
+        """team -> reports on its accounts' posts since UTC ISO time `since` that went out, may have, or are on
+        their way."""
+        return dict(self.db.execute(
+            f"SELECT COALESCE(t.team, r.author), COUNT(*) FROM (SELECT post_id, author FROM reports WHERE status IN "
+            f"{OUT} AND reported_at >= ? UNION SELECT post_id, author FROM report_intents WHERE at >= ?) r "
+            "LEFT JOIN rival_teams t ON t.author = r.author GROUP BY 1", (since, since)).fetchall())
+
+    def awaiting_ruling(self, before: str, limit: int) -> list:
+        """(post_id, reported_at) of reports the platform took, sent before `before`, whose fate we haven't seen,
+        least recently looked at first."""
+        return self.db.execute("SELECT post_id, reported_at FROM reports WHERE status = 'sent' AND reported_at < ? "
+                               "ORDER BY attempts, reported_at LIMIT ?", (before, limit)).fetchall()
+
+    def mark_ruling(self, post_id: int, status: Optional[str]) -> None:
+        """What became of a reported post: hidden, stood, or None for looked at and still pending."""
+        with self.db:
+            if status is None:
+                self.db.execute("UPDATE reports SET attempts = attempts + 1 WHERE post_id = ?", (post_id,))
+            else:
+                self.db.execute("UPDATE reports SET status = ? WHERE post_id = ?", (status, post_id))
+
+    def hidden_authors(self) -> set:
+        """Accounts with a reported post taken down after our report (upheld, or hidden since)."""
+        return {r[0] for r in self.db.execute(
+            "SELECT DISTINCT author FROM reports WHERE status IN ('upheld', 'hidden')")}
+
+    def account_reported(self) -> set:
+        return {r[0] for r in self.db.execute("SELECT author FROM account_reports")}
+
+    def record_account_report(self, author: str, at: str, status: str) -> None:
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO account_reports VALUES (?, ?, ?)", (author, at, status))
 
     def begin_report(self, post_id: int, author: str, reason: str, at: str) -> None:
         with self.db:

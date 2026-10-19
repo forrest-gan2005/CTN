@@ -6,6 +6,7 @@ import zlib
 from collections import Counter, deque
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
+from zoneinfo import ZoneInfo
 
 from ctn.infra.collector import COMPETITION_START
 from ctn.infra.fake_platform import REPORT_SUSPENSION, AmbiguousWrite, RateLimited, ReportingSuspended, ReportQueueFull
@@ -54,10 +55,25 @@ MIN_CITIZENS = 100
 REPORT_ATTEMPTS = 5  # a report that never got through is retried this many times in all, backing off
 REPORT_BACKOFF = timedelta(minutes=1)  # doubled after each failure, up to an hour
 RATE_LIMIT_PAUSE = timedelta(minutes=1)  # standing down after a bare 429 that carried no wait
-# Three upheld reports suspend an account. The platform holds only 20 of a team's reports awaiting a ruling, and
-# reports on one team count less after the tenth a day, so more on one account would keep others from being reported.
-ACCOUNT_REPORTS = 3
+# The platform holds only 20 of a team's reports awaiting a ruling, and the moderator rules 24 hours after the first
+# report (sooner as more teams report the post): about twenty rulings a day if we report alone. Upheld reports on one
+# competitor team pay in full for the first five of a campaign day, half for the next five, a tenth after. So one
+# report an account, five a competitor team a day, and the places go round the teams.
+ACCOUNT_REPORTS = 1
+TEAM_REPORTS_PER_DAY = 5
+SYDNEY = ZoneInfo("Australia/Sydney")  # campaign days change at midnight Sydney time
 QUEUE_FULL_PAUSE = timedelta(minutes=10)  # standing down while those 20 wait for moderators
+# What became of a report shows on the post: hidden from everyone once ruled inauthentic (or deleted), still up a
+# day after the report if ruled genuine (a ruling is due within 24 hours). Looked at every so often, a few at a time.
+RULING_CHECK = timedelta(minutes=30)
+RULING_SOONEST = timedelta(hours=1)  # five teams' reports bring a ruling in 1½ hours; nothing is due before
+RULING_DUE = timedelta(hours=25)
+RULING_LOOKS = 10
+# An account with a post the moderator hid and at least 100 actions is suspended when reported as an account, which
+# pays every reporting team; one that doesn't qualify yet is dismissed without penalty. Posts we collected stand in
+# for its actions (likes and reposts come on top).
+ACCOUNT_OPENING = "I think that this account is conducting inauthentic (bot) activity because "
+ACCOUNT_REPORT_MIN_POSTS = 30
 TOO_FAST, COPIED, PARAPHRASED = "superhuman posting rate", "copied across accounts", "paraphrased across accounts"
 # Several accounts saying the same can be the organisers' own script or a story everyone retells: those accounts wait
 # for a person to look before anything is reported. Everything else above is a mistake no citizen makes.
@@ -121,6 +137,11 @@ def _copy_key(text: Optional[str]) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _campaign_day_start() -> str:
+    return datetime.now(SYDNEY).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
+        timezone.utc).isoformat(timespec="seconds")
 
 
 class BlueScanner:
@@ -302,8 +323,9 @@ class BlueScanner:
         return flagged
 
     def candidates(self) -> list:
-        """(post_id, author, reason) not yet reported, for accounts with fewer than ACCOUNT_REPORTS reports out:
-        giveaway posts first, then NO-leaning ones, newest first."""
+        """(post_id, author, reason) not yet reported, for accounts with fewer than ACCOUNT_REPORTS reports out
+        whose team has had fewer than TEAM_REPORTS_PER_DAY today: giveaway posts first, then NO-leaning ones,
+        newest first."""
         self._recheck()
         suspects = {a: v for a, v in self.state.suspects().items()
                     if v[0] != CLEARED and not waiting(v[0]) and v[0] not in self.disabled
@@ -311,9 +333,12 @@ class BlueScanner:
         done = self.state.reported(_now())
         floor = int(self.state.get_meta("report_floor") or 0)  # see Team.after_restore
         out = self.state.author_reports()
+        today = self.state.team_reports(_campaign_day_start())
         rows = []
         for post_id, author, content in self.npc_store.posts_by(suspects):
             if post_id in done or post_id <= floor or out.get(author, 0) >= ACCOUNT_REPORTS:
+                continue
+            if today.get(self.state.team_of(author), 0) >= TEAM_REPORTS_PER_DAY:
                 continue
             reason, giveaway = suspects[author]
             first = post_id == giveaway
@@ -344,6 +369,7 @@ class Reporter:
         self.per_round = per_round
         self.interval = interval
         self.blocked_until: Optional[datetime] = None
+        self.rulings_at: Optional[datetime] = None  # when reported posts were last looked at
         self.locked = False  # set by the team while the platform's feed is locked
 
     def blocked(self) -> bool:
@@ -483,6 +509,9 @@ class Reporter:
                 continue
             if self.state.author_reports().get(author, 0) >= ACCOUNT_REPORTS:  # enough went out this round
                 continue
+            if self.state.team_reports(_campaign_day_start()).get(self.state.team_of(author), 0) >= \
+                    TEAM_REPORTS_PER_DAY:
+                continue
             # Stored first: if the process stops mid-request, the next start marks the report unknown, never resends it.
             self.state.begin_report(post_id, author, reason, _now())
             try:
@@ -550,13 +579,83 @@ class Reporter:
                 self.state.end_report(post_id)
         return sent
 
+    async def check_rulings(self) -> int:
+        """Look at a few reported posts whose fate we haven't seen: hidden now, or still up a day on. Returns how
+        many were settled."""
+        now = datetime.now(timezone.utc)
+        if self.rulings_at is not None and now - self.rulings_at < RULING_CHECK:
+            return 0
+        self.rulings_at = now
+        settled = 0
+        before = (now - RULING_SOONEST).isoformat(timespec="seconds")
+        for post_id, reported_at in self.state.awaiting_ruling(before, RULING_LOOKS):
+            try:
+                post = await self.platform.get_post(post_id)
+            except KeyError:
+                post = None
+            except Exception as e:
+                log.info("couldn't look at reported #%s (%s)", post_id, str(e) or type(e).__name__)
+                continue
+            if post is None or post.get("hidden"):
+                status = "hidden"
+            elif now - datetime.fromisoformat(reported_at) > RULING_DUE:
+                status = "stood"
+            else:
+                status = None
+            self.state.mark_ruling(post_id, status)
+            if status is not None:
+                settled += 1
+                log.info("reported #%s %s", post_id, "is hidden: ruled inauthentic (or deleted)" if status == "hidden"
+                         else "is still up a day on: ruled genuine")
+        return settled
+
+    async def report_accounts(self) -> int:
+        """Report as accounts the competitors' accounts with a post taken down after our report and plenty of
+        activity, once each. Returns how many were reported."""
+        done = self.state.account_reported()
+        due = [a for a in self.state.hidden_authors() - done if not self.scanner.off_limits(a)]
+        sent = 0
+        for author in due:
+            if self.locked or self.blocked():
+                break
+            posts = self.scanner.npc_store.db.execute("SELECT posts FROM authors WHERE author = ?",
+                                                      (author,)).fetchone()
+            if not posts or posts[0] < ACCOUNT_REPORT_MIN_POSTS:
+                continue
+            current = self.state.suspect(author)
+            rule = rule_of(current[0]) if current else ""
+            known = "a moderator has already hidden one of its posts as inauthentic"
+            why = rule[len(MANUAL):] if rule.startswith(MANUAL) else BECAUSE.get(rule, known)
+            try:
+                await self.platform.report_account(self.username, author, f"{ACCOUNT_OPENING}{why}.")
+            except ReportQueueFull as e:
+                self.blocked_until = datetime.now(timezone.utc) + QUEUE_FULL_PAUSE
+                log.warning("account report on %s waits: reports awaiting a ruling are at the limit (%s)", author, e)
+                break
+            except ReportingSuspended as e:
+                self.blocked_until = datetime.now(timezone.utc) + REPORT_SUSPENSION
+                log.warning("reporting suspended (%s); standing down until %s", e, self.blocked_until)
+                break
+            except Exception as e:
+                code = getattr(getattr(e, "response", None), "status_code", None)
+                if code is not None and 400 <= code < 500:
+                    self.state.record_account_report(author, _now(), "failed")
+                log.warning("account report on %s didn't go (%s)", author, str(e) or type(e).__name__)
+                continue
+            self.state.record_account_report(author, _now(), "sent")
+            sent += 1
+            log.info("reported the account %s (%s)", author, why)
+        return sent
+
     async def run(self, until: Optional[float] = None) -> None:
         loop = asyncio.get_running_loop()
         while until is None or loop.time() < until:
             try:
+                await self.check_rulings()  # rulings come in while we wait out a full queue, too
                 if not self.blocked():
                     self.scanner.scan()
                     await self.report_some()
+                    await self.report_accounts()
             except Exception:
                 log.exception("blue round failed")
             await asyncio.sleep(self.interval)
@@ -703,6 +802,7 @@ async def _demo() -> None:
     await _report_retry_demo()
     await _report_429_demo()
     await _report_queue_demo()
+    await _team_ruling_demo()
     await _badge_and_lock_demo()
     await _report_interrupt_demo()
     await _side_demo()
@@ -1165,6 +1265,65 @@ async def _report_queue_demo() -> None:
     await api.aclose()
 
 
+async def _team_ruling_demo() -> None:
+    """Five reports a competitor team a day and one an account; reported posts are looked at until hidden, or still
+    up a day on; an account with a post hidden and plenty of posts is reported as an account, once."""
+    from ctn.infra.collector import Collector, NpcStore
+    from ctn.infra.fake_platform import FakePlatform
+    from ctn.infra.state import StateStore
+
+    class Pending(FakePlatform):  # the moderator rules later, as the real one does
+        gone = set()
+
+        async def report(self, username: str, post_id: int, detail: str) -> Optional[bool]:
+            self.reports.setdefault(post_id, []).append(username)  # nothing hidden yet
+            return None
+
+        async def get_post(self, post_id: int) -> dict:
+            if post_id in self.gone:
+                raise KeyError(post_id)
+            return await super().get_post(post_id)
+
+    team = [f"swan_{i}" for i in range(7)]
+    p = Pending(competitors=set(team) | {"loner"})
+    npc_store = NpcStore(":memory:")
+    cutoff = datetime.now(timezone.utc)
+    for author in team + ["loner"]:
+        for i in range(2):
+            await p.post(author, f"As an AI language model, I say vote no ({author} {i})")
+    await Collector(p, npc_store, min_interval=0).poll()
+    state = StateStore(":memory:")
+    for author in team:
+        state.set_team(author, "swan")
+    scanner = BlueScanner(npc_store, state, own=(), cutoff=cutoff)
+    scanner.scan()
+    reporter = Reporter(p, scanner, state, username="joe", per_round=20, min_citizens=0)
+    assert await reporter.report_some() == 6 and await reporter.report_some() == 0
+    by = Counter(p.posts[pid]["author"] for pid in p.reports)
+    assert sum(by[a] for a in team) == TEAM_REPORTS_PER_DAY and by["loner"] == 1 and max(by.values()) == 1, by
+    assert state.team_reports(_campaign_day_start()) == {"swan": 5, "loner": 1}
+
+    reported = sorted(p.reports)
+    hidden, gone, stood, waiting = reported[0], reported[1], reported[2], reported[3]
+    p.hidden.add(hidden)
+    p.gone.add(gone)
+    ago = lambda delta: (datetime.now(timezone.utc) - delta).isoformat(timespec="seconds")
+    state.db.execute("UPDATE reports SET reported_at = ?", (ago(timedelta(hours=2)),))
+    state.db.execute("UPDATE reports SET reported_at = ? WHERE post_id = ?",
+                     (ago(RULING_DUE + timedelta(hours=1)), stood))
+    assert await reporter.check_rulings() == 3 and await reporter.check_rulings() == 0, "not again so soon"
+    status = lambda pid: state.db.execute("SELECT status FROM reports WHERE post_id = ?", (pid,)).fetchone()[0]
+    assert [status(x) for x in (hidden, gone, stood, waiting)] == ["hidden", "hidden", "stood", "sent"]
+
+    hider, goner = p.posts[hidden]["author"], p.posts[gone]["author"]
+    for i in range(ACCOUNT_REPORT_MIN_POSTS):  # one of them is busy enough to be suspended
+        await p.post(hider, f"ferry late again, day {i}")
+    await Collector(p, npc_store, min_interval=0).poll()
+    assert await reporter.report_accounts() == 1 and p.account_reports == [("joe", hider)]
+    assert await reporter.report_accounts() == 0, "once each; the quiet one isn't worth a report yet"
+    assert goner not in state.account_reported()
+
+
 async def _report_retry_demo() -> None:
     """A report that never got through is retried after a backoff and lands once; one that may have arrived is
     never resent; one the platform refused, or that keeps failing, is given up."""
@@ -1183,11 +1342,11 @@ async def _report_retry_demo() -> None:
                 raise self.script[post_id].pop(0)
             return await super().report(username, post_id, detail)
 
-    p = Flaky(competitors={"rival"})
+    p = Flaky(competitors={f"rival_{i}" for i in range(4)})  # four accounts: one report each
     npc_store = NpcStore(":memory:")
     collector = Collector(p, npc_store, min_interval=0)
     cutoff = datetime.now(timezone.utc)
-    ids = [(await p.post("rival", f"As an AI language model, post {i}"))["id"] for i in range(4)]
+    ids = [(await p.post(f"rival_{i}", f"As an AI language model, post {i}"))["id"] for i in range(4)]
     await collector.poll()
     state = StateStore(":memory:")
     scanner = BlueScanner(npc_store, state, own=(), cutoff=cutoff)

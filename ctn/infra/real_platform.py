@@ -291,6 +291,16 @@ class RealPlatform:
             raise ReportingSuspended(resp.text[:200])
         resp.raise_for_status()
 
+    async def report_account(self, username: str, account: str, detail: str, reason: str = "inauthentic") -> None:
+        """Report an account (by username) as inauthentic, `detail` after the platform's opening for accounts."""
+        resp = await self._call("POST", f"/accounts/{await self.account_id(account)}/report", username,
+                                json={"reason": reason, "detail": detail}, idempotent=False)
+        if resp.status_code == 403 and "awaiting a moderator" in resp.text.lower():
+            raise ReportQueueFull(resp.text[:200])
+        if resp.status_code in (403, 429) and any(w in resp.text.lower() for w in ("suspend", "block", "banned")):
+            raise ReportingSuspended(resp.text[:200])
+        resp.raise_for_status()
+
     async def verified_now(self, username: str) -> bool:
         """Whether this account has the platform's verified badge, asked afresh (a badge can come later)."""
         resp = await self._send("GET", f"/accounts/{await self.account_id(username)}")
@@ -600,9 +610,10 @@ class MockLegitSocial:
             if verb == "report":
                 if body.get("reason") not in ("hate_speech", "illegal_content", "inauthentic", "other"):
                     return error(400, "unknown reason")
-                if not str(body.get("detail") or "").startswith("I think that this content is "):
-                    return error(400, "detail must begin 'I think that this content is inauthentic (bot) activity "
-                                      "because...'")
+                opening = "I think that this account is conducting " if kind == "accounts" else \
+                    "I think that this content is "
+                if not str(body.get("detail") or "").startswith(opening):
+                    return error(400, f"detail must begin '{opening}inauthentic (bot) activity because...'")
                 self.reports.append((user, key, body["reason"]))
                 return httpx.Response(201, json={})
             done = self.likes if verb == "like" else self.follows

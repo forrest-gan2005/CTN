@@ -100,7 +100,7 @@ def sample(npc_store: NpcStore, state: StateStore, minutes: float = 30, accounts
 
 
 def approve(npc_store: NpcStore, state: StateStore, author: str, why: str, cutoff=COMPETITION_START,
-            joined: Optional[dict] = None, opens=GAME_OPENS) -> str:
+            joined: Optional[dict] = None, opens=GAME_OPENS, team: Optional[str] = None) -> str:
     """Write an account up: from then on its posts are reported (up to ACCOUNT_REPORTS), the report saying `why`."""
     why = " ".join(why.split()).rstrip(".")
     if len(why) < 20:
@@ -117,7 +117,10 @@ def approve(npc_store: NpcStore, state: StateStore, author: str, why: str, cutof
     reason = MANUAL + why
     if not state.add_suspect(author, reason, newest[0][0], datetime.now(timezone.utc).isoformat(timespec="seconds")):
         state.update_suspect(author, reason)
-    return f"{author} written up: up to {ACCOUNT_REPORTS} of its posts will be reported because {why}"
+    if team:
+        state.set_team(author, team)  # reports are rationed per competitor team a day
+    return (f"{author} written up{f' as one of {team}' if team else ''}: up to {ACCOUNT_REPORTS} of its posts will "
+            f"be reported because {why}")
 
 
 def clear(state: StateStore, author: str) -> str:
@@ -158,7 +161,8 @@ def _self_test() -> None:
             except SystemExit:
                 pass
         approve(npc_store, state, "late_one", "it posts nothing but NO campaign slogans, with the same GIF each time.",
-                cutoff, joined, opens)
+                cutoff, joined, opens, team="slogan_team")
+        assert state.team_of("late_one") == "slogan_team" and state.team_of("late_two") == "late_two"
         assert state.suspects()["late_one"] == (MANUAL + "it posts nothing but NO campaign slogans, with the same "
                                                 "GIF each time", 3)
         listed = queue(npc_store, state)
@@ -187,6 +191,7 @@ def main() -> None:
     a = sub.add_parser("approve", help="write an account up: its posts get reported, up to three")
     a.add_argument("author")
     a.add_argument("why", nargs="+", help="why, as it should read after 'because'")
+    a.add_argument("--team", help="the competitor team it belongs to, when known (five reports a team a day)")
     c = sub.add_parser("clear", help="never report this account")
     c.add_argument("author")
     sub.add_parser("self-test", help="check this tool, offline")
@@ -201,7 +206,7 @@ def main() -> None:
     elif args.cmd == "show":
         print("\n".join(describe(npc_store, args.author, args.posts)))
     elif args.cmd == "approve":
-        print(approve(npc_store, state, args.author, " ".join(args.why)))
+        print(approve(npc_store, state, args.author, " ".join(args.why), team=args.team))
     elif args.cmd == "clear":
         print(clear(state, args.author))
 
