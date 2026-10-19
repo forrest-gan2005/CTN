@@ -1,12 +1,15 @@
 import json
 import sqlite3
 from collections import Counter
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Iterable, Optional
+from zoneinfo import ZoneInfo
 
 from ctn import paths
 
 DEFAULT_DB = paths.DATA / "bots.db"
+SYDNEY = ZoneInfo("Australia/Sydney")  # quota places are kept by Sydney date
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS seen (
@@ -62,8 +65,8 @@ CREATE TABLE IF NOT EXISTS writes (
     made_id INTEGER,
     error TEXT
 );
--- A day's quota place (a reply to a journalist, a pitch) and the write that used it: kept while the write may
--- have gone out, given back once it is known it didn't.
+-- A quota place that was used: by the write it went with (a reply to a journalist, a pitch), or, write_id 0, by a
+-- like or repost whose request started. Kept while what used it may have gone out; given back once it didn't.
 CREATE TABLE IF NOT EXISTS holds (
     key TEXT PRIMARY KEY,
     write_id INTEGER NOT NULL
@@ -278,6 +281,13 @@ class StateStore:
     def release(self, key: str) -> None:
         with self.db:
             self.db.execute("DELETE FROM claims WHERE key = ?", (key,))
+            self.db.execute("DELETE FROM holds WHERE key = ?", (key,))
+
+    def attempt(self, key: str) -> None:
+        """A like or repost holding this place is about to be sent: from now on it may have gone, even if this
+        process dies before hearing back."""
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO holds VALUES (?, 0)", (key,))
 
     def claimed(self, keys: Iterable[str]) -> set:
         keys = list(keys)
@@ -436,23 +446,36 @@ class StateStore:
         return writes, reports
 
     def free_unused_places(self) -> int:
-        """At startup: quota places taken by a run that stopped before using them. A reply's or pitch's place is
-        used once its write is journalled; a like's or repost's once it is in history. Returns how many were
-        freed."""
+        """At startup: quota places taken by a run that stopped before using them. A place is used once what it
+        went with started out (holds); a place from before holds were kept is used if history or a write that
+        may have gone out shows it. Returns how many were freed."""
         rows = self.db.execute(
-            "SELECT key, username FROM claims WHERE (substr(key, 1, 6) IN ('press:', 'pitch:') "
-            "AND key NOT IN (SELECT key FROM holds)) OR substr(key, 1, 6) = 'boost:'").fetchall()
-        unused = []
-        for key, username in rows:
-            if key.startswith("boost:"):
-                _, kind, post_id, _ = key.split(":", 3)
-                if self.db.execute("SELECT 1 FROM history WHERE username = ? AND type = ? AND post_id = ?",
-                                   (username, kind, int(post_id))).fetchone():
-                    continue
-            unused.append((key,))
+            "SELECT key, username FROM claims WHERE substr(key, 1, 6) IN ('press:', 'pitch:', 'boost:') "
+            "AND key NOT IN (SELECT key FROM holds)").fetchall()
+        unused = [(key,) for key, username in rows if not self._place_used(key, username)]
         with self.db:
             self.db.executemany("DELETE FROM claims WHERE key = ?", unused)
         return len(unused)
+
+    def _place_used(self, key: str, username: str) -> bool:
+        q = lambda sql, *args: self.db.execute(sql, args).fetchone() is not None
+        kind, rest = key.split(":", 1)
+        if kind == "boost":
+            action, post_id, _ = rest.split(":", 2)
+            return q("SELECT 1 FROM history WHERE username = ? AND type = ? AND post_id = ?", username, action,
+                     int(post_id))
+        journalist, day = rest.split(":")[:2]
+        since = datetime.combine(date.fromisoformat(day), time(0), SYDNEY).astimezone(timezone.utc).isoformat()
+        live = "status NOT IN ('not_sent', 'not_found')"
+        if kind == "pitch":
+            return (q("SELECT 1 FROM history WHERE username = ? AND type = 'post' AND topic_kind = 'pitch' "
+                      "AND angle = ? AND ts >= ?", username, journalist, since)
+                    or q(f"SELECT 1 FROM writes WHERE username = ? AND kind = 'post' AND {live} AND sent_at >= ? "
+                         "AND instr(lower(content), ?) > 0", username, since, f"@{journalist}".lower()))
+        return (q("SELECT 1 FROM history WHERE username = ? AND type = 'reply' AND target_author = ? AND ts >= ?",
+                  username, journalist, since)
+                or q("SELECT 1 FROM writes WHERE username = ? AND kind = 'reply' AND status = 'pending' "
+                     "AND sent_at >= ?", username, since))
 
     def unresolved(self, status: str = "pending") -> list:
         """(id, username, kind, parent_id, content, sent_at) of writes in this state; pending means we don't

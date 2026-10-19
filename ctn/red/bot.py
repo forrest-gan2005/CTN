@@ -488,10 +488,11 @@ class Bot:
         if self._too_similar(content, examples):
             self.rejected["too similar"] = self.rejected.get("too similar", 0) + 1
             return None
-        # A persuader's or bridge's reply on the referendum has to come down for YES: live, the small writer's
-        # replies to NO worries often just agreed ("a sunset clause might still be needed"), which the judge called
-        # neutral. Not to someone already leaning YES, where going along does no harm.
-        argue = kind == "reply" and self.line in PRESS_LINES and referendum and topic[1] != "yes"
+        # Any reply on the referendum has to come down for YES: live, replies to NO worries often just agreed ("a
+        # sunset clause might still be needed", from a persuader; "my worry is the list gets written quietly later",
+        # from an everyday account), which the judge called neutral. Not to someone already leaning YES, where going
+        # along does no harm.
+        argue = kind == "reply" and referendum and topic[1] != "yes"
         problem = await self._check(content, system,
                                     takes_side=kind == "post" and topic[0] in ("issue", "pitch") or argue,
                                     replying_to=target.get("content") if target else None)
@@ -515,9 +516,10 @@ class Bot:
         """The oldest citizen reply to us that still deserves an answer."""
         now = datetime.now(timezone.utc)
         stale, since = _iso(now - INBOX_TTL), _iso(now - timedelta(hours=24))
+        rivals = self._rivals()
         for post_id, actor, received_at in self.store.inbox(self.username):
             post = None
-            if (post_id not in self.seen and received_at >= stale
+            if (post_id not in self.seen and received_at >= stale and actor not in rivals
                     and not self.store.claimed([f"post:{post_id}"])  # a teammate answered it from the feed
                     and self.store.replies_to(actor, since) < MAX_REPLIES_PER_AUTHOR):
                 try:
@@ -544,9 +546,16 @@ class Bot:
                               hold=hold)
         return None
 
+    def _rivals(self) -> set:
+        """Accounts Blue has down as competitors' (written up, waiting for a look, or set aside): replying to or
+        liking them earns nothing. One it once suspected that turned out to be a citizen is a citizen."""
+        return {a for a in self.store.suspects() if self.roster.classify(a) != "npc"}
+
     async def _amplify(self, kind: str, candidates: list) -> Optional[Action]:
-        """Like or repost. Both lift a post in Trending, so never one that argues NO."""
-        pool = [p for p in candidates if p["id"] not in self.unsafe and not leans_no(p.get("content") or "")]
+        """Like or repost. Both lift a post in Trending, so never one that argues NO, nor a competitor's."""
+        rivals = self._rivals()
+        pool = [p for p in candidates if p["id"] not in self.unsafe and not leans_no(p.get("content") or "")
+                and p["author"] not in rivals]
         npcs = [p for p in pool if self.roster.classify(p["author"]) == "npc"]
         # A repost also shows the post to our followers, so only citizens' posts qualify.
         if kind == "repost" or npcs:
@@ -585,8 +594,10 @@ class Bot:
         """(post, route), or (None, None). Only replies to citizens score; prefer them, but still engage unknown
         (post-start) accounts."""
         since = _iso(datetime.now(timezone.utc) - timedelta(hours=24))
+        rivals = self._rivals()
         open_ = [p for p in candidates if self.store.replies_to(p["author"], since) < MAX_REPLIES_PER_AUTHOR
-                 and p["author"] not in JOURNALISTS]  # those have their own route, for persuaders and bridges
+                 and p["author"] not in JOURNALISTS  # those have their own route, for persuaders and bridges
+                 and p["author"] not in rivals]
         npcs = [p for p in open_ if self.roster.classify(p["author"]) == "npc"]
         unknown = [p for p in open_ if self.roster.classify(p["author"]) == "unknown"]
         wanted = TARGET_LEANS.get(self.line)
@@ -936,6 +947,8 @@ class Bot:
         if action.type in ("post", "reply"):
             write = self.store.begin_write(self.username, action.type, action.post_id, action.content, sent_at,
                                            pick=action.pick, hold=action.hold)
+        if write is None and action.hold is not None:
+            self.store.attempt(action.hold)
         try:
             await self.act(action)
         except AmbiguousWrite as e:
@@ -1093,9 +1106,33 @@ async def arguments_check() -> None:
     print("arguments ok")
 
 
+async def rival_check() -> None:
+    """Accounts Blue has down as competitors' get no replies, likes or answers from us; a citizen it once
+    suspected still does."""
+    store = StateStore(":memory:")
+    store.add_suspect("rival_x", "manual: one script registered it", 1, "2026-10-19T09:00:00+00:00")
+    store.add_suspect("old_citizen", "cleared", 2, "2026-10-19T09:00:00+00:00")
+    persona = next(p for p in load_personas() if p["line"] == "background")
+    platform = FakePlatform()
+    b = Bot(persona, platform, FakeLLM(0, 0), load_world(), roster=Roster(npcs={"old_citizen"}), store=store)
+    feed = [{"id": 10, "author": "rival_x", "content": "ferry late again"},
+            {"id": 11, "author": "old_citizen", "content": "ferry late again too"}]
+    for _ in range(10):
+        target, _route = await b._pick_reply_target(feed)
+        assert target["author"] == "old_citizen", target
+        liked = await b._amplify("like", feed)
+        assert liked.target_author == "old_citizen", liked
+        store.release("post:11")
+    rival_reply = await platform.post("rival_x", "nice post")
+    store.ingest_notifications(b.username, [], [{"post_id": rival_reply["id"], "actor": "rival_x"}],
+                               _iso(datetime.now(timezone.utc)))
+    assert await b._conversation_target() is None and store.inbox(b.username) == []
+    print("rivals ok")
+
+
 async def lukewarm_check() -> None:
-    """A persuader's reply to a NO-leaning referendum post goes only if the judge says it backs YES; a background
-    account's, or one to someone already leaning YES, may just go along."""
+    """A reply to a NO-leaning referendum post goes only if the judge says it backs YES, whatever the account's
+    line; one to someone already leaning YES may just go along."""
     class Fixed:
         name = "fixed"
 
@@ -1122,7 +1159,9 @@ async def lukewarm_check() -> None:
     assert await lukewarm._compose("reply", ("feed", "no"), target) is None and lukewarm.rejected == {"lukewarm": 1}
     assert await bot_for(persuader, "SUPPORT")._compose("reply", ("feed", "no"), target) is not None
     assert await bot_for(persuader, "NEUTRAL")._compose("reply", ("feed", "yes"), target) is not None
-    assert await bot_for(background, "NEUTRAL")._compose("reply", ("feed", "no"), target) is not None
+    everyday = bot_for(background, "NEUTRAL")
+    assert await everyday._compose("reply", ("feed", "no"), target) is None and everyday.rejected == {"lukewarm": 1}
+    assert await bot_for(background, "SUPPORT")._compose("reply", ("feed", "no"), target) is not None
     print("lukewarm ok")
 
 
@@ -1441,6 +1480,31 @@ async def quota_recovery_check() -> None:
         pending = store.unresolved()[0][0]
         store.resolve(pending, "not_found")
         assert store.claimed([begun]) == set(), "a write that never appeared frees its place"
+
+        # places taken before holds were kept: used ones stay, by what history and the writes show
+        path = f"{tmp}/legacy.db"
+        store = StateStore(path)
+        day = datetime.now(TIMEZONE).date().isoformat()
+        legacy = {"pitched": f"pitch:julio_morales:{day}", "unpitched": f"pitch:lisa_podworth:{day}",
+                  "answered": f"press:amanda_rivera:{day}:mate_c", "unanswered": f"press:muzhi_wong:{day}:mate_d",
+                  "pending": f"press:muzhi_wong:{day}:mate_e", "boosted": "boost:repost:88:mate_f",
+                  "unboosted": "boost:repost:89:mate_g"}
+        for name, key in legacy.items():
+            store.claim(key, key.rsplit(":", 1)[1] if key.startswith(("press", "boost")) else "mate_b")
+        store.record("mate_b", now, Action("post", content="@julio_morales look", topic_kind="pitch",
+                                           angle="julio_morales", made_id=60))
+        store.record("mate_c", now, Action("reply", post_id=61, content="hi", target_author="amanda_rivera"))
+        store.begin_write("mate_e", "reply", 62, "hello", now)  # cut off mid-request
+        store.record("mate_f", now, Action("repost", post_id=88))
+        # a repost whose request started, then timed out, and one whose process was killed mid-request
+        store.reserve("boost:repost:90:", "mate_h", 1)
+        store.attempt("boost:repost:90:mate_h")
+        store.db.close()
+        store = StateStore(path)
+        store.recover()
+        kept = store.claimed(list(legacy.values()) + ["boost:repost:90:mate_h"])
+        assert kept == {legacy["pitched"], legacy["answered"], legacy["pending"], legacy["boosted"],
+                        "boost:repost:90:mate_h"}, kept
 
     platform = FakePlatform()
     no = await platform.post("citizen_a", "Voting no on the mandate.")
@@ -1886,6 +1950,7 @@ if __name__ == "__main__":
     asyncio.run(case_post_check())
     asyncio.run(quota_recovery_check())
     asyncio.run(lukewarm_check())
+    asyncio.run(rival_check())
     asyncio.run(news_reply_check())
     asyncio.run(reply_context_check())
     asyncio.run(implicit_no_check())
