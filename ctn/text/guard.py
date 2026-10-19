@@ -114,22 +114,29 @@ NO_LEAN_RE = re.compile(
     re.IGNORECASE,
 )
 # Posts that touch the referendum; only these are worth an LLM stance check before we amplify them.
+# Places the rule would cover, for the words below that mean the referendum only next to one.
+RULE_PLACE = (r"(shops?|buses?|the bus|ferr(y|ies)|schools?|cafes?|venues?|parks?|the office|the market|church|"
+              r"the pool|public spaces?)")
 REFERENDUM_RE = re.compile(
     r"vacc|\bvax|\bjabs?\b|mandate|referendum|h2d2|dolphin flu|\bvot(e|ing)\b|proof of|"
     r"\bdoor[- ]?checks?\b|\b(checks?|pass(es)?|papers) at (the|every) door\b|"
-    # How people argue it without naming it ("publish the venue list and a hard sunset clause"), in words tied to
-    # the rule: a certificate, a venue list or a designated space on its own is just as often a welding course, a
-    # wedding or a wheelchair bay.
-    r"\bcertificates? (rules?|requirements?|schemes?|systems?|checks?)\b|"
-    r"\bcertificates? (at (the|my|our|your|every|a) (door|counter|gate|ramp|till|entrance)|"
-    r"for (shops|buses|the bus|schools|entry|everything)|to (enter|get into|get on|go into|board))\b|"
+    # How people argue it without naming it ("publish the venue list and a hard sunset clause"). A certificate, a
+    # venue list or a designated space alone is as often a welding course, a wedding or a wheelchair bay, so each
+    # counts only with the rule's own context: a door or a place it covers, the ID card, a list being published.
+    r"\bcertificates? (rules?|requirements?|schemes?)\b|"
+    rf"\bcertificates? (at (the|my|our|your|every|a) (door|counter|ramp|till|entrance)|for {RULE_PLACE}|"
+    rf"to (enter|get into|get on|go into|board) (a |the )?{RULE_PLACE})\b|"
     r"\b(show|shows|showing|showed|flash|wave|waves|waving|carry|carrying|check|checks|checking|checked|"
-    r"asks? (for|to see)|asking (for|to see)|asked (for|to see)) (a |my |your |the |their |our |people's )?certificates?\b|"
+    r"asks? (for|to see)|asking (for|to see)|asked (for|to see)) (a |my |your |the |their |our |people's )?certificates? "
+    r"(at (the|my|our|your|every|a) (door|counter|gate|ramp|till|entrance)|to (enter|get into|get on|go into|board)|"
+    rf"before (you|they|we|anyone|people) (can )?(enter|get in|board)|for {RULE_PLACE})|"
     r"\bcertificates?\b.{0,60}\bid card|\bid card\b.{0,60}\bcertificates?\b|"
-    r"\b(venues|spaces) list\b|\b(publish|release)\w*\b.{0,20}\b(venues?|spaces|designated) list\b|"
-    r"\b(venues?|spaces) list\b.{0,30}\b(publish|release)|\blist of (designated )?(venues|public spaces)\b|"
-    r"\bdesignated (public )?(spaces?|places?|venues?)\b(?! for)|"
-    r"\btwo[- ]tier\b(?! (cakes?|fountains?|stands?|shel(f|ves)|bunks?|beds?|decks?|trays?|planters?|gardens?))|"
+    r"\b(publish|release)\w*\b.{0,20}\b(venues?|spaces|designated) list\b|"
+    r"\b(venues?|spaces|designated) list\b.{0,80}\b(publish|release|hasn'?t been|has not been|isn'?t out|still not|"
+    r"unpublished)|\bunpublished (venues?|spaces|designated) list|"
+    r"\blist of (designated )?(venues|public spaces)\b.{0,40}\b(publish|release|rule)|"
+    r"\bdesignated public (spaces?|places?|venues?)\b|"
+    r"\btwo[- ]tier (society|system|nation|country|island|kingstonia|citizens?|split|rule)\b|\btwo[- ]tier\?|"
     r"\bsunset (clauses?|provisions?)\b|\b(hard|firm|fixed|clear) sunset\b|\bmedical exemptions?\b",
     re.IGNORECASE,
 )
@@ -411,10 +418,16 @@ if __name__ == "__main__":
     assert about_referendum("The certificate isn't the ID card, and that matters to me.")
     assert about_referendum("Two-tier? Not true, it's free.") and about_referendum("they still haven't published the venues list")
     assert about_referendum("a certificate at my counter doesn't add a nurse")
+    assert about_referendum("The venues list is the bit everyone asks about, and it still hasn't been published.")
+    assert about_referendum("checking certificates to enter a shop") and about_referendum("a certificate for buses")
     for daily in ("Gorgeous sunset from the wharf tonight.", "That welding certificate took real effort.",
-                  "My birth certificate finally arrived.", "Our wedding venue list is ready.",
-                  "The cinema has designated spaces for wheelchairs.", "We got a two-tier cake for her birthday.",
-                  "Got my first aid certificate for work, finally!"):
+                  "Show your certificate to your mum, she will be proud.", "My birth certificate finally arrived.",
+                  "Our wedding venue list is ready.", "Our wedding venues list is ready.",
+                  "The cinema has designated spaces for wheelchairs.",
+                  "The cinema has designated spaces available for wheelchairs.",
+                  "We got a two-tier cake for her birthday.", "Got my first aid certificate for work, finally!",
+                  "I need a certificate to enter the fishing competition.",
+                  "Check your certificate expiry before the dive trip.", "Sunset dates on the beach are the best."):
         assert not about_referendum(daily), daily
     # Contrast pairs on each fact boundary: the first of each breaks the setting, the second doesn't.
     for bad, good in (
