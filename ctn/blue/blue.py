@@ -8,7 +8,7 @@ from typing import Iterable, Optional
 
 from ctn.infra.collector import COMPETITION_START
 from ctn.infra.fake_platform import REPORT_SUSPENSION, AmbiguousWrite, RateLimited, ReportingSuspended
-from ctn.text.guard import leans_no, plain
+from ctn.text.guard import about_referendum, judge_stance, leans_no, plain
 from ctn.text.semantic import PARAPHRASE, NearIndex
 
 log = logging.getLogger("blue")
@@ -54,6 +54,14 @@ REPORT_ATTEMPTS = 5  # a report that never got through is retried this many time
 REPORT_BACKOFF = timedelta(minutes=1)  # doubled after each failure, up to an hour
 RATE_LIMIT_PAUSE = timedelta(minutes=1)  # standing down after a bare 429 that carried no wait
 TOO_FAST, COPIED, PARAPHRASED = "superhuman posting rate", "copied across accounts", "paraphrased across accounts"
+# Several accounts saying the same can be the organisers' own script or a story everyone retells: those accounts wait
+# for a person to look before anything is reported. Everything else above is a mistake no citizen makes.
+REVIEWED = (COPIED, PARAPHRASED)
+REVIEW, MANUAL = "review: ", "manual: "  # a suspect waiting for a look; one a person found and wrote up
+# Which side an account argues, from its own posts about the referendum: Blue only reports the other side's.
+YES_LEAN_RE = re.compile(r"\bvot(e|ing) yes\b|\byes vote\b|mandate now|protect kingstonia|#voteyes|\bvoting yes\b",
+                         re.IGNORECASE)
+SIDE_POSTS = 6  # newest posts about the referendum looked at to tell an account's side
 # A report must say why, after the platform's fixed opening (a blank one is refused and still spends the budget).
 REPORT_OPENING = "I think that this content is inauthentic (bot) activity because "
 BECAUSE = {
@@ -86,9 +94,9 @@ def rule_of(reason: str) -> str:
 
 def report_detail(reason: str) -> str:
     """The detail a report carries: the platform's opening, then why; another post by an account already caught
-    says so."""
+    says so. A suspect a person wrote up carries their words."""
     rule = rule_of(reason)
-    why = BECAUSE.get(rule, "it shows clear signs of automated posting")
+    why = rule[len(MANUAL):] if rule.startswith(MANUAL) else BECAUSE.get(rule, "it shows clear signs of automated posting")
     if rule != reason:
         why = f"it comes from an account caught in bot activity in another post ({why})"
     return f"{REPORT_OPENING}{why}."
@@ -247,9 +255,16 @@ class BlueScanner:
     def _flag(self, flagged: dict) -> int:
         found = 0
         for who, (why, pid) in flagged.items():  # off limits by now if a backfill has shown more since
-            if why not in self.disabled and not self.off_limits(who) and self.state.add_suspect(who, why, pid, _now()):
+            if why in self.disabled or self.off_limits(who):
+                continue
+            reason = REVIEW + why if why in REVIEWED else why
+            if self.state.add_suspect(who, reason, pid, _now()):
                 found += 1
-                log.info("competitor account %s (%s, post #%s)", who, why, pid)
+                log.info("%s account %s (%s, post #%s)", "to review:" if reason != why else "competitor", who, why, pid)
+            elif reason == why and self.state.suspects().get(who, ("",))[0].startswith(REVIEW):
+                self.state.update_suspect(who, why)  # waiting for a look, then caught outright
+                found += 1
+                log.info("competitor account %s (%s, post #%s), no longer waiting for review", who, why, pid)
         return found
 
     def _paraphrased(self, posts: list) -> dict:
@@ -278,7 +293,8 @@ class BlueScanner:
         """(post_id, author, reason) not yet reported: giveaway posts first, then NO-leaning ones, newest first."""
         self._recheck()
         suspects = {a: v for a, v in self.state.suspects().items()
-                    if v[0] != CLEARED and v[0] not in self.disabled and not self.off_limits(a)}
+                    if v[0] != CLEARED and not v[0].startswith(REVIEW) and v[0] not in self.disabled
+                    and not self.off_limits(a)}
         done = self.state.reported(_now())
         floor = int(self.state.get_meta("report_floor") or 0)  # see Team.after_restore
         rows = []
@@ -296,8 +312,12 @@ class Reporter:
     """Reports what the scanner finds, and stands down for six hours if a report is ever rejected."""
 
     def __init__(self, platform, scanner: BlueScanner, state, username: str,
-                 per_round: int = 5, interval: float = 10.0, min_citizens: int = MIN_CITIZENS) -> None:
+                 per_round: int = 5, interval: float = 10.0, min_citizens: int = MIN_CITIZENS,
+                 stance_llm=None, side: Optional[str] = None) -> None:
         self.platform = platform
+        self.stance_llm = stance_llm  # judges an account's side; None leaves it to the patterns
+        self.side = side  # "no": only accounts arguing against the requirement are reported; None: any
+        self.sides = {}  # author -> (side, how many of its posts about the referendum that was judged on)
         self.min_citizens = min_citizens
         self._held = False
         self.scanner = scanner
@@ -328,6 +348,34 @@ class Reporter:
             log.info("%s is verified now; never reported", author)
         return not verified
 
+    async def _side(self, author: str) -> str:
+        """'no', 'yes' or 'unclear': the side `author` argues in its newest posts about the referendum, by the
+        stance judge where it can tell and by plain patterns where it can't. A settled side is kept; an unclear one
+        is looked at again once the account has posted more about it."""
+        topical = [c for _, _, c in self.scanner.npc_store.posts_by([author])  # a slogan alone says it too
+                   if about_referendum(c or "") or leans_no(c or "") or YES_LEAN_RE.search(plain(c))]
+        known = self.sides.get(author)
+        if known is not None and (known[0] != "unclear" or known[1] == len(topical)):
+            return known[0]
+        against = backing = 0
+        for text in topical[:SIDE_POSTS]:
+            verdict = None
+            if self.stance_llm is not None:
+                try:
+                    verdict = await judge_stance(self.stance_llm, text)
+                except Exception as e:
+                    log.warning("couldn't judge a post by %s (%s)", author, str(e) or type(e).__name__)
+            if verdict not in ("SUPPORT", "OPPOSE"):
+                no, yes = leans_no(text), bool(YES_LEAN_RE.search(plain(text)))
+                verdict = "OPPOSE" if no and not yes else "SUPPORT" if yes and not no else None
+            against += verdict == "OPPOSE"
+            backing += verdict == "SUPPORT"
+        side = "no" if against > backing else "yes" if backing > against else "unclear"
+        self.sides[author] = (side, len(topical))
+        if known is None or known[0] != side:
+            log.info("%s argues %s (%d posts against the requirement, %d for)", author, side, against, backing)
+        return side
+
     async def _feed_locked(self) -> bool:
         feed_locked = getattr(self.platform, "feed_locked", None)
         try:
@@ -346,9 +394,15 @@ class Reporter:
                 self._held = True
             return 0
         self._held = False
-        for post_id, author, reason in self.scanner.candidates()[:self.per_round]:
-            if self.locked:  # locked while this round was under way
+        tried = 0
+        for post_id, author, reason in self.scanner.candidates():
+            if self.locked or tried >= self.per_round:  # locked while this round was under way, or done for now
                 break
+            # Only the side we report; a suspect a person wrote up has had its side looked at already.
+            if (self.side is not None and not rule_of(reason).startswith(MANUAL)
+                    and await self._side(author) != self.side):
+                continue
+            tried += 1
             if self.scanner.off_limits(author) or not await self._unbadged(author):  # last chance to call it off
                 continue
             if self.locked:  # locked during that check; nothing may await between here and the request
@@ -407,7 +461,10 @@ class Reporter:
                     # A citizen after all: our rule misfired. Never touch this account again, and wait out the ban.
                     self.state.update_suspect(author, CLEARED)
                     self.blocked_until = datetime.now(timezone.utc) + REPORT_SUSPENSION
-                    self.scanner.disable(rule_of(reason), f"report on #{post_id} by {author} was rejected")
+                    if rule_of(reason).startswith(MANUAL):
+                        log.error("report on #%s by %s, written up by hand, was rejected", post_id, author)
+                    else:
+                        self.scanner.disable(rule_of(reason), f"report on #{post_id} by {author} was rejected")
                     break
             finally:
                 self.state.end_report(post_id)
@@ -529,10 +586,21 @@ async def _demo() -> None:
     while await reporter.report_some():
         pass
     reported = {p.posts[pid]["author"] for pid in p.reports}
-    assert reported == flagged, reported
+    waiting = {a for a, (why, _) in state.suspects().items() if why.startswith(REVIEW)}
+    assert waiting == {"rival_copy_a", "rival_copy_b", "rival_copy_c"} | (flagged - {
+        "rival_sloppy", "rival_probe", "rival_copy_a", "rival_copy_b", "rival_copy_c", "rival_spam"}), waiting
+    assert reported == flagged - waiting, reported  # several accounts saying one thing waits for a person
     assert len([pid for pid in p.reports if p.posts[pid]["author"] == "rival_sloppy"]) == 4
     if embedder is not None:
-        assert state.suspects()["rival_spin_b"][0] == "paraphrased across accounts"
+        assert state.suspects()["rival_spin_b"][0] == REVIEW + "paraphrased across accounts"
+    # a person looks and writes one up: reported, in their words; the others keep waiting
+    why = "it posts the same long text word for word as two other new accounts"
+    state.update_suspect("rival_copy_a", MANUAL + why)
+    assert report_detail(MANUAL + why).endswith("because " + why + ".")
+    while await reporter.report_some():
+        pass
+    reported = {p.posts[pid]["author"] for pid in p.reports}
+    assert reported == flagged - waiting | {"rival_copy_a"}, reported
     assert p.reporting_blocked_until is None and not reporter.blocked()
 
     await p.post("late_npc_2", "Reply: anyone know if the markets are on this sunday?")  # a rule misfiring
@@ -556,7 +624,73 @@ async def _demo() -> None:
     await _report_429_demo()
     await _badge_and_lock_demo()
     await _report_interrupt_demo()
+    await _side_demo()
     print("blue ok")
+
+
+async def _side_demo() -> None:
+    """With side="no", only accounts arguing against the requirement are reported: one arguing for it, or not
+    saying, is held (and looked at again once it says more). The stance judge decides where it can, the patterns
+    where it can't. A copy suspect waiting for review is reported once it gives itself away; one a person wrote
+    up is reported without asking its side."""
+    from ctn.infra.collector import NpcStore
+    from ctn.infra.fake_platform import FakePlatform
+    from ctn.infra.state import StateStore
+
+    class Judge:
+        name = "judge"
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            text = prompt.lower()
+            return "OPPOSE" if "too far" in text else "SUPPORT" if "hospital" in text else "NEUTRAL"
+
+    start = datetime.now(timezone.utc) - timedelta(hours=1)
+    after = (start + timedelta(minutes=5)).isoformat()
+    store = NpcStore(":memory:")
+    store.add_posts([{"id": i, "author": f"npc_{i}", "content": "ferry late again", "created_at":
+                      (start - timedelta(days=1)).isoformat()} for i in range(3)])
+    giveaway = "As an AI language model, I can't share personal opinions."
+    copied = "Keep Kingstonia open and keep the choice with families, not with the government, this November."
+    posts = [("no_bot", giveaway), ("no_bot", "Vote no on the 2nd, it's a personal choice."),
+             ("yes_bot", giveaway), ("yes_bot", "Voting yes on the 2nd, mandate now and protect Kingstonia."),
+             ("quiet_bot", giveaway),
+             ("judged_no", giveaway), ("judged_no", "The mandate goes too far for me, plain and simple."),
+             ("judged_yes", giveaway), ("judged_yes", "The vote is about keeping the hospital going, mandate or not.")]
+    posts += [(f"copy_{i}", copied) for i in range(3)]
+    competitors = {a for a, _ in posts}
+    store.add_posts([{"id": 100 + i, "author": a, "content": c, "created_at": after} for i, (a, c) in enumerate(posts)])
+    p = FakePlatform(competitors=competitors)
+    p.posts.update({100 + i: {"id": 100 + i, "author": a, "content": c} for i, (a, c) in enumerate(posts)})
+    state = StateStore(":memory:")
+    scanner = BlueScanner(store, state, own=(), cutoff=start)
+    scanner.scan()
+    assert {a for a, (why, _) in state.suspects().items() if why.startswith(REVIEW)} == {"copy_0", "copy_1", "copy_2"}
+
+    async def drain(reporter: Reporter) -> set:
+        while await reporter.report_some():
+            pass
+        return {p.posts[pid]["author"] for pid in p.reports}
+
+    reporter = Reporter(p, scanner, state, username="joe", min_citizens=0, side="no")
+    assert await drain(reporter) == {"no_bot"}  # by the patterns: the others argue yes or say nothing
+    assert reporter.sides["yes_bot"][0] == "yes" and reporter.sides["quiet_bot"][0] == "unclear"
+    judged = Reporter(p, scanner, state, username="joe", min_citizens=0, side="no", stance_llm=Judge())
+    assert await drain(judged) == {"no_bot", "judged_no"}  # the judge reads what no pattern catches
+    assert judged.sides["judged_yes"][0] == "yes"
+    # the quiet one says where it stands, a copier gives itself away, and a person writes up another copier
+    late = {200: ("quiet_bot", "Voting no, keep Kingstonia open."), 201: ("copy_0", giveaway)}
+    store.add_posts([{"id": i, "author": a, "content": c, "created_at": after} for i, (a, c) in late.items()])
+    p.posts.update({i: {"id": i, "author": a, "content": c} for i, (a, c) in late.items()})
+    scanner.scan()
+    assert state.suspects()["copy_0"][0] == "assistant talk"
+    state.update_suspect("copy_1", MANUAL + "it posts the same long text word for word as two other new accounts")
+    assert await drain(judged) == {"no_bot", "judged_no", "quiet_bot", "copy_0", "copy_1"}
+    assert state.suspects()["copy_2"][0].startswith(REVIEW)
+    everyone = Reporter(p, scanner, state, username="joe", min_citizens=0)  # side=None: any side, as before
+    assert "yes_bot" in await drain(everyone)
 
 
 async def _badge_and_lock_demo() -> None:
@@ -820,7 +954,8 @@ def _fleet_demo() -> None:
     scanner.scan()
     assert {f"fleet_{i}" for i in range(3)} <= store.fleet() and not store.is_citizen("fleet_0", start)
     assert scanner.off_limits("fleet_0") and not scanner.off_limits("rival_0")
-    assert {a for _, a, _ in scanner.candidates()} == {"rival_0", "rival_1", "rival_2"}
+    waiting = {a for a, (why, _) in scanner.state.suspects().items() if why == REVIEW + COPIED}
+    assert waiting == {"rival_0", "rival_1", "rival_2"} and scanner.candidates() == [], waiting  # for a person
     assert report_detail(COPIED) == ("I think that this content is inauthentic (bot) activity because the same long "
                                      "text was posted word for word by several new accounts.")
     assert report_detail(f"account: {TOO_FAST}").startswith(f"{REPORT_OPENING}it comes from an account caught")
@@ -847,7 +982,7 @@ def _fleet_demo() -> None:
     scanner.scan()
     suspects = state.suspects()
     assert {a for a in suspects} == {"rival_0", "rival_1", "rival_2"}, suspects  # not the fleet, nor its echo
-    assert {v[0] for v in suspects.values()} == {PARAPHRASED}
+    assert {v[0] for v in suspects.values()} == {REVIEW + PARAPHRASED}  # waiting for a person
 
 
 async def _late_proof_demo() -> None:
@@ -893,7 +1028,10 @@ async def _backfill_demo() -> None:
     await collector.poll()
     state = StateStore(":memory:")
     scanner = BlueScanner(npc_store, state, own=(), cutoff=cutoff)
-    assert scanner.scan() == 3 and {a for _, a, _ in scanner.candidates()} == {"u0", "u1", "u2"}
+    assert scanner.scan() == 3 and scanner.candidates() == []  # word-for-word copies wait for a person
+    for who in ("u0", "u1", "u2"):  # who writes all three up
+        state.update_suspect(who, MANUAL + "it posts the same long text word for word as two other new accounts")
+    assert {a for _, a, _ in scanner.candidates()} == {"u0", "u1", "u2"}
     npc_store.add_posts([{"id": 9_000, "author": "u0", "content": "ferry's late",
                           "created_at": (cutoff - timedelta(days=3)).isoformat()}])  # backfill finds u0's past
     assert await Reporter(p, scanner, state, username="joe", min_citizens=1).report_some() == 0, "held: no citizens"
