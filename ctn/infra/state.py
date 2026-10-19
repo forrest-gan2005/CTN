@@ -242,6 +242,16 @@ class StateStore:
             cur = self.db.execute("INSERT OR IGNORE INTO claims VALUES (?, ?)", (key, username))
         return cur.rowcount == 1
 
+    def reserve(self, prefix: str, username: str, limit: int) -> Optional[str]:
+        """Claim `prefix` + username unless `limit` keys with that prefix are held already, or this account holds
+        it: a quota shared by the team, one place per account. Returns the key, or None."""
+        held = self.db.execute("SELECT COUNT(*) FROM claims WHERE substr(key, 1, ?) = ?",
+                               (len(prefix), prefix)).fetchone()[0]
+        if held >= limit:
+            return None
+        key = prefix + username
+        return key if self.claim(key, username) else None
+
     def release(self, key: str) -> None:
         with self.db:
             self.db.execute("DELETE FROM claims WHERE key = ?", (key,))
