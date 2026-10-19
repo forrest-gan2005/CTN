@@ -381,6 +381,13 @@ class NpcStore:
                          if len(tag) > 4 and tag[1:].lower() not in TAG_STOP)
         return [tag for tag, k in counts.most_common(n) if k >= 2]
 
+    def citizen_texts(self, since: datetime, cutoff: datetime = COMPETITION_START) -> list:
+        """The texts of citizens' posts since `since`."""
+        c = _iso(cutoff)
+        return [content for (content,) in self.db.execute(
+            f"SELECT p.content FROM posts p JOIN authors a ON a.author = p.author WHERE p.created_at >= ? AND {PRE_START}",
+            (_iso(since), c, c, c)) if content]
+
     def gif_embeds(self, limit: int = 5000) -> list:
         """The GIF embeds on the newest posts that aren't ours: the GIFs people here actually post."""
         rows = self.db.execute("SELECT raw FROM posts WHERE ours = 0 AND raw LIKE '%giphy%' ORDER BY id DESC LIMIT ?",
@@ -637,6 +644,8 @@ def _hashtag_check() -> None:
     store.add_posts([{"id": i, "author": f"citizen_{i}", "content": t, "created_at": _iso(t0)}
                      for i, t in enumerate(texts)])
     assert store.top_hashtags(t0 - timedelta(hours=1), cutoff=t0 + timedelta(hours=1)) == ["#h2d2"]
+    assert sorted(store.citizen_texts(t0 - timedelta(hours=1), cutoff=t0 + timedelta(hours=1))) == sorted(texts)
+    assert store.citizen_texts(t0 + timedelta(minutes=1), cutoff=t0 + timedelta(hours=1)) == [], "older ones aren't"
     store.add_posts([{"id": 100 + i, "author": "a", "content": "x", "created_at": _iso(t0),
                       "parent_id": 99 + i if i else None} for i in range(12)])
     assert [store.depth(100), store.depth(101), store.depth(107), store.depth(111)] == [1, 2, 8, 10]

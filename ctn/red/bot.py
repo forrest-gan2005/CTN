@@ -348,6 +348,7 @@ class Bot:
         self.depth = depth  # post id -> how many messages deep it sits in its thread; None: not known
         self.said = said  # (words, since) -> (author, text) of others' posts with those words; None: none known
         self.hashtags = []  # what citizens are tagging today, refreshed by the team
+        self.worries = []  # the NO worries citizens raise most at the moment, as arguments.md quotes them
         self.twins = twins  # semantic.NearIndex of the whole team's recent posts; None skips the check
         self.injection = injection  # injection.InjectionClassifier; None leaves probe-spotting to the regexes
         self.quiet = False  # set by the team's health check once two of this account's posts were taken down
@@ -1101,7 +1102,11 @@ class Bot:
                          "but make plain that you mean the referendum on proof of vaccination; nobody should have to guess.")
             shape = self.case_shape or _draw_shape()
             opening = "" if shape in OPENING_FREE else f" {CASE_OPENING}"
-            parts.append(f"{CASE_SHAPES[shape][1]}{opening} {CASE_FOCUS}")
+            # The worry a refutation answers is one citizens are raising now: of 124 NO-leaning posts by citizens in
+            # two hours one morning, 44 wanted the rules temporary, 34 feared government power, 28 the ID card.
+            worry = f" The NO worry people here raise most lately is {random.choice(self.worries)}; answer that one." \
+                if shape == "refute" and self.worries else ""
+            parts.append(f"{CASE_SHAPES[shape][1]}{worry}{opening} {CASE_FOCUS}")
         elif topic[0] == "vaccine":
             parts.append(f"Write a new post about vaccination in your everyday life: {topic[1]}. Don't mention the "
                          "referendum or any mandate in this one, and don't give anyone medical advice.")
@@ -1939,8 +1944,15 @@ async def anchor_check() -> None:
             assert action.angle.startswith(f"{shape}: ") and styled.case_shape is None, action.angle
             assert guide in prompt and (CASE_OPENING in prompt) == (shape not in OPENING_FREE), prompt
             assert CASE_FOCUS in prompt, "a case post keeps to the referendum"
+            assert "raise most lately" not in prompt, "with no worries counted, none is named"
             assert ("Open with who you are" in prompt) == (shape in OPENING_FREE), shape
             assert ("End with a genuine question" in prompt) == (shape in QUESTION_SHAPES), shape
+        styled.worries = ['"It has to be temporary."']
+        CASE_SHAPES = {"refute": saved[0]["refute"]}  # a refutation answers a worry citizens raise now
+        assert 'raise most lately is "It has to be temporary."; answer that one.' in \
+            styled._user_prompt("post", None, ("anchor", "acting early"))
+        CASE_SHAPES = {"plain": saved[0]["plain"]}
+        assert "raise most lately" not in styled._user_prompt("post", None, ("anchor", "acting early"))
     finally:
         CASE_SHAPES, QUESTION_PROB = saved
     intro = Bot(writers[0], FakePlatform(), Noting(f"I'm Joe, and {case}"), load_world(), store=StateStore(":memory:"))

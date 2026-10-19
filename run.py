@@ -28,6 +28,7 @@ from ctn.text.examples import NpcExamples
 from ctn.text.gifs import REUSE_AFTER, GifPool, without_gifs
 from ctn.text.injection import load_injection_classifier
 from ctn.text.semantic import NearIndex, load_embedder
+from ctn.text.worries import top_worries
 
 log = logging.getLogger("run")
 
@@ -42,6 +43,7 @@ OTHER_FEED = 10  # plus the newest posts from anyone, so unknown accounts still 
 EXAMPLE_POSTS = 20_000  # newest citizen posts the style retriever indexes
 CURVE_POSTS = 100_000  # newest citizen posts the activity curve is measured on
 HASHTAG_WINDOW = timedelta(hours=6)
+WORRY_WINDOW = timedelta(hours=2)  # the NO worries citizens raise, for posts that answer the other side
 TEAM_RECENT = 1000  # our latest posts every new draft is checked against for paraphrase
 STATUS_EVERY = 1800.0
 LOGIN_RETRY = 60.0  # seconds between login attempts
@@ -140,17 +142,19 @@ class Team:
                                 for author, content, _, parent in rows[-EXAMPLE_POSTS:]), self.embedder)
         curve = npc_curve([ts for _, _, ts, _ in rows])
         hashtags = self.npc_store.top_hashtags(datetime.now(timezone.utc) - HASHTAG_WINDOW, cutoff=self.cutoff)
+        worries = top_worries(self.npc_store.citizen_texts(datetime.now(timezone.utc) - WORRY_WINDOW, self.cutoff))
         if self.gifs is not None:
             self.gifs.update(self.npc_store.gif_embeds())
         for bot in self.bots:
             bot.examples = examples
             bot.hashtags = hashtags
+            bot.worries = worries
         self.brief_news()
         for pacer in self.pacers.values():
             if isinstance(pacer, Rhythm):
                 pacer.curve = curve
-        log.info("refreshed: %d citizens, %d example posts (%s), hashtags %s, GIFs %s",
-                 len(self.roster.npcs), len(examples.posts), examples.mode or "too few", hashtags,
+        log.info("refreshed: %d citizens, %d example posts (%s), hashtags %s, NO worries %s, GIFs %s",
+                 len(self.roster.npcs), len(examples.posts), examples.mode or "too few", hashtags, worries,
                  "off" if self.gifs is None else self.gifs.off or len(self.gifs.gifs))
 
     def reconcile(self) -> None:
