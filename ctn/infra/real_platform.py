@@ -16,8 +16,8 @@ from typing import Any, Optional
 import httpx
 
 from ctn import paths
-from ctn.infra.fake_platform import (ANCHOR, LIFT, NORMAL, WRITE_LEFT, WRITE_PRIORITY, AmbiguousWrite, Incomplete, RateLimited,
-                                     ReportingSuspended, ReportQueueFull)
+from ctn.infra.fake_platform import (ANCHOR, CITIZEN, LIFT, NORMAL, WRITE_LEFT, WRITE_PRIORITY, AmbiguousWrite,
+                                     Incomplete, RateLimited, ReportingSuspended, ReportQueueFull)
 
 log = logging.getLogger("platform")
 
@@ -1197,13 +1197,15 @@ async def _write_pace_demo() -> None:
     queued = [asyncio.ensure_future(p.post(n, f"normal {i}")) for i, n in enumerate(("ana", "ben", "cai"))]
     gone = asyncio.ensure_future(p.post("ben", "cancelled"))
     lifts = [asyncio.ensure_future(at(LIFT, "ana", f"lift {i}")) for i in range(2)]
+    citizen = asyncio.ensure_future(at(CITIZEN, "ben", "to a citizen"))
     first = asyncio.ensure_future(at(ANCHOR, "cai", "anchor"))
     for _ in range(3):
         await asyncio.sleep(0)
     gone.cancel()
     lane.release()
-    await asyncio.gather(first, *lifts, *queued)
-    assert gone.cancelled() and bodies == ["anchor", "lift 0", "lift 1", "normal 0", "normal 1", "normal 2"], bodies
+    await asyncio.gather(first, citizen, *lifts, *queued)
+    assert gone.cancelled() and bodies == ["anchor", "to a citizen", "lift 0", "lift 1", "normal 0", "normal 1",
+                                           "normal 2"], bodies
     assert not p._lane_locks["write"].locked(), "a cancelled write gives its turn back"
     await lane.acquire()  # a write stopped while it waits its turn never left; one that went did
     left = {"left": False}

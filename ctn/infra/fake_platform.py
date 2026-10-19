@@ -6,8 +6,9 @@ from typing import Optional
 
 REPORT_SUSPENSION = timedelta(hours=6)
 # How soon a write in this task goes out of the team's write lane, lower first and in order of arrival within a
-# level: an ANCHOR post, then the team's LIFT of the anchor in its rush, then the rest.
-ANCHOR, LIFT, NORMAL = 0, 1, 2
+# level: an ANCHOR post, then a reply to a CITIZEN (the writes that can change a mind, best read while the citizen is
+# still about), then the team's LIFT of the anchor in its rush, then the rest.
+ANCHOR, CITIZEN, LIFT, NORMAL = 0, 1, 2, 3
 WRITE_PRIORITY = contextvars.ContextVar("write_priority", default=NORMAL)
 # A writer's marker that a platform which `marks_sends` sets {"left": True} on just before a write's request goes
 # out: a write cancelled with it still False never left this machine. A dict, so a task the platform starts in a

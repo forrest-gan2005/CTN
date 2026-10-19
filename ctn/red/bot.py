@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
-from ctn.infra.fake_platform import ANCHOR, LIFT, NORMAL, WRITE_LEFT, WRITE_PRIORITY, AmbiguousWrite, FakePlatform, RateLimited
+from ctn.infra.fake_platform import ANCHOR, CITIZEN, LIFT, NORMAL, WRITE_LEFT, WRITE_PRIORITY, AmbiguousWrite, FakePlatform, RateLimited
 from ctn.infra.llm import FakeLLM, team_llms
 from ctn.infra.state import StateStore
 from ctn.red.rhythm import UniformPacer
@@ -1248,6 +1248,8 @@ class Bot:
     async def act(self, action: Action) -> None:
         if action.topic_kind == "anchor":  # ahead of lifts still going to the last one
             priority = ANCHOR
+        elif action.type == "reply" and self.roster.classify(action.target_author) == "npc":
+            priority = CITIZEN  # under S54 one waited behind a rush's 50 lifts, about 18 minutes
         elif action.type in ("repost", "reply") and action.post_id is not None and \
                 action.post_id == self._focus(datetime.now(timezone.utc)):
             priority = LIFT
@@ -2048,12 +2050,15 @@ async def rush_check() -> None:
             return await self.post(username, content, parent_id)
     noting = Noting()
     lifter = Bot(writers[1], noting, FakeLLM(0, 0), load_world(), store=two)
+    lifter.roster = Roster(npcs={"citizen_a"})
     for action in (Action("repost", post_id=904), Action("repost", post_id=902), Action("reply", post_id=904,
                    content="x"), Action("reply", post_id=9, content="x"),
+                   Action("reply", post_id=8, content="x", target_author="citizen_a"),
                    Action("post", content="x", topic_kind="anchor"), Action("post", content="x", topic_kind="daily")):
         await lifter.act(action)
     assert noting.sent == [("repost", 904, LIFT), ("repost", 902, NORMAL), ("reply", 904, LIFT),
-                           ("reply", 9, NORMAL), ("post", None, ANCHOR), ("post", None, NORMAL)], noting.sent
+                           ("reply", 9, NORMAL), ("reply", 8, CITIZEN), ("post", None, ANCHOR),
+                           ("post", None, NORMAL)], noting.sent
     assert WRITE_PRIORITY.get() == NORMAL, "the priority goes back after each write"
 
     global RUSH_WAIT
