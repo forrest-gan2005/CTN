@@ -14,9 +14,9 @@ QUIET_FLOOR = 0.1  # the quietest hour still gets this share of an average hour'
 SESSION_GAP_MEDIAN = 45.0  # seconds between actions within one sitting
 # Sittings a day, drawn once per account. Raised on the opening night, when the feed went from about two posts a
 # minute to ten as other teams came online, and citizens post round the clock; doubled three hours in, when the
-# whole team wrote 29 posts and replies an hour against the platform's 180 and the leaders were far ahead. An
-# account still writes only a post or reply or two an hour.
-SESSIONS_PER_DAY = (20.0, 36.0)
+# whole team wrote 29 posts and replies an hour against the platform's 180 and the leaders were far ahead; doubled
+# again when the team took to lifting anchor posts, which takes forty likes and twenty-five replies within minutes.
+SESSIONS_PER_DAY = (48.0, 72.0)
 FIRST_SITTING = (60.0, 600.0)  # seconds after coming online, or a restart, before a first look round
 
 

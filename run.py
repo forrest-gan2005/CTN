@@ -669,6 +669,7 @@ async def _killed_child(tmp: str) -> None:
     from ctn.red import bot as bot_module
     bot_module.ACTION_WEIGHTS = {"post": 1}
     bot_module.PITCH_PROB = 0.0  # a fresh interpreter: smoke's setting doesn't reach it
+    bot_module.ANCHOR_LINES = set()
     p = Cut()
     p.when, p.landed = "hang", f"{tmp}/landed.json"
     persona = load_personas()[0]
@@ -1630,7 +1631,8 @@ if __name__ == "__main__":
         asyncio.run(live(args.limit, args.stagger, args.opens))
     elif args.cmd == "smoke":
         from ctn.red import bot as bot_module
-        bot_module.PITCH_PROB = 0.0  # pitches have their own checks; these expect a step's post to be a plain one
+        # Pitches and anchor posts have their own checks; these expect a step's action to be the kind they set.
+        bot_module.PITCH_PROB, bot_module.ANCHOR_LINES = 0.0, set()
         log_file_check()
         schedule_check()
         registered_check()

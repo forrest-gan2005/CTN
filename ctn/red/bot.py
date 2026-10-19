@@ -43,7 +43,9 @@ TOPIC_MIX = {
 RUNUP_MIX = {"issue": 0.7, "vaccine": 0.1, "view": 0.05, "daily": 0.15}
 RUNUP_DAYS = 1
 # Leaning to replies and posts: citizens' likes and replies to us, and their minds changing, are what score.
-ACTION_WEIGHTS = {"like": 4, "reply": 4, "post": 2, "repost": 0.5, "follow": 0.5, "none": 1}
+# Most writing goes to the team's anchor posts (below), so posts of an account's own are fewer: the platform takes
+# 180 posts, replies and reposts an hour from the whole team.
+ACTION_WEIGHTS = {"like": 5, "reply": 4, "post": 0.5, "repost": 0.75, "follow": 0.5, "none": 0.5}
 LINE_ACTIONS = {"amplifier": {"like": 6, "reply": 0.3, "post": 0.2, "repost": 2, "follow": 1, "none": 2}}
 # An account two takedowns from a ban stops writing; likes, reposts and follows can't be reported.
 QUIET_ACTIONS = {"like": 6, "repost": 1, "follow": 1, "none": 3}
@@ -84,7 +86,8 @@ LEAN_GUIDE = {
                   "about: the benefit to them first, then to everyone."),
     "yes": "They lean YES already. Agree briefly in your own words and, if it fits, say you'll see them at the vote on 2 November.",
     "team": ("They're on your side. Add something of your own they didn't say, a short story or another reason, so "
-             "people reading see more than one voice; don't just agree, and don't repeat their words."),
+             "people reading see more than one voice; don't just agree, and don't repeat their words. One or two "
+             "short sentences, like a comment under a neighbour's post."),
 }
 DEFAULT_GUIDE = ("Respond to their actual point. If they lean NO, acknowledge their worry in a few words, then give "
                  "your own reason for voting YES.")
@@ -112,17 +115,27 @@ PITCH_PROB = 0.2  # share of these accounts' new posts that go to a journalist s
 MENTION_RE = re.compile(r"(?<![\w.@])@(\w+)")
 # The posts that trend open with who the writer is and what's at stake for them, grant the other side's worry, then
 # land on YES; replies weigh heavily in Trending, so half our referendum posts end on a question people would answer.
-CASE_TOPICS = ("issue", "pitch")
+CASE_TOPICS = ("issue", "pitch", "anchor")
 QUESTION_PROB = 0.5
-# Teammates lift each other's case posts towards Trending, where citizens' likes and replies then far outnumber
-# ours: likes, reposts and a couple of replies a post, by whichever accounts come by in its first two hours. Talk
-# between our accounts links them for other teams' Blue; Forrest took that risk on: an account that reaches
-# Trending earns far more than it costs if it's banned, with 200 to use in all.
+# Trending on the opening night belonged to a team whose few anchor accounts each posted a case every hour or so
+# while forty teammates answered it within minutes, one line each, and liked and reposted it: 40-100 replies a post,
+# hundreds of citizens' views, the leader by thousands. The team does the same: a persuader or bridge writes the
+# quarter-hour's anchor post (an account at most every ANCHOR_REST), and everyone else lifts the newest anchors.
+# Talk between our accounts links them for other teams' Blue; Forrest took that risk on, with 200 accounts to use.
+ANCHOR_LINES = {"persuade", "bridge"}
+ANCHOR_GAP = timedelta(minutes=15)
+ANCHOR_REST = timedelta(minutes=75)
+LIFT_TOPICS = ("anchor",)
 BOOST_WINDOW = timedelta(hours=2)
-BOOST_DELAY = timedelta(minutes=5)  # nobody likes a post the second it appears
-BOOST_LIMITS = {"like": 8, "repost": 3, "reply": 2}
-BOOST_PROB = {"amplifier": 0.6, "background": 0.5}  # of this line's likes and reposts; other lines 0.3
-TEAM_REPLY_PROB = 0.25  # of an account's replies, the share that go to a teammate's case post when one is open
+BOOST_DELAY = timedelta(minutes=1)
+BOOST_LIMITS = {"like": 40, "repost": 6, "reply": 25}
+BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post still has places
+# Popular tags were all campaign accounts' on the opening night, a NO team's #keepkingstoniaopen first; the papers'
+# reporters write up what is popular here. The team carries the YES campaign's own words: on every anchor post, and
+# on half the replies lifting one and half the other referendum posts. Never the other side's tags.
+TEAM_TAG = "#ProtectKingstonia"
+TEAM_TAG_SHARE = {"anchor": 1.0, "team": 0.5, "issue": 0.5}
+TEAM_REPLY_PROB = 0.85  # of an account's replies, the share that go to an anchor post while one has places
 
 REFUSAL_MARKERS = (
     "as an ai",
@@ -295,6 +308,10 @@ class Bot:
             if found is not None:
                 press, context, hold = found
                 return await self._reply(press, "feed", "journalist", context=context, hold=hold, referendum=True)
+        if not self.quiet and self.line in ANCHOR_LINES:
+            anchor = await self._anchor()
+            if anchor is not None:
+                return anchor
 
         weights = QUIET_ACTIONS if self.quiet else LINE_ACTIONS.get(self.line, ACTION_WEIGHTS)
         kind = random.choices(list(weights), weights=list(weights.values()))[0]
@@ -307,7 +324,7 @@ class Bot:
         if kind == "none":
             return None
         if kind in ("like", "repost"):
-            if random.random() < BOOST_PROB.get(self.line, 0.3):
+            if random.random() < BOOST_PROB:
                 boost = self._boost(kind)
                 if boost is not None:
                     return boost
@@ -474,7 +491,7 @@ class Bot:
         # The answers to NO worries only where the prompt takes up the referendum.
         if referendum is None:
             referendum = (await self._takes_up_referendum(target, topic[1]) if target is not None
-                          else topic[0] in ("issue", "pitch"))
+                          else topic[0] in CASE_TOPICS)
         case = kind == "post" and topic[0] in CASE_TOPICS
         system = self._system_prompt(examples, from_npcs, arguments=referendum, case=case)
         earlier, about = None, []
@@ -524,13 +541,17 @@ class Bot:
         # still echoed the NO side ("the venues list ... still hasn't been published").
         argue = kind == "reply" and (referendum and topic[1] != "yes" or about_referendum(content))
         problem = await self._check(content, system,
-                                    takes_side=kind == "post" and topic[0] in ("issue", "pitch") or argue,
+                                    takes_side=kind == "post" and topic[0] in CASE_TOPICS or argue,
                                     replying_to=target.get("content") if target else None)
         if problem:
             self.rejected[problem] = self.rejected.get(problem, 0) + 1
             source = f" (replying to #{target['id']} by {target['author']})" if target else ""
             log.warning("%s rejected %s%s: %r", self.username, problem, source, content)
             return None
+        tagged = topic[1] if kind == "reply" else topic[0]
+        if (random.random() < TEAM_TAG_SHARE.get(tagged, 0.0) and TEAM_TAG.lower() not in content.lower()
+                and len(content) + 1 + len(TEAM_TAG) <= POST_LIMIT):
+            content = f"{content} {TEAM_TAG}"
         # Added after every check, which would take the link for one the model made up.
         link = self.gifs.pick(query) if gif and query and self.gifs is not None else None
         if link and len(content) + 1 + len(link) <= POST_LIMIT:
@@ -561,14 +582,38 @@ class Bot:
             self.store.drop_inbox(self.username, post_id)
         return None
 
-    def _team_reply_target(self) -> Optional[tuple]:
-        """(post, place) of a teammate's case post this account may answer, the place among its BOOST_LIMITS
-        replies taken; or None."""
+    async def _anchor(self) -> Optional[Action]:
+        """This quarter-hour's anchor post, if no teammate has written it and this account hasn't anchored lately;
+        the place goes back if the draft is dropped or never sent, for a teammate to take."""
         now = datetime.now(timezone.utc)
-        posts = self.store.team_posts(CASE_TOPICS, _iso(now - BOOST_WINDOW), self.username)
-        settled = {pid for _, pid, _ in self.store.team_posts(CASE_TOPICS, _iso(now - BOOST_DELAY), self.username)}
-        for author, post_id, content in random.sample(posts, len(posts)):
-            if post_id in settled or post_id in self.seen or not content:
+        if any(a.topic_kind == "anchor" and datetime.fromisoformat(ts) > now - ANCHOR_REST for ts, a in self.history):
+            return None
+        slot = int(now.timestamp() // ANCHOR_GAP.total_seconds())
+        hold = self.store.reserve(f"anchor:{slot}:", self.username, 1)
+        if hold is None:
+            return None
+        action = None
+        try:
+            action = await self._compose("post", topic=("anchor", random.choice(self.persona["angles"])))
+        finally:
+            if action is None:
+                self.store.release(hold)
+        if action is not None:
+            action.hold = hold
+        return action
+
+    def _lift_posts(self, now: datetime) -> list:
+        """(author, post id, text) of teammates' anchor posts to lift, newest first: a minute old at least, two
+        hours at most."""
+        posts = self.store.team_posts(LIFT_TOPICS, _iso(now - BOOST_WINDOW), self.username)
+        fresh = {pid for _, pid, _ in self.store.team_posts(LIFT_TOPICS, _iso(now - BOOST_DELAY), self.username)}
+        return [p for p in reversed(posts) if p[1] not in fresh]
+
+    def _team_reply_target(self) -> Optional[tuple]:
+        """(post, place) of a teammate's anchor post this account may answer, the place among its BOOST_LIMITS
+        replies taken; or None."""
+        for author, post_id, content in self._lift_posts(datetime.now(timezone.utc)):
+            if post_id in self.seen or not content:
                 continue
             hold = self.store.reserve(f"boost:reply:{post_id}:", self.username, BOOST_LIMITS["reply"])
             if hold is not None:
@@ -576,13 +621,10 @@ class Bot:
         return None
 
     def _boost(self, kind: str) -> Optional[Action]:
-        """Like or repost a teammate's case post from the last hour, while it has fewer than BOOST_LIMITS of
-        ours; the place is taken with nothing awaited, so teammates acting at once can't pass the limit."""
-        now = datetime.now(timezone.utc)
-        posts = self.store.team_posts(CASE_TOPICS, _iso(now - BOOST_WINDOW), self.username)
-        settled = {pid for _, pid, _ in self.store.team_posts(CASE_TOPICS, _iso(now - BOOST_DELAY), self.username)}
-        for author, post_id, _ in random.sample(posts, len(posts)):
-            if post_id in settled or post_id in self.seen:
+        """Like or repost the newest teammate's anchor post that still has fewer than BOOST_LIMITS of ours; the
+        place is taken with nothing awaited, so teammates acting at once can't pass the limit."""
+        for author, post_id, _ in self._lift_posts(datetime.now(timezone.utc)):
+            if post_id in self.seen:
                 continue
             hold = self.store.reserve(f"boost:{kind}:{post_id}:", self.username, BOOST_LIMITS[kind])
             if hold is not None:
@@ -832,7 +874,7 @@ class Bot:
                          "Say why it matters to you, and make plain in a way of your own that it's why you back YES "
                          "in the referendum. Don't copy any wording here, don't flatter them, don't tell them what to "
                          "write, don't mention anyone else, and never claim the rules come with an end date.")
-        elif topic[0] == "issue":
+        elif topic[0] in ("issue", "anchor"):
             parts.append(f"Write a new post about the referendum, along this line: {topic[1]}. A comparison is fine, "
                          "but make plain that you mean the referendum on proof of vaccination; nobody should have to guess.")
             parts.append("Open with who you are and what's at stake for you (your work, your family, your street), "
@@ -851,12 +893,12 @@ class Bot:
                 parts.append("You don't know when it's on this year, so write about past years or looking forward to "
                              "the next one, not as if it's happening now.")
 
-        if kind == "post" and topic[0] == "issue" and random.random() < QUESTION_PROB:
+        if kind == "post" and topic[0] in ("issue", "anchor") and random.random() < QUESTION_PROB:
             parts.append("End with a genuine question to the people reading, one they'd want to answer; not a "
                          "rhetorical one.")
 
         tags = [t for t in self.hashtags if not any(h in t for h in NO_TAG_HINTS)]
-        if kind == "post" and topic[0] in ("issue", "vaccine") and tags and random.random() < HASHTAG_PROB:
+        if kind == "post" and topic[0] in ("issue", "anchor", "vaccine") and tags and random.random() < HASHTAG_PROB:
             parts.append(f"People on Legit Social are using these hashtags today: {' '.join(tags[:5])}. "
                          "Use one only if it fits naturally.")
 
@@ -1378,39 +1420,41 @@ async def press_check() -> None:
 
 
 async def boost_check() -> None:
-    """Teammates like a case post once it is five minutes old and until it is two hours old, BOOST_LIMITS of them
-    at most, and repost it; never a daily post, never their own, never one they already liked. A couple of them
-    answer it too, adding their own story, the post not claimed by any one of them."""
+    """Teammates like an anchor post once it is a minute old and until it is two hours old, BOOST_LIMITS of them at
+    most, the newest anchor first, and repost it; never another kind of post, never their own, never one they
+    already liked. BOOST_LIMITS of them answer it too, adding their own story, the post not claimed by any one."""
     store = StateStore(":memory:")
     now = datetime.now(timezone.utc)
-    for user, made_id, topic, minutes in (("rosa_dives", 500, "issue", 10), ("joe_tama", 501, "daily", 10),
-                                          ("walter_h", 502, "issue", 2), ("ana_moala", 503, "pitch", 150)):
+    for user, made_id, topic, minutes in (("rosa_dives", 500, "anchor", 10), ("joe_tama", 501, "issue", 5),
+                                          ("lena_brook", 504, "anchor", 30), ("walter_h", 502, "anchor", 0.5),
+                                          ("ana_moala", 503, "anchor", 150)):
         store.record(user, _iso(now - timedelta(minutes=minutes)),
                      Action("post", content="x", topic_kind=topic, made_id=made_id))
-    personas = load_personas()
+    personas = load_personas(status=None)
     helpers = [p for p in personas if p["line"] in ("amplifier", "background")][:BOOST_LIMITS["like"] + 2]
     bots = [Bot(p, FakePlatform(), FakeLLM(0, 0), load_world(), store=store) for p in helpers]
     likes = [b._boost("like") for b in bots]
-    assert [a.post_id if a else None for a in likes] == [500] * BOOST_LIMITS["like"] + [None, None], likes
+    assert [a.post_id if a else None for a in likes] == [500] * BOOST_LIMITS["like"] + [504, 504], likes
     assert likes[0].target_author == "rosa_dives" and likes[0].target_class == "own"
     reposts = [b._boost("repost") for b in bots[:BOOST_LIMITS["repost"] + 1]]
-    assert [a.post_id if a else None for a in reposts] == [500] * BOOST_LIMITS["repost"] + [None]
+    assert [a.post_id if a else None for a in reposts] == [500] * BOOST_LIMITS["repost"] + [504]
     poster = Bot(next(p for p in personas if p["username"] == "rosa_dives"), FakePlatform(), FakeLLM(0, 0),
                  load_world(), store=StateStore(":memory:"))
     poster.store.record("rosa_dives", _iso(now - timedelta(minutes=10)),
-                        Action("post", content="x", topic_kind="issue", made_id=600))
+                        Action("post", content="x", topic_kind="anchor", made_id=600))
     assert poster._boost("like") is None, "not its own post"
     fresh = StateStore(":memory:")
     fresh.record("rosa_dives", _iso(now - timedelta(minutes=10)),
-                 Action("post", content="x", topic_kind="issue", made_id=700))
+                 Action("post", content="x", topic_kind="anchor", made_id=700))
     seen = Bot(helpers[0], FakePlatform(), FakeLLM(0, 0), load_world(), store=fresh)
     seen.seen.add(700)
     assert seen._boost("like") is None, "not one it already liked"
-    saved = dict(LINE_ACTIONS["amplifier"]), dict(BOOST_PROB)
+    global BOOST_PROB
+    saved = dict(LINE_ACTIONS["amplifier"]), BOOST_PROB
     try:
         LINE_ACTIONS["amplifier"].clear()
         LINE_ACTIONS["amplifier"].update(like=1)
-        BOOST_PROB.update(amplifier=1.0)
+        BOOST_PROB = 1.0
         amplifier = next(p for p in personas if p["line"] == "amplifier")
         b = Bot(amplifier, FakePlatform(), FakeLLM(0, 0), load_world(), roster=Roster(npcs={"citizen_a"}), store=fresh)
         action = await b.think({"feed": [{"id": 9, "author": "citizen_a", "content": "ferry late again"}]})
@@ -1418,8 +1462,7 @@ async def boost_check() -> None:
     finally:
         LINE_ACTIONS["amplifier"].clear()
         LINE_ACTIONS["amplifier"].update(saved[0])
-        BOOST_PROB.clear()
-        BOOST_PROB.update(saved[1])
+        BOOST_PROB = saved[1]
 
     class Says:
         name = "says"
@@ -1437,7 +1480,10 @@ async def boost_check() -> None:
     team = StateStore(":memory:")
     team.record("rosa_dives", _iso(now - timedelta(minutes=20)),
                 Action("post", content="Dive boats sat idle for months in 2021; I'm voting yes on the mandate.",
-                       topic_kind="issue", made_id=900))
+                       topic_kind="anchor", made_id=900))
+    team.record("joe_tama", _iso(now - timedelta(minutes=20)),
+                Action("post", content="Cafe shut for months in 2021; I'm voting yes on the mandate.",
+                       topic_kind="issue", made_id=901))
     writers = [p for p in personas if p["line"] == "background"][:BOOST_LIMITS["reply"] + 1]
     global ACTION_WEIGHTS, TEAM_REPLY_PROB
     saved_reply = ACTION_WEIGHTS, TEAM_REPLY_PROB
@@ -1451,12 +1497,63 @@ async def boost_check() -> None:
             replies.append(action.post_id if action.type == "reply" else None)
             if action.post_id == 900:
                 assert LEAN_GUIDE["team"] in b.llm.prompts[0] and action.hold.startswith("boost:reply:900:")
-        assert replies[:BOOST_LIMITS["reply"]] == [900] * BOOST_LIMITS["reply"] and replies[-1] != 900, replies
+        assert replies[:BOOST_LIMITS["reply"]] == [900] * BOOST_LIMITS["reply"] and replies[-1] not in (900, 901), \
+            replies
         assert not team.claimed(["post:900"]), "a teammate's post isn't any one account's"
-        assert team.db.execute("SELECT COUNT(*) FROM reply_picks WHERE route = 'team'").fetchone()[0] == 2
+        assert team.db.execute("SELECT COUNT(*) FROM reply_picks WHERE route = 'team'").fetchone()[0] == \
+            BOOST_LIMITS["reply"]
     finally:
         ACTION_WEIGHTS, TEAM_REPLY_PROB = saved_reply
     print("boost ok")
+
+
+async def anchor_check() -> None:
+    """One anchor post a quarter-hour for the whole team, by a persuader or bridge, with the team's tag: a teammate
+    in the same slot writes none, a dropped draft gives the slot back, and an account that anchored lately leaves it
+    to others."""
+    class Says:
+        name = "says"
+
+        def __init__(self, text: Optional[str]) -> None:
+            self.text = text
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            return self.text
+
+    store = StateStore(":memory:")
+    personas = load_personas(status=None)
+    writers = [p for p in personas if p["line"] in ANCHOR_LINES][:3]
+    case = "I run a cafe and lost five months in 2021. I'm voting yes on the mandate. What would you do?"
+    dropped = Bot(writers[0], FakePlatform(), Says("as an AI I can't"), load_world(), store=store)
+    assert await dropped._anchor() is None
+    first = Bot(writers[1], FakePlatform(), Says(case), load_world(), store=store)
+    action = await first._anchor()
+    assert action is not None and action.topic_kind == "anchor" and action.hold.startswith("anchor:"), action
+    assert action.content.endswith(" " + TEAM_TAG), "an anchor post carries the team's tag"
+    daily = await Bot(writers[2], FakePlatform(), Says("Ferry was late again, third time this week."), load_world(),
+                      store=StateStore(":memory:"))._compose("post", ("daily", "the ferry"))
+    assert daily is not None and TEAM_TAG not in daily.content, "an everyday post carries no campaign tag"
+    second = Bot(writers[2], FakePlatform(), Says(case), load_world(), store=store)
+    assert await second._anchor() is None, "one anchor post a slot"
+    first.history.append((_iso(datetime.now(timezone.utc) - ANCHOR_REST / 2), action))
+    first.store.release(action.hold)
+    assert await first._anchor() is None, "an account anchors at most every ANCHOR_REST"
+    assert await second._anchor() is not None, "a freed slot goes to a teammate"
+    background = next(p for p in personas if p["line"] == "background")
+    b = Bot(background, FakePlatform(), Says(case), load_world(), roster=Roster(npcs={"citizen_a"}),
+            store=StateStore(":memory:"))
+    global ACTION_WEIGHTS
+    saved = ACTION_WEIGHTS
+    try:
+        ACTION_WEIGHTS = {"like": 1}
+        acted = await b.think({"feed": [{"id": 9, "author": "citizen_a", "content": "ferry late again"}]})
+        assert acted is None or acted.topic_kind != "anchor", "only persuaders and bridges anchor"
+    finally:
+        ACTION_WEIGHTS = saved
+    print("anchors ok")
 
 
 async def case_post_check() -> None:
@@ -1489,7 +1586,7 @@ async def case_post_check() -> None:
             b = Bot(persuader, FakePlatform(), writer, load_world(), store=StateStore(":memory:"))
             action = await b._compose("post", ("issue", "acting before the virus arrives"))
             system, prompt = writer.calls[0]
-            assert action is not None and action.content == long, b.rejected
+            assert action is not None and action.content in (long, f"{long} {TEAM_TAG}"), b.rejected
             assert "Three or four sentences" in system and "Open with who you are" in prompt
             assert ("End with a genuine question" in prompt) == asked
     finally:
@@ -1708,7 +1805,7 @@ async def quota_recovery_check() -> None:
     for outcome, kept in (("locked", False), ("refused", False), ("unclear", True), (None, True)):
         store = StateStore(":memory:")
         store.record("rosa_dives", _iso(datetime.now(timezone.utc) - timedelta(minutes=10)),
-                     Action("post", content="x", topic_kind="issue", made_id=800))
+                     Action("post", content="x", topic_kind="anchor", made_id=800))
         platform = Reposts()
         platform.outcome = outcome
         a = Bot(helpers[0], platform, Says(""), load_world(), store=store)
@@ -2117,6 +2214,7 @@ if __name__ == "__main__":
     asyncio.run(press_check())
     asyncio.run(press_quota_check())
     asyncio.run(boost_check())
+    asyncio.run(anchor_check())
     asyncio.run(case_post_check())
     asyncio.run(quota_recovery_check())
     asyncio.run(lukewarm_check())
