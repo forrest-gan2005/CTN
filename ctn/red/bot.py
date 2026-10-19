@@ -40,7 +40,8 @@ TOPIC_MIX = {
 # Mobilise accounts on a poll day and the day before: poll answers follow what's on citizens' minds.
 RUNUP_MIX = {"issue": 0.7, "vaccine": 0.1, "view": 0.05, "daily": 0.15}
 RUNUP_DAYS = 1
-ACTION_WEIGHTS = {"like": 5, "reply": 2, "post": 1, "repost": 0.5, "follow": 0.5, "none": 2}
+# Leaning to replies and posts: citizens' likes and replies to us, and their minds changing, are what score.
+ACTION_WEIGHTS = {"like": 5, "reply": 3, "post": 1.5, "repost": 0.5, "follow": 0.5, "none": 1}
 LINE_ACTIONS = {"amplifier": {"like": 6, "reply": 0.3, "post": 0.2, "repost": 2, "follow": 1, "none": 2}}
 # An account two takedowns from a ban stops writing; likes, reposts and follows can't be reported.
 QUIET_ACTIONS = {"like": 6, "repost": 1, "follow": 1, "none": 3}

@@ -668,6 +668,7 @@ async def _killed_child(tmp: str) -> None:
     """Runs in a subprocess the parent kills while the post is waiting for its answer."""
     from ctn.red import bot as bot_module
     bot_module.ACTION_WEIGHTS = {"post": 1}
+    bot_module.PITCH_PROB = 0.0  # a fresh interpreter: smoke's setting doesn't reach it
     p = Cut()
     p.when, p.landed = "hang", f"{tmp}/landed.json"
     persona = load_personas()[0]
