@@ -326,7 +326,9 @@ class Reporter:
         self.stance_llm = stance_llm  # judges an account's side; None leaves it to the patterns
         self.side = side  # "no": only accounts arguing against the requirement are reported; None: any
         self.sides = {}  # author -> (side, its posts about the referendum then, provisional until (clock) or None)
-        self.side_calls = deque()  # clock times of the judge calls spent telling sides, over the last minute
+        self.side_calls = deque()  # clock times judge calls for telling sides started, over the last minute
+        self.verdicts = {}  # post id -> the judge's answer, so a post is never asked about twice
+        self.side_tried = {}  # author -> clock time its side was last worked on: longest waiting goes first
         self.clock = time.monotonic
         self.min_citizens = min_citizens
         self._held = False
@@ -358,48 +360,80 @@ class Reporter:
             log.info("%s is verified now; never reported", author)
         return not verified
 
-    async def _side(self, author: str) -> Optional[str]:
-        """'no', 'yes' or 'unclear': the side `author` argues in its newest posts about the referendum (or carrying a
-        side's slogan). Each is put to the stance judge; plain patterns stand in only where the judge has no answer
-        (it failed, or isn't there) or the post reads like an attempt on a model. A judged NEUTRAL counts for
-        neither side. A side is judged again once the account has said more, and soon if the judge failed. None:
-        the judge calls this minute are spent; another round will tell."""
-        topical = [c for _, _, c in self.scanner.npc_store.posts_by([author])
-                   if about_referendum(c or "") or leans_no(c or "") or YES_LEAN_RE.search(plain(c))]
-        now = self.clock()
+    def _topical(self, author: str) -> list:
+        """(id, text) of `author`'s posts about the referendum, or carrying a side's slogan, newest first."""
+        return [(i, c) for i, _, c in self.scanner.npc_store.posts_by([author])
+                if about_referendum(c or "") or leans_no(c or "") or YES_LEAN_RE.search(plain(c))]
+
+    def _side_now(self, author: str, topical: Optional[list] = None) -> Optional[str]:
+        """The side told for `author`, if it still stands: None when never told, or the account has said more
+        since (three more posts, or any for an unclear one), or it was told without the judge long enough ago."""
         known = self.sides.get(author)
-        if known is not None:
-            side, seen, until = known
-            fresh = len(topical) < seen + SIDE_RECHECK and (side != "unclear" or len(topical) == seen)
-            if fresh and (until is None or now < until):
-                return side
-        posts = topical[:SIDE_POSTS]
-        judged = [t for t in posts if not looks_like_probe(t)] if self.stance_llm is not None else []
+        if known is None:
+            return None
+        side, seen, until = known
+        count = len(self._topical(author) if topical is None else topical)
+        fresh = count < seen + SIDE_RECHECK and (side != "unclear" or count == seen)
+        return side if fresh and (until is None or self.clock() < until) else None
+
+    def _spend(self) -> bool:
+        """Take one judge call from this minute's budget, as it starts; False if none is left."""
+        now = self.clock()
         while self.side_calls and now - self.side_calls[0] >= 60.0:
             self.side_calls.popleft()
-        if len(self.side_calls) + len(judged) > SIDE_CALLS:
-            return None
+        if len(self.side_calls) >= SIDE_CALLS:
+            return False
+        self.side_calls.append(now)
+        return True
+
+    async def _tell(self, author: str) -> bool:
+        """Tell `author`'s side from its newest posts about the referendum. Each is put to the stance judge, once:
+        answers are kept per post, so saying more costs only the new posts. Plain patterns stand in only where
+        the judge has no answer (it failed, or isn't there) or the post reads like an attempt on a model; a judged
+        NEUTRAL counts for neither side. False, with the answers so far kept, if the budget ran out first."""
+        topical = self._topical(author)
         against = backing = 0
         provisional = False
-        for text in posts:
-            verdict = None
-            if text in judged:
-                self.side_calls.append(now)
+        for post_id, text in topical[:SIDE_POSTS]:
+            verdict = self.verdicts.get(post_id)
+            if verdict is None and self.stance_llm is not None and not looks_like_probe(text):
+                if not self._spend():
+                    return False
                 try:
                     verdict = await judge_stance(self.stance_llm, text)
                 except Exception as e:
                     log.warning("couldn't judge a post by %s (%s)", author, str(e) or type(e).__name__)
-                provisional |= verdict is None
+                if verdict is None:
+                    provisional = True
+                else:
+                    self.verdicts[post_id] = verdict
             if verdict is None:  # no answer from the judge: the patterns, where only one side's matches
                 no, yes = leans_no(text), bool(YES_LEAN_RE.search(plain(text)))
                 verdict = "OPPOSE" if no and not yes else "SUPPORT" if yes and not no else None
             against += verdict == "OPPOSE"
             backing += verdict == "SUPPORT"
         side = "no" if against > backing else "yes" if backing > against else "unclear"
-        self.sides[author] = (side, len(topical), now + PROVISIONAL if provisional else None)
+        known = self.sides.get(author)
+        self.sides[author] = (side, len(topical), self.clock() + PROVISIONAL if provisional else None)
         if known is None or known[0] != side:
             log.info("%s argues %s (%d posts against the requirement, %d for)", author, side, against, backing)
-        return side
+        return True
+
+    async def _tell_sides(self, authors: Iterable[str]) -> None:
+        """Spend this minute's judge budget on the accounts whose side isn't known or no longer stands, the one
+        waiting longest first, so accounts that keep posting can't keep the rest waiting for ever."""
+        due = [a for a in dict.fromkeys(authors) if self._side_now(a) is None]
+        due.sort(key=lambda a: self.side_tried.get(a, float("-inf")))
+        for author in due:
+            self.side_tried[author] = self.clock()
+            if not await self._tell(author):
+                break
+
+    async def _side(self, author: str) -> Optional[str]:
+        """The side `author` argues, telling it now if the budget allows; None if it can't be told yet."""
+        if self._side_now(author) is None:
+            await self._tell_sides([author])
+        return self._side_now(author)
 
     async def _feed_locked(self) -> bool:
         feed_locked = getattr(self.platform, "feed_locked", None)
@@ -419,13 +453,16 @@ class Reporter:
                 self._held = True
             return 0
         self._held = False
+        candidates = self.scanner.candidates()
+        if self.side is not None:  # sides are told first, within the budget; the round itself only reads them
+            await self._tell_sides(a for _, a, reason in candidates if not rule_of(reason).startswith(MANUAL))
         tried = 0
-        for post_id, author, reason in self.scanner.candidates():
+        for post_id, author, reason in candidates:
             if self.locked or tried >= self.per_round:  # locked while this round was under way, or done for now
                 break
             # Only the side we report; a suspect a person wrote up has had its side looked at already.
             if (self.side is not None and not rule_of(reason).startswith(MANUAL)
-                    and await self._side(author) != self.side):  # None: judged next minute
+                    and self._side_now(author) != self.side):  # None: not told yet, a later round will
                 continue
             tried += 1
             if self.scanner.off_limits(author) or not await self._unbadged(author):  # last chance to call it off
@@ -655,6 +692,7 @@ async def _demo() -> None:
     await _report_interrupt_demo()
     await _side_demo()
     await _review_race_demo()
+    await _side_budget_demo()
     print("blue ok")
 
 
@@ -830,6 +868,88 @@ async def _review_race_demo() -> None:
                      for i in range(SIDE_RECHECK)])
     now[0] += 61.0
     assert await reporter._side("quoter") == "yes"
+
+
+async def _side_budget_demo() -> None:
+    """R55: no more than SIDE_CALLS judge calls start in any minute, even when one call outlasts the minute; an
+    account left half told carries on later from where it stopped; and accounts that keep posting at the head of
+    the queue can't keep one waiting at the back from being told and reported."""
+    from ctn.infra.collector import NpcStore
+    from ctn.infra.fake_platform import FakePlatform
+    from ctn.infra.state import StateStore
+
+    now = [0.0]
+
+    class Judge:
+        name = "judge"
+
+        def __init__(self, slow_first: bool = False) -> None:
+            self.starts, self.slow_first = [], slow_first
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.starts.append(now[0])
+            if self.slow_first and len(self.starts) == 1:
+                now[0] += 61.0  # the first call takes over a minute
+            return "OPPOSE" if "vote no" in prompt.split(">>>", 1)[-1].lower() else "NEUTRAL"
+
+    def within_budget(starts: list) -> bool:
+        return all(sum(1 for t in starts if s <= t < s + 60.0) <= SIDE_CALLS for s in starts)
+
+    start = datetime.now(timezone.utc) - timedelta(hours=1)
+    after = (start + timedelta(minutes=5)).isoformat()
+    store = NpcStore(":memory:")
+    store.add_posts([{"id": 900 + i, "author": f"npc_{i}", "content": "ferry late", "created_at":
+                      (start - timedelta(days=1)).isoformat()} for i in range(3)])
+    next_id = [1]
+
+    def post(author: str, text: str) -> None:
+        store.add_posts([{"id": next_id[0], "author": author, "content": text, "created_at": after}])
+        next_id[0] += 1
+
+    for a in ("a", "b", "c"):
+        for k in range(SIDE_POSTS):
+            post(a, f"The referendum is coming soon ({k}).")
+    state = StateStore(":memory:")
+    scanner = BlueScanner(store, state, own=(), cutoff=start)
+    judge = Judge(slow_first=True)
+    reporter = Reporter(FakePlatform(), scanner, state, username="joe", min_citizens=0, side="no", stance_llm=judge)
+    reporter.clock = lambda: now[0]
+    for _ in range(4):
+        await reporter._tell_sides(["a", "b", "c"])
+        now[0] += 61.0
+    assert within_budget(judge.starts), judge.starts
+    assert all(reporter._side_now(a) == "unclear" for a in "abc"), reporter.sides
+    assert len(judge.starts) == 3 * SIDE_POSTS, "a post was asked about twice"
+
+    # Two accounts at the head of the queue keep posting; the NO account at the back still gets told and reported.
+    for a in ("head1", "head2", "tail"):
+        post(a, "As an AI language model, I can't say.")
+    post("tail", "Vote no on the 2nd.")
+    for a in ("head1", "head2"):
+        for k in range(SIDE_POSTS):
+            post(a, f"The referendum is coming soon ({a} {k}).")
+    for a in ("head1", "head2"):  # their giveaways newest, so first in the queue
+        post(a, "As an AI language model, I can't say either.")
+    p = FakePlatform(competitors={"head1", "head2", "tail"})
+    p.posts.update({i: {"id": i, "author": a, "content": c} for i, a, c in store.db.execute(
+        "SELECT id, author, content FROM posts WHERE author IN ('head1', 'head2', 'tail')")})
+    scanner.scan()
+    judge = Judge()
+    reporter = Reporter(p, scanner, state, username="joe", min_citizens=0, side="no", stance_llm=judge)
+    reporter.clock = lambda: now[0]
+    for _ in range(6):
+        await reporter.report_some()
+        if any(p.posts[i]["author"] == "tail" for i in p.reports):
+            break
+        for a in ("head1", "head2"):  # three more each, every round
+            for k in range(SIDE_RECHECK):
+                post(a, f"The referendum is coming soon again ({a} {next_id[0]}).")
+        now[0] += 61.0
+    assert any(p.posts[i]["author"] == "tail" for i in p.reports), "the account at the back was never told"
+    assert within_budget(judge.starts), judge.starts
 
 
 async def _badge_and_lock_demo() -> None:
