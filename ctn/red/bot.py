@@ -85,7 +85,7 @@ LEAN_GUIDE = {
            "your own reason for YES. Answer their specific reason, not a generic one."),
     "undecided": ("They seem undecided. Give one concrete reason from your own life that speaks to what they care "
                   "about: the benefit to them first, then to everyone."),
-    "yes": "They lean YES already. Agree briefly in your own words and, if it fits, say you'll see them at the vote on 2 November.",
+    "yes": "They lean YES already. Agree briefly in your own words and, if it fits, say in your own way that you'll be voting too.",
     "team": ("They're on your side. Add something of your own they didn't say, so people reading see more than one "
              "voice; don't just agree, don't repeat their words, and don't open with their name or your own. One or "
              "two short sentences, like a comment under a neighbour's post. Leave out what happened to you in 2021, "
@@ -618,6 +618,8 @@ class Bot:
         """A reply to a citizen, drafted again once, told to avoid the phrase, if teammates' wording is what sank
         it: one evening 26 of the 31 dropped replies to citizens went for a shared phrase ("tipped me to yes", "the
         vote on 2"), and a reply to a citizen is the one kind that can move a mind."""
+        if referendum is None:  # decided once, so a redraft is framed as the first was and costs no judge call
+            referendum = await self._takes_up_referendum(target, topic[1])
         avoid = []
         for _ in range(1 + CITIZEN_REDRAFTS):
             self.last_shared, self.avoid = None, avoid
