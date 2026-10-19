@@ -21,6 +21,7 @@ from ctn.text.semantic import TWIN
 log = logging.getLogger("bot")
 
 MAX_LEN = 280
+CASE_MAX_LEN = 450  # a post making the case (the referendum, a pitch): what trends here runs three or four sentences
 POST_LIMIT = 500  # the platform's, with a GIF link added after the text
 SIMILARITY_LIMIT = 0.6  # copies of examples measured 0.73+, genuinely different posts 0.28-0.54
 REFERENDUM_DAY = date(2026, 11, 2)
@@ -92,6 +93,17 @@ PRESS_LINES = {"persuade", "bridge"}
 PRESS_WINDOW = timedelta(hours=6)  # a journalist's post this old is still worth answering
 PITCH_PROB = 0.2  # share of these accounts' new posts that go to a journalist still due a pitch today
 MENTION_RE = re.compile(r"(?<![\w.@])@(\w+)")
+# The posts that trend open with who the writer is and what's at stake for them, grant the other side's worry, then
+# land on YES; replies weigh heavily in Trending, so half our referendum posts end on a question people would answer.
+CASE_TOPICS = ("issue", "pitch")
+QUESTION_PROB = 0.5
+# Teammates lift each other's case posts towards Trending, where citizens' likes and replies then far outnumber
+# ours: a few likes and at most one repost a post, by whichever accounts come by in its first hour, mostly
+# amplifiers and background accounts, never a reply (talk between our accounts is what links them).
+BOOST_WINDOW = timedelta(hours=1)
+BOOST_DELAY = timedelta(minutes=5)  # nobody likes a post the second it appears
+BOOST_LIMITS = {"like": 3, "repost": 1}
+BOOST_PROB = {"amplifier": 0.5, "background": 0.3}  # of this line's likes and reposts; other lines 0.15
 
 REFUSAL_MARKERS = (
     "as an ai",
@@ -273,6 +285,10 @@ class Bot:
         if kind == "none":
             return None
         if kind in ("like", "repost"):
+            if random.random() < BOOST_PROB.get(self.line, 0.15):
+                boost = self._boost(kind)
+                if boost is not None:
+                    return boost
             return await self._amplify(kind, candidates)
         if kind == "follow":
             return self._follow()
@@ -415,7 +431,8 @@ class Bot:
         if referendum is None:
             referendum = (await self._takes_up_referendum(target, topic[1]) if target is not None
                           else topic[0] in ("issue", "pitch"))
-        system = self._system_prompt(examples, from_npcs, arguments=referendum)
+        case = kind == "post" and topic[0] in CASE_TOPICS
+        system = self._system_prompt(examples, from_npcs, arguments=referendum, case=case)
         earlier, about = None, []
         if target is not None:
             if topic[0] == "conversation" and target.get("parent_id") is not None:
@@ -437,7 +454,7 @@ class Bot:
                                                                 referendum=referendum, gif=gif, context=context))
         model = getattr(raw, "model", None) or getattr(self.llm, "name", None)  # a fallback model may have written it
         text, query = split_gif(raw)  # a GIF line goes even when none was asked for
-        content = self._clean(text)
+        content = self._clean(text, CASE_MAX_LEN if case else MAX_LEN)
         if content is None:
             return None
         if topic[0] == "pitch" and f"@{topic[1]}".lower() not in content.lower():
@@ -495,6 +512,19 @@ class Bot:
             if post is not None and not self._probe(post.get("content") or ""):
                 return post
             self.store.drop_inbox(self.username, post_id)
+        return None
+
+    def _boost(self, kind: str) -> Optional[Action]:
+        """Like or repost a teammate's case post from the last hour, while it has fewer than BOOST_LIMITS of
+        ours; the place is taken with nothing awaited, so teammates acting at once can't pass the limit."""
+        now = datetime.now(timezone.utc)
+        posts = self.store.team_posts(CASE_TOPICS, _iso(now - BOOST_WINDOW), self.username)
+        settled = {pid for _, pid in self.store.team_posts(CASE_TOPICS, _iso(now - BOOST_DELAY), self.username)}
+        for author, post_id in random.sample(posts, len(posts)):
+            if post_id in settled or post_id in self.seen:
+                continue
+            if self.store.reserve(f"boost:{kind}:{post_id}:", self.username, BOOST_LIMITS[kind]) is not None:
+                return Action(kind, post_id=post_id, line=self.line, target_author=author, target_class="own")
         return None
 
     async def _amplify(self, kind: str, candidates: list) -> Optional[Action]:
@@ -591,7 +621,7 @@ class Bot:
         own = self.persona["examples"]
         return random.sample(own, min(2, len(own))), False
 
-    def _system_prompt(self, examples: list, from_npcs: bool, arguments: bool = True) -> str:
+    def _system_prompt(self, examples: list, from_npcs: bool, arguments: bool = True, case: bool = False) -> str:
         p = self.persona
         shown = ""
         if examples:
@@ -622,6 +652,8 @@ class Bot:
                    f"Other things you think: {'; '.join(p['views'])}.\n"
                    f"How you write: {p['style']}.\n\n")
             own_words = ""
+        length = ("Three or four sentences, under 75 words." if case
+                  else "Keep it to 1-3 short sentences, under 40 words.")
         return (
             f"{self.world if arguments else self.plain_world}\n\n"
             f"{self.news + chr(10) * 2 if self.news else ''}"
@@ -630,7 +662,7 @@ class Bot:
             f"# Who you are\n{who}"
             f"{shown}"
             "# Output\n"
-            "Write in first person as yourself. Keep it to 1-3 short sentences, under 40 words."
+            f"Write in first person as yourself. {length}"
             f"{own_words} Output only the text of the post: no quotation marks, no explanation, no label."
         )
 
@@ -723,6 +755,9 @@ class Bot:
         elif topic[0] == "issue":
             parts.append(f"Write a new post about the referendum, along this line: {topic[1]}. A comparison is fine, "
                          "but make plain that you mean the referendum on proof of vaccination; nobody should have to guess.")
+            parts.append("Open with who you are and what's at stake for you (your work, your family, your street), "
+                         "give the other side's worry its due in a few words of your own (not \"I get the worry\"), "
+                         "then say plainly why you're voting YES.")
         elif topic[0] == "vaccine":
             parts.append(f"Write a new post about vaccination in your everyday life: {topic[1]}. Don't mention the "
                          "referendum or any mandate in this one, and don't give anyone medical advice.")
@@ -735,6 +770,10 @@ class Bot:
             if EVENT_RE.search(topic[1] or ""):
                 parts.append("You don't know when it's on this year, so write about past years or looking forward to "
                              "the next one, not as if it's happening now.")
+
+        if kind == "post" and topic[0] == "issue" and random.random() < QUESTION_PROB:
+            parts.append("End with a genuine question to the people reading, one they'd want to answer; not a "
+                         "rhetorical one.")
 
         tags = [t for t in self.hashtags if not any(h in t for h in NO_TAG_HINTS)]
         if kind == "post" and topic[0] in ("issue", "vaccine") and tags and random.random() < HASHTAG_PROB:
@@ -761,7 +800,7 @@ class Bot:
             parts.append(GIF_PROMPT)
         return "\n\n".join(parts)
 
-    def _clean(self, text: Optional[str]) -> Optional[str]:
+    def _clean(self, text: Optional[str], limit: int = MAX_LEN) -> Optional[str]:
         if text is None:
             return None
         text = LABEL_RE.sub("", text.strip())
@@ -772,7 +811,7 @@ class Bot:
             text = text[1:].strip()  # model opened a quote and never closed it
         if not text:
             return None
-        if len(text) > MAX_LEN:
+        if len(text) > limit:
             return None
         low = plain(text).lower()
         if any(m in low for m in REFUSAL_MARKERS):
@@ -1149,6 +1188,93 @@ async def press_check() -> None:
         b = Bot(persuaders[0], platform, Says(text), load_world(), roster=roster, store=StateStore(":memory:"))
         assert await b._compose("post", topic=topic) is None and b.rejected == {"stray mention": 1}, b.rejected
     print("press ok")
+
+
+async def boost_check() -> None:
+    """Teammates like a case post once it is five minutes old and until it is an hour old, three of them at most,
+    and one reposts it; never a daily post, never their own, never one they already liked."""
+    store = StateStore(":memory:")
+    now = datetime.now(timezone.utc)
+    for user, made_id, topic, minutes in (("rosa_dives", 500, "issue", 10), ("joe_tama", 501, "daily", 10),
+                                          ("walter_h", 502, "issue", 2), ("ana_moala", 503, "pitch", 90)):
+        store.record(user, _iso(now - timedelta(minutes=minutes)),
+                     Action("post", content="x", topic_kind=topic, made_id=made_id))
+    personas = load_personas()
+    helpers = [p for p in personas if p["line"] in ("amplifier", "background")][:5]
+    bots = [Bot(p, FakePlatform(), FakeLLM(0, 0), load_world(), store=store) for p in helpers]
+    likes = [b._boost("like") for b in bots]
+    assert [a.post_id if a else None for a in likes] == [500, 500, 500, None, None], likes
+    assert likes[0].target_author == "rosa_dives" and likes[0].target_class == "own"
+    reposts = [b._boost("repost") for b in bots[:2]]
+    assert reposts[0].post_id == 500 and reposts[1] is None
+    poster = Bot(next(p for p in personas if p["username"] == "rosa_dives"), FakePlatform(), FakeLLM(0, 0),
+                 load_world(), store=StateStore(":memory:"))
+    poster.store.record("rosa_dives", _iso(now - timedelta(minutes=10)),
+                        Action("post", content="x", topic_kind="issue", made_id=600))
+    assert poster._boost("like") is None, "not its own post"
+    fresh = StateStore(":memory:")
+    fresh.record("rosa_dives", _iso(now - timedelta(minutes=10)),
+                 Action("post", content="x", topic_kind="issue", made_id=700))
+    seen = Bot(helpers[0], FakePlatform(), FakeLLM(0, 0), load_world(), store=fresh)
+    seen.seen.add(700)
+    assert seen._boost("like") is None, "not one it already liked"
+    saved = dict(LINE_ACTIONS["amplifier"]), dict(BOOST_PROB)
+    try:
+        LINE_ACTIONS["amplifier"].clear()
+        LINE_ACTIONS["amplifier"].update(like=1)
+        BOOST_PROB.update(amplifier=1.0)
+        amplifier = next(p for p in personas if p["line"] == "amplifier")
+        b = Bot(amplifier, FakePlatform(), FakeLLM(0, 0), load_world(), roster=Roster(npcs={"citizen_a"}), store=fresh)
+        action = await b.think({"feed": [{"id": 9, "author": "citizen_a", "content": "ferry late again"}]})
+        assert action.type == "like" and action.post_id == 700, action
+    finally:
+        LINE_ACTIONS["amplifier"].clear()
+        LINE_ACTIONS["amplifier"].update(saved[0])
+        BOOST_PROB.clear()
+        BOOST_PROB.update(saved[1])
+    print("boost ok")
+
+
+async def case_post_check() -> None:
+    """A referendum post may run to CASE_MAX_LEN and is asked for in three or four sentences, opening with who the
+    writer is; half end on a question; other posts keep to MAX_LEN."""
+    class Says:
+        name = "says"
+
+        def __init__(self, text: str) -> None:
+            self.text, self.calls = text, []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.calls.append((system, prompt))
+            return self.text
+
+    long = ("I drive the early ferry out to the islands and half my regulars are past seventy, so a bad flu "
+            "season empties my benches fast. I get why people hate the idea of showing a pass at the shop, and "
+            "nobody wants a rule that never ends. But I watched the last outbreak close the wharf for months, and "
+            "I'm voting yes on the mandate so we act before it reaches us. What would make it easier for you?")
+    assert MAX_LEN < len(long) <= CASE_MAX_LEN
+    persuader = next(p for p in load_personas() if p["line"] == "persuade")
+    saved = QUESTION_PROB
+    try:
+        for prob, asked in ((1.0, True), (0.0, False)):
+            globals()["QUESTION_PROB"] = prob
+            writer = Says(long)
+            b = Bot(persuader, FakePlatform(), writer, load_world(), store=StateStore(":memory:"))
+            action = await b._compose("post", ("issue", "acting before the virus arrives"))
+            system, prompt = writer.calls[0]
+            assert action is not None and action.content == long, b.rejected
+            assert "Three or four sentences" in system and "Open with who you are" in prompt
+            assert ("End with a genuine question" in prompt) == asked
+    finally:
+        globals()["QUESTION_PROB"] = saved
+    daily = Bot(persuader, FakePlatform(), Says(long.replace("voting yes on the mandate", "off to the wharf")),
+                load_world(), store=StateStore(":memory:"))
+    assert await daily._compose("post", ("daily", "the ferry")) is None, "an everyday post stays short"
+    assert "1-3 short sentences" in daily.llm.calls[0][0]
+    print("case posts ok")
 
 
 async def press_quota_check() -> None:
@@ -1622,6 +1748,8 @@ if __name__ == "__main__":
     asyncio.run(gif_check())
     asyncio.run(press_check())
     asyncio.run(press_quota_check())
+    asyncio.run(boost_check())
+    asyncio.run(case_post_check())
     asyncio.run(lukewarm_check())
     asyncio.run(news_reply_check())
     asyncio.run(reply_context_check())

@@ -220,6 +220,14 @@ class StateStore:
             "AND content IS NOT NULL UNION ALL SELECT username, content FROM writes WHERE sent_at >= ? "
             "AND username != ? AND status IN ('sending', 'pending')", (since, exclude, since, exclude)).fetchall()
 
+    def team_posts(self, topics: tuple, since: str, exclude: str) -> list:
+        """(username, post id) of the other accounts' published posts on these topics since UTC ISO time `since`,
+        oldest first."""
+        marks = ",".join("?" * len(topics))
+        return self.db.execute(
+            f"SELECT username, made_id FROM history WHERE type = 'post' AND topic_kind IN ({marks}) AND ts >= ? "
+            "AND username != ? AND made_id IS NOT NULL ORDER BY ts", (*topics, since, exclude)).fetchall()
+
     def gif_texts(self, since: str) -> list:
         """(UTC ISO time, text) of our posts and replies since `since` with a GIF link, counting writes being sent
         or that may be live; a write known never to have gone out doesn't."""
