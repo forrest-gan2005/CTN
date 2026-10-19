@@ -12,6 +12,10 @@ DEFAULT_CURVE = (1.0, 0.5, 0.3, 0.2, 0.2, 0.4, 1.2, 2.5, 3.5, 3.5, 3.5, 4.0,
 MIN_CURVE_POSTS = 500
 QUIET_FLOOR = 0.1  # the quietest hour still gets this share of an average hour's activity
 SESSION_GAP_MEDIAN = 45.0  # seconds between actions within one sitting
+# Sittings a day, drawn once per account. Raised on the opening night, when the feed went from about two posts a
+# minute to ten as other teams came online, and citizens post round the clock.
+SESSIONS_PER_DAY = (10.0, 18.0)
+FIRST_SITTING = (60.0, 600.0)  # seconds after coming online, or a restart, before a first look round
 
 
 def normalise(weights: Sequence[float]) -> list:
@@ -62,10 +66,11 @@ class Rhythm:
     def __init__(self, username: str, curve: Sequence[float], sessions_per_day: Optional[float] = None) -> None:
         personal = random.Random(username)
         self.shift = personal.uniform(-1.5, 1.5)  # hours; early birds and night owls
-        self.sessions_per_day = sessions_per_day or personal.uniform(4, 9)
+        self.sessions_per_day = sessions_per_day or personal.uniform(*SESSIONS_PER_DAY)
         self.actions_per_session = personal.uniform(2, 4)
         self.curve = normalise(curve)
         self.left = 0  # actions still to take in the current sitting
+        self.started = False
 
     def rate(self, t: datetime) -> float:
         """Expected sittings per hour at time t."""
@@ -78,14 +83,22 @@ class Rhythm:
 
     def next_wait(self, now: datetime) -> float:
         """Seconds until this account's next action."""
+        if not self.started:  # just online, newly signed up or after a restart: a look round soon, as people do
+            self.started = True
+            self.left = self._sitting() - 1
+            return random.uniform(*FIRST_SITTING)
         if self.left > 0:
             self.left -= 1
             return min(300.0, random.lognormvariate(math.log(SESSION_GAP_MEDIAN), 0.6))
+        self.left = self._sitting() - 1
+        return self._until_next_session(now)
+
+    def _sitting(self) -> int:
+        """How many actions the next sitting takes: geometric, averaging actions_per_session."""
         n = 1
         while random.random() > 1 / self.actions_per_session:
             n += 1
-        self.left = n - 1
-        return self._until_next_session(now)
+        return n
 
     def _until_next_session(self, now: datetime) -> float:
         # Thinning: draw candidates at the peak rate, keep each with probability rate(t) / peak.
@@ -117,6 +130,10 @@ if __name__ == "__main__":
 
     r = Rhythm("joe_tama", curve)
     assert Rhythm("joe_tama", curve).shift == r.shift
+    assert SESSIONS_PER_DAY[0] <= r.sessions_per_day <= SESSIONS_PER_DAY[1]
+    fresh = Rhythm("joe_tama", curve)  # comes online: the first action within minutes, not hours
+    first = fresh.next_wait(datetime(2026, 10, 19, 7, tzinfo=timezone.utc))
+    assert FIRST_SITTING[0] <= first <= FIRST_SITTING[1] and fresh.started
     now = datetime(2026, 10, 19, 6, tzinfo=timezone.utc)
     end = now + timedelta(days=400)
     hours = [0] * 24
