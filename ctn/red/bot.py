@@ -691,11 +691,13 @@ class Bot:
         return Action("post", content=content, line=self.line, topic_kind=topic[0], angle=topic[1], model=model)
 
     async def _conversation_target(self) -> Optional[dict]:
-        """The oldest citizen reply to us that still deserves an answer."""
+        """The oldest reply to us that still deserves an answer, known citizens' before the rest: those wait, now, for
+        a feed with no citizen in it, and must not hold a citizen's reply up behind them."""
         now = datetime.now(timezone.utc)
         stale, since = _iso(now - INBOX_TTL), _iso(now - timedelta(hours=24))
         rivals = self._rivals()
-        for post_id, actor, received_at in self.store.inbox(self.username):
+        inbox = sorted(self.store.inbox(self.username), key=lambda e: self.roster.classify(e[1]) != "npc")
+        for post_id, actor, received_at in inbox:
             post = None
             if (post_id not in self.seen and received_at >= stale and actor not in rivals
                     and not self.store.claimed([f"post:{post_id}"])  # a teammate answered it from the feed
@@ -1468,22 +1470,23 @@ async def arguments_check() -> None:
 
 
 async def conversation_route_check() -> None:
-    """A citizen who answered us is answered back first; an account of unknown standing that did waits behind a
-    citizen in the feed, and is answered only when no citizen is there."""
+    """A citizen who answered us is answered back first, even after an account of unknown standing did; one of
+    those waits behind a citizen in the feed, and is answered only when no citizen is there."""
     persona = next(p for p in load_personas() if p["line"] == "background")
     global ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB
     saved = ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB
     try:
         ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB = {"reply": 1}, 0.0, 0.0
-        for answered_by, feed_author, expected in (("stranger_1", "citizen_a", ("citizen_a", False)),
-                                                   ("citizen_b", "citizen_a", ("citizen_b", True)),
-                                                   ("stranger_1", None, ("stranger_1", True))):
+        for answered_by, feed_author, expected in ((("stranger_1",), "citizen_a", ("citizen_a", False)),
+                                                   (("stranger_1", "citizen_b"), "citizen_a", ("citizen_b", True)),
+                                                   (("stranger_1",), None, ("stranger_1", True))):
             store, platform = StateStore(":memory:"), FakePlatform()
             b = Bot(persona, platform, FakeLLM(0, 0), load_world(), roster=Roster(npcs={"citizen_a", "citizen_b"}),
                     store=store)
-            theirs = await platform.post(answered_by, "fair point, but what about the ferry?")
-            store.ingest_notifications(b.username, [], [{"post_id": theirs["id"], "actor": answered_by}],
-                                       _iso(datetime.now(timezone.utc)))
+            for minutes, author in enumerate(reversed(answered_by)):  # the first-named answered first
+                theirs = await platform.post(author, "fair point, but what about the ferry?")
+                store.ingest_notifications(b.username, [], [{"post_id": theirs["id"], "actor": author}],
+                                           _iso(datetime.now(timezone.utc) - timedelta(minutes=minutes)))
 
             async def chosen(target: dict, source: str, route: str, **_kw) -> tuple:
                 return target["author"], source == "conversation"
