@@ -298,9 +298,9 @@ class Bot:
                 return await self._reply(target, "conversation" if target is conv else "feed", route)
             # nothing worth replying to; write something instead
         if not self.quiet and self.line in PRESS_LINES and random.random() < PITCH_PROB:
-            pitch = await self._pitch()
-            if pitch is not None:
-                return pitch
+            place = self._pitch_place()
+            if place is not None:  # one draft a step: a pitch that's dropped isn't followed by another post
+                return await self._pitch(place)
         return await self._compose("post", topic=self._pick_topic())
 
     async def _press_target(self, candidates: list) -> Optional[tuple]:
@@ -320,13 +320,16 @@ class Bot:
         to a journalist takes one, from the moment it is chosen (nothing awaited before) until the day ends, or
         until it is known never to have gone: so teammates writing at once can't pass the limit, and an account
         answers a journalist once a day."""
-        day = datetime.now(TIMEZONE).date().isoformat()
-        return self.store.reserve(f"press:{journalist}:{day}:", self.username, MAX_REPLIES_PER_AUTHOR)
+        today = datetime.now(TIMEZONE)
+        midnight = _iso(today.replace(hour=0, minute=0, second=0, microsecond=0))
+        # Replies sent before places were kept (or by another route) count too, once each.
+        return self.store.reserve(f"press:{journalist}:{today.date().isoformat()}:", self.username,
+                                  MAX_REPLIES_PER_AUTHOR, self.store.replied_since(journalist, midnight))
 
     async def _press_topic(self, post: dict) -> tuple:
         """(whether a journalist's post takes up the referendum, the post it answers or None), judged with what
-        it answers, since their own words are often only "Exactly." and once for the team. A post it answers
-        that couldn't be read, or a judge that gave no answer, is tried again later, never taken as a no."""
+        it answers, since their own words are often only "Exactly." and once for the team. None for the first
+        when the post it answers couldn't be read or the judge gave no answer: tried again later, never a no."""
         known = self.roster.press.get(post["id"])
         if known is not None:
             return known
@@ -337,7 +340,7 @@ class Bot:
             except Exception as e:
                 log.info("%s: couldn't read what #%s answers (%s)", self.username, post["id"],
                          str(e) or type(e).__name__)
-                return False, None
+                return None, None
         text = post.get("content") or ""
         if about_referendum(text) or about_referendum(context or ""):
             topical = True
@@ -346,28 +349,35 @@ class Bot:
         else:
             stance = await judge_stance(self.stance_llm, text, context)
             if stance is None:
-                return False, context
+                return None, context
             topical = stance in ("SUPPORT", "OPPOSE")
         self.roster.press[post["id"]] = (topical, context)
         return topical, context
 
-    async def _pitch(self) -> Optional[Action]:
-        """A post pointing a journalist to a story, @mentioning them; one per journalist a day, team-wide."""
+    def _pitch_place(self) -> Optional[tuple]:
+        """(journalist, key) of a journalist nobody on the team has pitched today, the place now taken; or None."""
         today = datetime.now(TIMEZONE).date().isoformat()
         for username in random.sample(list(JOURNALISTS), len(JOURNALISTS)):
             key = f"pitch:{username}:{today}"
-            if not self.store.claim(key, self.username):
-                continue
-            action = None
-            try:
-                action = await self._compose("post", topic=("pitch", username))
-            finally:
-                if action is None:  # dropped or failed: another account may pitch them today
-                    self.store.release(key)
-            if action is not None:
-                action.hold = key
-            return action
+            if self.store.claim(key, self.username):
+                return username, key
         return None
+
+    async def _pitch(self, place: Optional[tuple] = None) -> Optional[Action]:
+        """A post pointing a journalist to a story, @mentioning them; one per journalist a day, team-wide."""
+        place = place or self._pitch_place()
+        if place is None:
+            return None
+        username, key = place
+        action = None
+        try:
+            action = await self._compose("post", topic=("pitch", username))
+        finally:
+            if action is None:  # dropped or failed: another account may pitch them today
+                self.store.release(key)
+        if action is not None:
+            action.hold = key
+        return action
 
     async def draft(self, target: Optional[dict] = None) -> Optional[Action]:
         """Compose without claiming or publishing: a reply to `target`, or a new post."""
@@ -379,10 +389,15 @@ class Bot:
                      hold: Optional[str] = None, referendum: Optional[bool] = None) -> Optional[Action]:
         """`hold` is a quota place taken for this reply, given back unless it is sent; `context` and `referendum`
         what the target answers and whether it takes up the referendum, when already known."""
-        if hold is None and target["author"] in JOURNALISTS:  # replies to journalists come out of the day's places
-            hold = self._press_place(target["author"])
-            if hold is None:
-                return None
+        if target["author"] in JOURNALISTS:
+            if referendum is None:  # from another route (a journalist answering us): decided as the press route does
+                referendum, context = await self._press_topic(target)
+                if referendum is None:
+                    return None
+            if hold is None:  # replies to journalists come out of the day's places
+                hold = self._press_place(target["author"])
+                if hold is None:
+                    return None
         pick = self.store.pick(self.username, route, target["id"], target["author"],
                                self.roster.classify(target["author"]), _iso(datetime.now(timezone.utc)))
         key = f"post:{target['id']}"
@@ -523,8 +538,10 @@ class Bot:
         for author, post_id in random.sample(posts, len(posts)):
             if post_id in settled or post_id in self.seen:
                 continue
-            if self.store.reserve(f"boost:{kind}:{post_id}:", self.username, BOOST_LIMITS[kind]) is not None:
-                return Action(kind, post_id=post_id, line=self.line, target_author=author, target_class="own")
+            hold = self.store.reserve(f"boost:{kind}:{post_id}:", self.username, BOOST_LIMITS[kind])
+            if hold is not None:
+                return Action(kind, post_id=post_id, line=self.line, target_author=author, target_class="own",
+                              hold=hold)
         return None
 
     async def _amplify(self, kind: str, candidates: list) -> Optional[Action]:
@@ -901,7 +918,7 @@ class Bot:
         if action is None:
             return None
         if self.locked:  # locked while this was being written
-            if action.type in ("post", "reply"):
+            if action.type in ("post", "reply") or action.hold is not None:
                 self._drop(action, "the feed is locked")
             return None
         if action.type in ("post", "reply"):
@@ -918,7 +935,7 @@ class Bot:
         write = None
         if action.type in ("post", "reply"):
             write = self.store.begin_write(self.username, action.type, action.post_id, action.content, sent_at,
-                                           pick=action.pick)
+                                           pick=action.pick, hold=action.hold)
         try:
             await self.act(action)
         except AmbiguousWrite as e:
@@ -928,11 +945,11 @@ class Bot:
             status = getattr(getattr(e, "response", None), "status_code", None)
             if self.gifs is not None and status in (400, 422) and GIPHY_URL_RE.search(action.content or ""):
                 self.gifs.disable(f"the platform refused {self.username}'s post with a GIF (HTTP {status})")
+            if write is None and action.hold is not None and _never_sent(e):  # a like or repost that never went
+                self.store.release(action.hold)
             if write is not None:
                 if _never_sent(e):
-                    self.store.end_write(write, "not_sent", error=_describe(e))
-                    if action.hold is not None:  # it never went: the day's place is free again
-                        self.store.release(action.hold)
+                    self.store.end_write(write, "not_sent", error=_describe(e))  # frees any place it held
                 else:
                     self._maybe_live(action, write, _describe(e))
             raise
@@ -1310,7 +1327,7 @@ async def press_quota_check() -> None:
     lost = {"id": 302, "author": "julio_morales", "parent_id": 99_999, "content": "Exactly."}
     assert await b._press_topic(on_bread) == (True, bread["content"])
     assert await b._press_topic(on_sea) == (False, sea["content"])
-    assert await b._press_topic(lost) == (False, None) and 302 not in roster.press, "tried again later"
+    assert await b._press_topic(lost) == (None, None) and 302 not in roster.press, "tried again later"
     # the route takes it up, and the reply has to back YES: the judge calls this one neutral, so it goes, and so
     # does its place
     assert await b.think({"feed": [on_bread]}) is None or b.rejected.get("lukewarm") == 1
@@ -1359,6 +1376,123 @@ async def press_quota_check() -> None:
     p._drop(action, "went quiet")
     assert not store.claimed([yesterday])
     print("press quota ok")
+
+
+async def quota_recovery_check() -> None:
+    """Quota places: replies already in history count; a place taken by a run that stopped before journalling the
+    write is freed at the next start, one whose write began is kept until it is known not to have gone; a
+    journalist answering us is judged with what they answered; a like or repost that never went frees its place."""
+    import tempfile
+
+    import httpx
+
+    class Says:
+        name = "says"
+
+        def __init__(self, text: str) -> None:
+            self.text, self.prompts = text, []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            return self.text
+
+    class Neutral(Says):
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            return "NEUTRAL"
+
+    personas = load_personas()
+    persuader = next(p for p in personas if p["line"] == "persuade")
+    now = _iso(datetime.now(timezone.utc))
+    with tempfile.TemporaryDirectory() as tmp:
+        for earlier, expect in ((4, [None]), (3, ["place", None])):
+            path = f"{tmp}/old{earlier}.db"
+            old = StateStore(path)
+            for i in range(earlier):
+                old.record(f"mate_{i}", now,
+                           Action("reply", post_id=900 + i, content="x", target_author="julio_morales"))
+            old.db.close()
+            store = StateStore(path)
+            got = [Bot(p, FakePlatform(), Says(""), load_world(), store=store)._press_place("julio_morales")
+                   for p in personas[:len(expect)]]
+            assert [g and "place" for g in got] == expect, (earlier, got)
+            mate = Bot(dict(persuader, username="mate_0"), FakePlatform(), Says(""), load_world(), store=store)
+            assert mate._press_place("julio_morales") is None, "an account that replied today has had its place"
+
+        path = f"{tmp}/crash.db"
+        store = StateStore(path)
+        bots = [Bot(p, FakePlatform(), Says(""), load_world(), store=store) for p in personas[:4]]
+        before = bots[0]._press_place("julio_morales")  # stopped before writing
+        begun = bots[1]._press_place("julio_morales")  # stopped mid-request
+        store.begin_write(bots[1].username, "reply", 1, "hi", now, hold=begun)
+        sent = bots[2]._press_place("julio_morales")
+        store.end_write(store.begin_write(bots[2].username, "reply", 2, "yo", now, hold=sent), "sent", 50)
+        never = bots[3]._press_place("julio_morales")
+        store.end_write(store.begin_write(bots[3].username, "reply", 3, "no", now, hold=never), "not_sent")
+        idle = store.reserve("boost:like:77:", "mate_a", 3)
+        liked = store.reserve("boost:like:77:", "mate_b", 3)
+        store.record("mate_b", now, Action("like", post_id=77))
+        store.db.close()
+        store = StateStore(path)
+        store.recover()
+        assert store.claimed([before, begun, sent, never, idle, liked]) == {begun, sent, liked}
+        pending = store.unresolved()[0][0]
+        store.resolve(pending, "not_found")
+        assert store.claimed([begun]) == set(), "a write that never appeared frees its place"
+
+    platform = FakePlatform()
+    no = await platform.post("citizen_a", "Voting no on the mandate.")
+    sea = await platform.post("citizen_b", "lovely sunset over the harbour tonight")
+    roster = Roster(npcs={"julio_morales", "citizen_a", "citizen_b"})
+    reply = "Fair, and my nan's ward was full last time, so I'd rather we were ready this winter."
+    for parent, dropped in ((no["id"], True), (sea["id"], False), (99_999, None)):
+        store = StateStore(":memory:")
+        b = Bot(persuader, platform, Says(reply), load_world(), stance_llm=Neutral(""), roster=roster, store=store)
+        target = {"id": 400 + parent % 1000, "author": "julio_morales", "parent_id": parent, "content": "Exactly."}
+        action = await b._reply(target, "conversation", "conversation")
+        if dropped is None:
+            assert action is None and target["id"] not in roster.press and not b.llm.prompts, "unread: later"
+        elif dropped:
+            assert action is None and b.rejected == {"lukewarm": 1} and "why YES protects" in b.llm.prompts[0]
+        else:
+            assert action is not None and "leave the referendum out" in b.llm.prompts[0]
+        held = store.db.execute("SELECT COUNT(*) FROM claims WHERE key LIKE 'press:%'").fetchone()[0]
+        assert held == (1 if dropped is False else 0), (parent, held)
+
+    class Reposts(FakePlatform):
+        outcome = None
+
+        async def repost(self, username: str, post_id: int) -> bool:
+            if self.outcome == "refused":
+                request = httpx.Request("POST", "https://social.example/api/posts/1/repost")
+                raise httpx.HTTPStatusError("no", request=request, response=httpx.Response(403, request=request))
+            if self.outcome == "unclear":
+                raise TimeoutError()
+            return True
+
+    helpers = [p for p in personas if p["line"] in ("amplifier", "background")][:2]
+    for outcome, kept in (("locked", False), ("refused", False), ("unclear", True), (None, True)):
+        store = StateStore(":memory:")
+        store.record("rosa_dives", _iso(datetime.now(timezone.utc) - timedelta(minutes=10)),
+                     Action("post", content="x", topic_kind="issue", made_id=800))
+        platform = Reposts()
+        platform.outcome = outcome
+        a = Bot(helpers[0], platform, Says(""), load_world(), store=store)
+        action = a._boost("repost")
+
+        async def chosen(_obs: dict, action=action, a=a) -> Action:
+            a.locked = outcome == "locked"
+            return action
+        a.think = chosen
+        try:
+            await a.step()
+        except (httpx.HTTPStatusError, TimeoutError):
+            pass
+        b = Bot(helpers[1], FakePlatform(), Says(""), load_world(), store=store)
+        assert (b._boost("repost") is None) == kept, (outcome, store.claimed([action.hold]))
+    print("quota recovery ok")
 
 
 async def gif_check() -> None:
@@ -1750,6 +1884,7 @@ if __name__ == "__main__":
     asyncio.run(press_quota_check())
     asyncio.run(boost_check())
     asyncio.run(case_post_check())
+    asyncio.run(quota_recovery_check())
     asyncio.run(lukewarm_check())
     asyncio.run(news_reply_check())
     asyncio.run(reply_context_check())

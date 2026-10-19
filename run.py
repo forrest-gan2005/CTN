@@ -1611,6 +1611,8 @@ if __name__ == "__main__":
         logging.getLogger().addHandler(log_file(DATA / "run.log"))
         asyncio.run(live(args.limit, args.stagger, args.opens))
     elif args.cmd == "smoke":
+        from ctn.red import bot as bot_module
+        bot_module.PITCH_PROB = 0.0  # pitches have their own checks; these expect a step's post to be a plain one
         log_file_check()
         schedule_check()
         registered_check()

@@ -62,6 +62,12 @@ CREATE TABLE IF NOT EXISTS writes (
     made_id INTEGER,
     error TEXT
 );
+-- A day's quota place (a reply to a journalist, a pitch) and the write that used it: kept while the write may
+-- have gone out, given back once it is known it didn't.
+CREATE TABLE IF NOT EXISTS holds (
+    key TEXT PRIMARY KEY,
+    write_id INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS reply_picks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL,    -- a post chosen to be answered, whatever then became of the reply
@@ -250,15 +256,24 @@ class StateStore:
             cur = self.db.execute("INSERT OR IGNORE INTO claims VALUES (?, ?)", (key, username))
         return cur.rowcount == 1
 
-    def reserve(self, prefix: str, username: str, limit: int) -> Optional[str]:
-        """Claim `prefix` + username unless `limit` keys with that prefix are held already, or this account holds
-        it: a quota shared by the team, one place per account. Returns the key, or None."""
-        held = self.db.execute("SELECT COUNT(*) FROM claims WHERE substr(key, 1, ?) = ?",
-                               (len(prefix), prefix)).fetchone()[0]
-        if held >= limit:
+    def reserve(self, prefix: str, username: str, limit: int, used: Iterable[str] = ()) -> Optional[str]:
+        """Claim `prefix` + username: a quota shared by the team, one place per account. None if `limit` places
+        are taken, counting the accounts in `used` (one each time listed) that used one without a key, or if this
+        account has one already. Returns the key."""
+        holders = {k[len(prefix):] for (k,) in self.db.execute(
+            "SELECT key FROM claims WHERE substr(key, 1, ?) = ?", (len(prefix), prefix))}
+        used = list(used)
+        if username in holders or username in used:
+            return None
+        if len(holders) + sum(u not in holders for u in used) >= limit:
             return None
         key = prefix + username
         return key if self.claim(key, username) else None
+
+    def replied_since(self, author: str, since: str) -> list:
+        """The accounts that replied to `author` since UTC ISO time `since`, once per reply."""
+        return [r[0] for r in self.db.execute(
+            "SELECT username FROM history WHERE type = 'reply' AND target_author = ? AND ts >= ?", (author, since))]
 
     def release(self, key: str) -> None:
         with self.db:
@@ -342,16 +357,23 @@ class StateStore:
             self.db.execute("DELETE FROM report_intents WHERE post_id = ?", (post_id,))
 
     def begin_write(self, username: str, kind: str, parent_id: Optional[int], content: str, sent_at: str,
-                    pick: Optional[int] = None) -> int:
+                    pick: Optional[int] = None, hold: Optional[str] = None) -> int:
         """Journal a post or reply before sending it, so one interrupted mid-request is neither lost nor resent.
-        A reply's pick is tied to it in the same transaction; from then on the write's status is the pick's."""
+        A reply's pick and the quota place it holds are tied to it in the same transaction; from then on the
+        write's status is the pick's, and the place stays taken unless the write is known never to have gone."""
         with self.db:
             write = self.db.execute("INSERT INTO writes (username, kind, parent_id, content, sent_at, status) "
                                     "VALUES (?, ?, ?, ?, ?, 'sending')", (username, kind, parent_id, content, sent_at)
                                     ).lastrowid
             if pick is not None:
                 self.db.execute("UPDATE reply_picks SET outcome = 'written', write_id = ? WHERE id = ?", (write, pick))
+            if hold is not None:
+                self.db.execute("INSERT OR REPLACE INTO holds VALUES (?, ?)", (hold, write))
             return write
+
+    def _free_holds(self, write_id: int) -> None:
+        self.db.execute("DELETE FROM claims WHERE key IN (SELECT key FROM holds WHERE write_id = ?)", (write_id,))
+        self.db.execute("DELETE FROM holds WHERE write_id = ?", (write_id,))
 
     def pick(self, username: str, route: str, post_id: int, author: Optional[str], author_class: str,
              at: str) -> int:
@@ -394,6 +416,8 @@ class StateStore:
         with self.db:
             self.db.execute("UPDATE writes SET status = ?, made_id = ?, error = ? WHERE id = ?",
                             (status, made_id, error, write_id))
+            if status == "not_sent":
+                self._free_holds(write_id)
 
     def recover(self) -> tuple:
         """At startup: writes and reports still on their way when the last process stopped may have landed.
@@ -408,7 +432,27 @@ class StateStore:
                 "ON CONFLICT(post_id) DO UPDATE SET status = 'unknown', reported_at = excluded.reported_at, "
                 "next_try = NULL WHERE status = 'error'").rowcount  # an outcome recorded before the stop stands
             self.db.execute("DELETE FROM report_intents")
+        self.free_unused_places()
         return writes, reports
+
+    def free_unused_places(self) -> int:
+        """At startup: quota places taken by a run that stopped before using them. A reply's or pitch's place is
+        used once its write is journalled; a like's or repost's once it is in history. Returns how many were
+        freed."""
+        rows = self.db.execute(
+            "SELECT key, username FROM claims WHERE (substr(key, 1, 6) IN ('press:', 'pitch:') "
+            "AND key NOT IN (SELECT key FROM holds)) OR substr(key, 1, 6) = 'boost:'").fetchall()
+        unused = []
+        for key, username in rows:
+            if key.startswith("boost:"):
+                _, kind, post_id, _ = key.split(":", 3)
+                if self.db.execute("SELECT 1 FROM history WHERE username = ? AND type = ? AND post_id = ?",
+                                   (username, kind, int(post_id))).fetchone():
+                    continue
+            unused.append((key,))
+        with self.db:
+            self.db.executemany("DELETE FROM claims WHERE key = ?", unused)
+        return len(unused)
 
     def unresolved(self, status: str = "pending") -> list:
         """(id, username, kind, parent_id, content, sent_at) of writes in this state; pending means we don't
@@ -421,6 +465,8 @@ class StateStore:
         if the process died before history was written, the history row is added now."""
         with self.db:
             self.db.execute("UPDATE writes SET status = ?, made_id = ? WHERE id = ?", (status, made_id, write_id))
+            if status == "not_found":  # it never appeared: its place is free again
+                self._free_holds(write_id)
             if made_id is not None:
                 linked = self.db.execute(
                     "UPDATE history SET made_id = ? WHERE id = (SELECT h.id FROM history h JOIN writes w "
