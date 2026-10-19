@@ -1109,7 +1109,8 @@ class Bot:
             worry = ""
             if shape == "refute" and self.worries:
                 self.case_worry, label = random.choice(self.worries)
-                worry = f" The NO worry people here raise most lately is {label}; answer that one."
+                worry = (f" The NO worry people here raise most lately is {label}; answer that one, naming it in your "
+                         "own words.")
             parts.append(f"{CASE_SHAPES[shape][1]}{worry}{opening} {CASE_FOCUS}")
         elif topic[0] == "vaccine":
             parts.append(f"Write a new post about vaccination in your everyday life: {topic[1]}. Don't mention the "
@@ -1953,7 +1954,7 @@ async def anchor_check() -> None:
             assert ("End with a genuine question" in prompt) == (shape in QUESTION_SHAPES), shape
         styled.worries = [("id card", "that the ID cards could be used to track people")]
         CASE_SHAPES = {"refute": saved[0]["refute"]}  # a refutation answers a worry citizens raise now
-        assert "raise most lately is that the ID cards could be used to track people; answer that one." in \
+        assert "lately is that the ID cards could be used to track people; answer that one, naming it in your own" in \
             styled._user_prompt("post", None, ("anchor", "acting early"))
         tagged = Bot(writers[0], FakePlatform(), Noting(case), load_world(), store=StateStore(":memory:"))
         tagged.worries = styled.worries
