@@ -308,6 +308,12 @@ class StateStore:
             "SELECT post_id FROM reports WHERE status != 'error' OR next_try > ? "
             "UNION SELECT post_id FROM report_intents", (now,))}
 
+    def author_reports(self) -> dict:
+        """author -> reports on its posts that went out, may have, or are on their way."""
+        return dict(self.db.execute(
+            "SELECT author, COUNT(*) FROM (SELECT post_id, author FROM reports WHERE status IN ('sent', 'upheld', "
+            "'unknown') UNION SELECT post_id, author FROM report_intents) GROUP BY author").fetchall())
+
     def begin_report(self, post_id: int, author: str, reason: str, at: str) -> None:
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO report_intents VALUES (?, ?, ?, ?)", (post_id, author, reason, at))

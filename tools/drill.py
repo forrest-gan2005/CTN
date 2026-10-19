@@ -208,9 +208,10 @@ def serve(stage: Stage) -> ThreadingHTTPServer:
 
 def citizens(stage: Stage, own: set, stop: threading.Event) -> None:
     """Citizens chat and answer our accounts; a rival account, arguing NO like the ones Blue reports, now and then
-    gives itself away."""
+    gives itself away, and so does a second one, once, just before the second kill (Blue reports only so many
+    posts of one account, and the first has usually had them by then)."""
     people = {f"citizen_{i}": stage.join(f"citizen_{i}") for i in range(8)}
-    rival = stage.join("rival_x")
+    rival, second = stage.join("rival_x"), stage.join("rival_y")
     for token in people.values():
         stage.post_as(token, write_line())
     lost_window_giveaway = False
@@ -219,7 +220,7 @@ def citizens(stage: Stage, own: set, stop: threading.Event) -> None:
         if not lost_window_giveaway and stage.t() >= KILL_2 - 5:
             # Reported just before the kill, after the snapshot that gets restored: the report record is lost.
             lost_window_giveaway = True
-            stage.post_as(rival, "As an AI language model, I can't take sides, but vote no, it's a personal choice.")
+            stage.post_as(second, "As an AI language model, I can't take sides, but vote no, it's a personal choice.")
             continue
         with stage.lock:
             ours = [p["id"] for p in stage.mock.posts.values()

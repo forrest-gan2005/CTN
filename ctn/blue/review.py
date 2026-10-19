@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from ctn import paths
-from ctn.blue.blue import CLEARED, MANUAL, REVIEW, YES_LEAN_RE, BlueScanner, waiting
+from ctn.blue.blue import ACCOUNT_REPORTS, CLEARED, MANUAL, REVIEW, YES_LEAN_RE, BlueScanner, waiting
 from ctn.infra.collector import COMPETITION_START, GAME_OPENS, NpcStore
 from ctn.infra.state import StateStore
 from ctn.text.content import load_personas
@@ -101,7 +101,7 @@ def sample(npc_store: NpcStore, state: StateStore, minutes: float = 30, accounts
 
 def approve(npc_store: NpcStore, state: StateStore, author: str, why: str, cutoff=COMPETITION_START,
             joined: Optional[dict] = None, opens=GAME_OPENS) -> str:
-    """Write an account up: from then on every post of it is reported, the report saying `why`."""
+    """Write an account up: from then on its posts are reported (up to ACCOUNT_REPORTS), the report saying `why`."""
     why = " ".join(why.split()).rstrip(".")
     if len(why) < 20:
         raise SystemExit("say why in a sentence a moderator can check (it goes after 'because ...')")
@@ -117,7 +117,7 @@ def approve(npc_store: NpcStore, state: StateStore, author: str, why: str, cutof
     reason = MANUAL + why
     if not state.add_suspect(author, reason, newest[0][0], datetime.now(timezone.utc).isoformat(timespec="seconds")):
         state.update_suspect(author, reason)
-    return f"{author} written up: every post of it will be reported because {why}"
+    return f"{author} written up: up to {ACCOUNT_REPORTS} of its posts will be reported because {why}"
 
 
 def clear(state: StateStore, author: str) -> str:
@@ -184,7 +184,7 @@ def main() -> None:
     sh = sub.add_parser("show", help="one account's posts")
     sh.add_argument("author")
     sh.add_argument("--posts", type=int, default=30)
-    a = sub.add_parser("approve", help="write an account up: all its posts get reported")
+    a = sub.add_parser("approve", help="write an account up: its posts get reported, up to three")
     a.add_argument("author")
     a.add_argument("why", nargs="+", help="why, as it should read after 'because'")
     c = sub.add_parser("clear", help="never report this account")

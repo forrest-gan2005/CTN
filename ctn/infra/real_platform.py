@@ -15,7 +15,7 @@ from typing import Any, Optional
 import httpx
 
 from ctn import paths
-from ctn.infra.fake_platform import AmbiguousWrite, Incomplete, RateLimited, ReportingSuspended
+from ctn.infra.fake_platform import AmbiguousWrite, Incomplete, RateLimited, ReportingSuspended, ReportQueueFull
 
 log = logging.getLogger("platform")
 
@@ -285,6 +285,8 @@ class RealPlatform:
         moderator rules later, so the outcome isn't known here."""
         resp = await self._call("POST", f"/posts/{post_id}/report", username,
                                 json={"reason": reason, "detail": detail}, idempotent=False)
+        if resp.status_code == 403 and "awaiting a moderator" in resp.text.lower():
+            raise ReportQueueFull(resp.text[:200])
         if resp.status_code in (403, 429) and any(w in resp.text.lower() for w in ("suspend", "block", "banned")):
             raise ReportingSuspended(resp.text[:200])
         resp.raise_for_status()

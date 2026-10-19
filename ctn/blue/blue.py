@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 from ctn.infra.collector import COMPETITION_START
-from ctn.infra.fake_platform import REPORT_SUSPENSION, AmbiguousWrite, RateLimited, ReportingSuspended
+from ctn.infra.fake_platform import REPORT_SUSPENSION, AmbiguousWrite, RateLimited, ReportingSuspended, ReportQueueFull
 from ctn.text.guard import about_referendum, judge_stance, leans_no, looks_like_probe, plain
 from ctn.text.semantic import PARAPHRASE, NearIndex
 
@@ -54,6 +54,10 @@ MIN_CITIZENS = 100
 REPORT_ATTEMPTS = 5  # a report that never got through is retried this many times in all, backing off
 REPORT_BACKOFF = timedelta(minutes=1)  # doubled after each failure, up to an hour
 RATE_LIMIT_PAUSE = timedelta(minutes=1)  # standing down after a bare 429 that carried no wait
+# Three upheld reports suspend an account. The platform holds only 20 of a team's reports awaiting a ruling, and
+# reports on one team count less after the tenth a day, so more on one account would keep others from being reported.
+ACCOUNT_REPORTS = 3
+QUEUE_FULL_PAUSE = timedelta(minutes=10)  # standing down while those 20 wait for moderators
 TOO_FAST, COPIED, PARAPHRASED = "superhuman posting rate", "copied across accounts", "paraphrased across accounts"
 # Several accounts saying the same can be the organisers' own script or a story everyone retells: those accounts wait
 # for a person to look before anything is reported. Everything else above is a mistake no citizen makes.
@@ -298,16 +302,18 @@ class BlueScanner:
         return flagged
 
     def candidates(self) -> list:
-        """(post_id, author, reason) not yet reported: giveaway posts first, then NO-leaning ones, newest first."""
+        """(post_id, author, reason) not yet reported, for accounts with fewer than ACCOUNT_REPORTS reports out:
+        giveaway posts first, then NO-leaning ones, newest first."""
         self._recheck()
         suspects = {a: v for a, v in self.state.suspects().items()
                     if v[0] != CLEARED and not waiting(v[0]) and v[0] not in self.disabled
                     and not self.off_limits(a)}
         done = self.state.reported(_now())
         floor = int(self.state.get_meta("report_floor") or 0)  # see Team.after_restore
+        out = self.state.author_reports()
         rows = []
         for post_id, author, content in self.npc_store.posts_by(suspects):
-            if post_id in done or post_id <= floor:
+            if post_id in done or post_id <= floor or out.get(author, 0) >= ACCOUNT_REPORTS:
                 continue
             reason, giveaway = suspects[author]
             first = post_id == giveaway
@@ -475,6 +481,8 @@ class Reporter:
             current = self.state.suspect(author)
             if current is None or current[0] != rule_of(reason):
                 continue
+            if self.state.author_reports().get(author, 0) >= ACCOUNT_REPORTS:  # enough went out this round
+                continue
             # Stored first: if the process stops mid-request, the next start marks the report unknown, never resends it.
             self.state.begin_report(post_id, author, reason, _now())
             try:
@@ -482,6 +490,12 @@ class Reporter:
             except asyncio.CancelledError:
                 self.state.record_report(post_id, author, reason, _now(), "unknown")
                 raise
+            except ReportQueueFull as e:  # not refused: it stays a candidate for later
+                self.state.end_report(post_id)
+                self.blocked_until = datetime.now(timezone.utc) + QUEUE_FULL_PAUSE
+                log.warning("reports awaiting a ruling are at the platform's limit (%s); standing down until %s", e,
+                            self.blocked_until)
+                break
             except ReportingSuspended as e:
                 self.blocked_until = datetime.now(timezone.utc) + REPORT_SUSPENSION
                 log.warning("reporting suspended (%s); standing down until %s", e, self.blocked_until)
@@ -656,7 +670,7 @@ async def _demo() -> None:
     assert waiting == {"rival_copy_a", "rival_copy_b", "rival_copy_c"} | (flagged - {
         "rival_sloppy", "rival_probe", "rival_copy_a", "rival_copy_b", "rival_copy_c", "rival_spam"}), waiting
     assert reported == flagged - waiting, reported  # several accounts saying one thing waits for a person
-    assert len([pid for pid in p.reports if p.posts[pid]["author"] == "rival_sloppy"]) == 4
+    assert len([pid for pid in p.reports if p.posts[pid]["author"] == "rival_sloppy"]) == ACCOUNT_REPORTS
     if embedder is not None:
         assert state.suspects()["rival_spin_b"][0] == REVIEW + "paraphrased across accounts"
     # a person looks and writes one up: reported, in their words; the others keep waiting
@@ -688,6 +702,7 @@ async def _demo() -> None:
     await _late_proof_demo()
     await _report_retry_demo()
     await _report_429_demo()
+    await _report_queue_demo()
     await _badge_and_lock_demo()
     await _report_interrupt_demo()
     await _side_demo()
@@ -1099,6 +1114,54 @@ async def _report_429_demo() -> None:
     assert await reporter.report_some() == 1 and state.report_counts() == {"sent": 1}
     assert len(requests) == 5 and requests[-1] >= 60, "retried before the limit lifted"
     assert scanner.candidates() == []
+    await api.aclose()
+
+
+async def _report_queue_demo() -> None:
+    """Through the real adapter: with 20 reports awaiting a ruling the platform refuses more; that is waited out,
+    not given up, and then an account gets ACCOUNT_REPORTS reports, no more."""
+    import httpx
+
+    from ctn.infra.collector import Collector, NpcStore
+    from ctn.infra.fake_platform import FakePlatform
+    from ctn.infra.real_platform import AccountStore, MockLegitSocial, RealPlatform
+    from ctn.infra.state import StateStore
+
+    p = FakePlatform()
+    npc_store = NpcStore(":memory:")
+    cutoff = datetime.now(timezone.utc)
+    texts = ["As an AI language model, I can't vote, but here's a post."]
+    texts += [f"ferry late again, day {i}" for i in range(4)]
+    for text in texts:
+        await p.post("rival", text)
+    await Collector(p, npc_store, min_interval=0).poll()
+    state = StateStore(":memory:")
+    scanner = BlueScanner(npc_store, state, own=(), cutoff=cutoff)
+    scanner.scan()
+
+    mock, full, refused = MockLegitSocial(team_key="k"), [True], []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/report") and full[0]:
+            refused.append(request.url.path)
+            return httpx.Response(403, json={"error": "your team already has 20 reports awaiting a moderator's ruling; "
+                                                      "more can be filed once some are ruled on"})
+        return mock.handler(request)
+
+    api = RealPlatform("https://legit.test/api", feed_gap=0, team_key="k", accounts=AccountStore(":memory:"),
+                       transport=httpx.MockTransport(handler))
+    await api.ensure_account("joe", "Joe")
+    await api.ensure_account("rival", "Rival")
+    for text in texts:
+        await api.post("rival", text)
+    reporter = Reporter(api, scanner, state, username="joe", per_round=5, min_citizens=0)
+    assert await reporter.report_some() == 0 and reporter.blocked() and len(refused) == 1
+    assert reporter.blocked_until - datetime.now(timezone.utc) > QUEUE_FULL_PAUSE - timedelta(minutes=1)
+    assert state.report_counts() == {} and len(scanner.candidates()) == len(texts), "given up"
+    full[0] = False
+    reporter.blocked_until = None  # moderators ruled on some
+    assert await reporter.report_some() == ACCOUNT_REPORTS and state.report_counts() == {"sent": ACCOUNT_REPORTS}
+    assert scanner.candidates() == [] and await reporter.report_some() == 0, "more than suspension needs"
     await api.aclose()
 
 

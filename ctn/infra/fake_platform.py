@@ -31,6 +31,11 @@ class ReportingSuspended(Exception):
     """The team reported a genuine citizen's post and can't report anything for six hours."""
 
 
+class ReportQueueFull(Exception):
+    """The team has as many reports awaiting a moderator's ruling as the platform holds (20); more can be filed
+    once some are ruled on."""
+
+
 class FakePlatform:
     def __init__(self, competitors=()) -> None:
         self.posts = {}          # post_id -> post dict
