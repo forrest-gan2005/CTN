@@ -10,6 +10,7 @@ TIMEZONE = ZoneInfo("Australia/Sydney")
 DEFAULT_CURVE = (1.0, 0.5, 0.3, 0.2, 0.2, 0.4, 1.2, 2.5, 3.5, 3.5, 3.5, 4.0,
                  5.0, 4.5, 4.0, 4.0, 4.5, 5.0, 5.5, 6.5, 7.0, 6.5, 5.0, 2.5)
 MIN_CURVE_POSTS = 500
+QUIET_FLOOR = 0.1  # the quietest hour still gets this share of an average hour's activity
 SESSION_GAP_MEDIAN = 45.0  # seconds between actions within one sitting
 
 
@@ -19,15 +20,25 @@ def normalise(weights: Sequence[float]) -> list:
 
 
 def npc_curve(post_times, min_posts: int = MIN_CURVE_POSTS) -> list:
-    """Hourly share of citizen posting in Sydney time, from UTC ISO timestamps."""
-    counts = [0] * 24
-    for ts in post_times:
-        if ts:
-            counts[datetime.fromisoformat(ts).astimezone(TIMEZONE).hour] += 1
-    if sum(counts) < min_posts:
+    """Hourly share of citizen posting in Sydney time, from UTC ISO timestamps: posts in each hour of the day over
+    how many times that hour was watched, so a short or uneven record isn't read as quiet hours. An hour never
+    watched yet (the platform was reset at 23:08 on 18 October, so the first evening had no posts to count) gets
+    the average. The default curve until there are enough posts."""
+    stamps = sorted(datetime.fromisoformat(ts).astimezone(TIMEZONE) for ts in post_times if ts)
+    if len(stamps) < min_posts:
         return normalise(DEFAULT_CURVE)
-    # Neighbouring hours smooth out noise; +1 keeps quiet hours possible, just rare.
-    return normalise([counts[h - 1] + 2 * counts[h] + counts[(h + 1) % 24] + 1 for h in range(24)])
+    counts, watched = [0] * 24, [0] * 24
+    for stamp in stamps:
+        counts[stamp.hour] += 1
+    hour = stamps[0].replace(minute=0, second=0, microsecond=0)
+    while hour <= stamps[-1]:
+        watched[hour.hour] += 1
+        hour += timedelta(hours=1)
+    seen = [counts[h] / watched[h] for h in range(24) if watched[h]]
+    mean = sum(seen) / len(seen)
+    rate = [counts[h] / watched[h] if watched[h] else mean for h in range(24)]
+    # Neighbouring hours smooth out noise; the floor keeps quiet hours possible, just rare.
+    return normalise([rate[h - 1] + 2 * rate[h] + rate[(h + 1) % 24] + QUIET_FLOOR * mean for h in range(24)])
 
 
 class UniformPacer:
@@ -93,6 +104,16 @@ if __name__ == "__main__":
     stamps = [f"2026-10-1{d}T09:{m:02d}:00+00:00" for d in range(5) for m in range(0, 60, 2)] * 4
     sydney_peak = npc_curve(stamps, min_posts=100)
     assert max(range(24), key=sydney_peak.__getitem__) == 20  # 09:00 UTC is 20:00 in Sydney (AEDT)
+    # Steady posting watched for 19 hours, as on the day after the reset: the five hours never watched are no
+    # quieter than the rest, and the curve comes out flat.
+    first_day = [f"2026-10-18T{h:02d}:{m:02d}:00+00:00" for h in range(12, 24) for m in range(0, 60, 2)] + \
+                [f"2026-10-19T{h:02d}:{m:02d}:00+00:00" for h in range(0, 7) for m in range(0, 60, 2)]
+    flat = npc_curve(first_day)
+    assert len(first_day) >= MIN_CURVE_POSTS and max(flat) / min(flat) < 1.05, flat
+    # Twice as many posts in the hour watched only once as in hours watched twice: per watch, the same.
+    uneven = [f"2026-10-18T{h:02d}:00:00+00:00" for h in range(0, 24) for _ in range(20)] + \
+             [f"2026-10-19T{h:02d}:00:00+00:00" for h in range(0, 12) for _ in range(20)]
+    assert max(npc_curve(uneven)) / min(npc_curve(uneven)) < 1.05
 
     r = Rhythm("joe_tama", curve)
     assert Rhythm("joe_tama", curve).shift == r.shift
