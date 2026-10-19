@@ -45,8 +45,8 @@ RUNUP_DAYS = 1
 # Leaning to replies and posts: citizens' likes and replies to us, and their minds changing, are what score.
 # Most writing goes to the team's anchor posts (below), so posts of an account's own are fewer: the platform takes
 # 180 posts, replies and reposts an hour from the whole team.
-ACTION_WEIGHTS = {"like": 5, "reply": 4, "post": 0.5, "repost": 0.75, "follow": 0.5, "none": 0.5}
-LINE_ACTIONS = {"amplifier": {"like": 6, "reply": 0.3, "post": 0.2, "repost": 2, "follow": 1, "none": 2}}
+ACTION_WEIGHTS = {"like": 5, "reply": 4, "post": 0.5, "repost": 1.25, "follow": 0.5, "none": 0.5}
+LINE_ACTIONS = {"amplifier": {"like": 6, "reply": 0.3, "post": 0.2, "repost": 3, "follow": 1, "none": 2}}
 # An account two takedowns from a ban stops writing; likes, reposts and follows can't be reported.
 QUIET_ACTIONS = {"like": 6, "repost": 1, "follow": 1, "none": 3}
 # Citizens each line looks for when replying. Agreement alone never changes a mind, so persuasion goes
@@ -120,15 +120,19 @@ QUESTION_PROB = 0.5
 # Trending on the opening night belonged to a team whose few anchor accounts each posted a case every hour or so
 # while forty teammates answered it within minutes, one line each, and liked and reposted it: 40-100 replies a post,
 # hundreds of citizens' views, the leader by thousands. The team does the same: a persuader or bridge writes the
-# quarter-hour's anchor post (an account at most every ANCHOR_REST), and everyone else lifts the newest anchors.
+# half-hour's anchor post (an account at most every ANCHOR_REST), and everyone else lifts the newest anchors.
 # Talk between our accounts links them for other teams' Blue; Forrest took that risk on, with 200 accounts to use.
+# Fitted over the Trending 40 on 20 October, a post's heat went as 10 ln(1 + likes + 4 replies + 10 reposts), less
+# about 3 an hour: our quarter-hourly anchors, six reposts and a dozen replies each, sat 23rd to 34th while the
+# leader's, with 40 replies and up to 40 reposts, held the top ten. So half as many anchors, each liked by the
+# whole team and reposted by most of it: a repost lifts as much as two or three replies and needs no draft.
 ANCHOR_LINES = {"persuade", "bridge"}
-ANCHOR_GAP = timedelta(minutes=15)
+ANCHOR_GAP = timedelta(minutes=30)
 ANCHOR_REST = timedelta(minutes=75)
 LIFT_TOPICS = ("anchor",)
 BOOST_WINDOW = timedelta(hours=2)
 BOOST_DELAY = timedelta(minutes=1)
-BOOST_LIMITS = {"like": 40, "repost": 6, "reply": 25}
+BOOST_LIMITS = {"like": 50, "repost": 30, "reply": 20}
 BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post still has places
 # Popular tags were all campaign accounts' on the opening night, a NO team's #keepkingstoniaopen first; the papers'
 # reporters write up what is popular here. The team carries the YES campaign's own words: on every anchor post, and
@@ -591,7 +595,7 @@ class Bot:
         return None
 
     async def _anchor(self) -> Optional[Action]:
-        """This quarter-hour's anchor post, if no teammate has written it and this account hasn't anchored lately;
+        """This half-hour's anchor post, if no teammate has written it and this account hasn't anchored lately;
         the place goes back if the draft is dropped or never sent, for a teammate to take."""
         now = datetime.now(timezone.utc)
         if any(a.topic_kind == "anchor" and datetime.fromisoformat(ts) > now - ANCHOR_REST for ts, a in self.history):
@@ -1464,7 +1468,9 @@ async def boost_check() -> None:
         store.record(user, _iso(now - timedelta(minutes=minutes)),
                      Action("post", content="x", topic_kind=topic, made_id=made_id))
     personas = load_personas(status=None)
-    helpers = [p for p in personas if p["line"] in ("amplifier", "background")][:BOOST_LIMITS["like"] + 2]
+    authors = {"rosa_dives", "joe_tama", "lena_brook", "walter_h", "ana_moala"}
+    helpers = [p for p in personas if p["username"] not in authors][:BOOST_LIMITS["like"] + 2]
+    assert len(helpers) == BOOST_LIMITS["like"] + 2
     bots = [Bot(p, FakePlatform(), FakeLLM(0, 0), load_world(), store=store) for p in helpers]
     likes = [b._boost("like") for b in bots]
     assert [a.post_id if a else None for a in likes] == [500] * BOOST_LIMITS["like"] + [504, 504], likes
@@ -1552,7 +1558,7 @@ async def boost_check() -> None:
 
 
 async def anchor_check() -> None:
-    """One anchor post a quarter-hour for the whole team, by a persuader or bridge, with the team's tag: a teammate
+    """One anchor post a half-hour for the whole team, by a persuader or bridge, with the team's tag: a teammate
     in the same slot writes none, a dropped draft gives the slot back, and an account that anchored lately leaves it
     to others."""
     class Says:
