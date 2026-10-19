@@ -34,8 +34,10 @@ TOPIC_MIX = {
     "persuade": {"issue": 0.45, "vaccine": 0.15, "view": 0.1, "daily": 0.3},
     "mobilise": {"issue": 0.3, "vaccine": 0.1, "view": 0.15, "daily": 0.45},
     "bridge": {"issue": 0.5, "vaccine": 0.15, "view": 0.1, "daily": 0.25},
-    "background": {"issue": 0.1, "vaccine": 0.1, "view": 0.25, "daily": 0.55},
-    "amplifier": {"issue": 0.05, "vaccine": 0.05, "view": 0.2, "daily": 0.7},
+    # Everyday accounts take up the referendum more than they did: what trends and what scores is people's stance
+    # and story; enough everyday posts are left that they still read as ordinary people.
+    "background": {"issue": 0.35, "vaccine": 0.1, "view": 0.15, "daily": 0.4},
+    "amplifier": {"issue": 0.15, "vaccine": 0.05, "view": 0.15, "daily": 0.65},
 }
 # Mobilise accounts on a poll day and the day before: poll answers follow what's on citizens' minds.
 RUNUP_MIX = {"issue": 0.7, "vaccine": 0.1, "view": 0.05, "daily": 0.15}
@@ -76,6 +78,8 @@ LEAN_GUIDE = {
     "undecided": ("They seem undecided. Give one concrete reason from your own life that speaks to what they care "
                   "about: the benefit to them first, then to everyone."),
     "yes": "They lean YES already. Agree briefly in your own words and, if it fits, say you'll see them at the vote on 2 November.",
+    "team": ("They're on your side. Add something of your own they didn't say, a short story or another reason, so "
+             "people reading see more than one voice; don't just agree, and don't repeat their words."),
 }
 DEFAULT_GUIDE = ("Respond to their actual point. If they lean NO, acknowledge their worry in a few words, then give "
                  "your own reason for voting YES.")
@@ -99,12 +103,14 @@ MENTION_RE = re.compile(r"(?<![\w.@])@(\w+)")
 CASE_TOPICS = ("issue", "pitch")
 QUESTION_PROB = 0.5
 # Teammates lift each other's case posts towards Trending, where citizens' likes and replies then far outnumber
-# ours: a few likes and at most one repost a post, by whichever accounts come by in its first hour, mostly
-# amplifiers and background accounts, never a reply (talk between our accounts is what links them).
-BOOST_WINDOW = timedelta(hours=1)
+# ours: likes, reposts and a couple of replies a post, by whichever accounts come by in its first two hours. Talk
+# between our accounts links them for other teams' Blue; Forrest took that risk on: an account that reaches
+# Trending earns far more than it costs if it's banned, with 200 to use in all.
+BOOST_WINDOW = timedelta(hours=2)
 BOOST_DELAY = timedelta(minutes=5)  # nobody likes a post the second it appears
-BOOST_LIMITS = {"like": 3, "repost": 1}
-BOOST_PROB = {"amplifier": 0.5, "background": 0.3}  # of this line's likes and reposts; other lines 0.15
+BOOST_LIMITS = {"like": 8, "repost": 3, "reply": 2}
+BOOST_PROB = {"amplifier": 0.6, "background": 0.5}  # of this line's likes and reposts; other lines 0.3
+TEAM_REPLY_PROB = 0.25  # of an account's replies, the share that go to a teammate's case post when one is open
 
 REFUSAL_MARKERS = (
     "as an ai",
@@ -286,13 +292,17 @@ class Bot:
         if kind == "none":
             return None
         if kind in ("like", "repost"):
-            if random.random() < BOOST_PROB.get(self.line, 0.15):
+            if random.random() < BOOST_PROB.get(self.line, 0.3):
                 boost = self._boost(kind)
                 if boost is not None:
                     return boost
             return await self._amplify(kind, candidates)
         if kind == "follow":
             return self._follow()
+        if kind == "reply" and random.random() < TEAM_REPLY_PROB:
+            found = self._team_reply_target()
+            if found is not None:
+                return await self._reply(found[0], "feed", "team", hold=found[1], referendum=True, claim=False)
         if kind == "reply":
             target, route = (conv, "conversation") if conv is not None else await self._pick_reply_target(candidates)
             if target is not None:
@@ -387,9 +397,11 @@ class Bot:
         return await self._compose("post", topic=self._pick_topic())
 
     async def _reply(self, target: dict, source: str, route: str, context: Optional[str] = None,
-                     hold: Optional[str] = None, referendum: Optional[bool] = None) -> Optional[Action]:
+                     hold: Optional[str] = None, referendum: Optional[bool] = None,
+                     claim: bool = True) -> Optional[Action]:
         """`hold` is a quota place taken for this reply, given back unless it is sent; `context` and `referendum`
-        what the target answers and whether it takes up the referendum, when already known."""
+        what the target answers and whether it takes up the referendum, when already known. With `claim` the post
+        is this account's alone (a teammate's post takes its replies by places instead)."""
         if target["author"] in JOURNALISTS:
             if referendum is None:  # from another route (a journalist answering us): decided as the press route does
                 referendum, context = await self._press_topic(target)
@@ -402,14 +414,14 @@ class Bot:
         pick = self.store.pick(self.username, route, target["id"], target["author"],
                                self.roster.classify(target["author"]), _iso(datetime.now(timezone.utc)))
         key = f"post:{target['id']}"
-        if not self.store.claim(key, self.username):
+        if claim and not self.store.claim(key, self.username):
             self.store.end_pick(pick, "claim_failed")
             if hold is not None:
                 self.store.release(hold)
             return None
         action = None
         try:
-            lean = "unknown"
+            lean = "team" if route == "team" else "unknown"
             if self.roster.classify(target["author"]) == "npc" and target["author"] not in NEWS_OUTLETS:
                 lean = await self._lean(target["author"], target.get("content") or "")
             action = await self._compose("reply", target=target, topic=(source, lean), context=context,
@@ -417,7 +429,8 @@ class Bot:
         finally:
             if action is None:  # nothing to send, even if writing it failed or was cancelled: free the post
                 self.store.end_pick(pick, "dropped")
-                self.store.release(key)
+                if claim:
+                    self.store.release(key)
                 if hold is not None:
                     self.store.release(hold)
         if action is None:
@@ -532,13 +545,27 @@ class Bot:
             self.store.drop_inbox(self.username, post_id)
         return None
 
+    def _team_reply_target(self) -> Optional[tuple]:
+        """(post, place) of a teammate's case post this account may answer, the place among its BOOST_LIMITS
+        replies taken; or None."""
+        now = datetime.now(timezone.utc)
+        posts = self.store.team_posts(CASE_TOPICS, _iso(now - BOOST_WINDOW), self.username)
+        settled = {pid for _, pid, _ in self.store.team_posts(CASE_TOPICS, _iso(now - BOOST_DELAY), self.username)}
+        for author, post_id, content in random.sample(posts, len(posts)):
+            if post_id in settled or post_id in self.seen or not content:
+                continue
+            hold = self.store.reserve(f"boost:reply:{post_id}:", self.username, BOOST_LIMITS["reply"])
+            if hold is not None:
+                return {"id": post_id, "author": author, "content": without_gifs(content), "parent_id": None}, hold
+        return None
+
     def _boost(self, kind: str) -> Optional[Action]:
         """Like or repost a teammate's case post from the last hour, while it has fewer than BOOST_LIMITS of
         ours; the place is taken with nothing awaited, so teammates acting at once can't pass the limit."""
         now = datetime.now(timezone.utc)
         posts = self.store.team_posts(CASE_TOPICS, _iso(now - BOOST_WINDOW), self.username)
-        settled = {pid for _, pid in self.store.team_posts(CASE_TOPICS, _iso(now - BOOST_DELAY), self.username)}
-        for author, post_id in random.sample(posts, len(posts)):
+        settled = {pid for _, pid, _ in self.store.team_posts(CASE_TOPICS, _iso(now - BOOST_DELAY), self.username)}
+        for author, post_id, _ in random.sample(posts, len(posts)):
             if post_id in settled or post_id in self.seen:
                 continue
             hold = self.store.reserve(f"boost:{kind}:{post_id}:", self.username, BOOST_LIMITS[kind])
@@ -1248,22 +1275,23 @@ async def press_check() -> None:
 
 
 async def boost_check() -> None:
-    """Teammates like a case post once it is five minutes old and until it is an hour old, three of them at most,
-    and one reposts it; never a daily post, never their own, never one they already liked."""
+    """Teammates like a case post once it is five minutes old and until it is two hours old, BOOST_LIMITS of them
+    at most, and repost it; never a daily post, never their own, never one they already liked. A couple of them
+    answer it too, adding their own story, the post not claimed by any one of them."""
     store = StateStore(":memory:")
     now = datetime.now(timezone.utc)
     for user, made_id, topic, minutes in (("rosa_dives", 500, "issue", 10), ("joe_tama", 501, "daily", 10),
-                                          ("walter_h", 502, "issue", 2), ("ana_moala", 503, "pitch", 90)):
+                                          ("walter_h", 502, "issue", 2), ("ana_moala", 503, "pitch", 150)):
         store.record(user, _iso(now - timedelta(minutes=minutes)),
                      Action("post", content="x", topic_kind=topic, made_id=made_id))
     personas = load_personas()
-    helpers = [p for p in personas if p["line"] in ("amplifier", "background")][:5]
+    helpers = [p for p in personas if p["line"] in ("amplifier", "background")][:BOOST_LIMITS["like"] + 2]
     bots = [Bot(p, FakePlatform(), FakeLLM(0, 0), load_world(), store=store) for p in helpers]
     likes = [b._boost("like") for b in bots]
-    assert [a.post_id if a else None for a in likes] == [500, 500, 500, None, None], likes
+    assert [a.post_id if a else None for a in likes] == [500] * BOOST_LIMITS["like"] + [None, None], likes
     assert likes[0].target_author == "rosa_dives" and likes[0].target_class == "own"
-    reposts = [b._boost("repost") for b in bots[:2]]
-    assert reposts[0].post_id == 500 and reposts[1] is None
+    reposts = [b._boost("repost") for b in bots[:BOOST_LIMITS["repost"] + 1]]
+    assert [a.post_id if a else None for a in reposts] == [500] * BOOST_LIMITS["repost"] + [None]
     poster = Bot(next(p for p in personas if p["username"] == "rosa_dives"), FakePlatform(), FakeLLM(0, 0),
                  load_world(), store=StateStore(":memory:"))
     poster.store.record("rosa_dives", _iso(now - timedelta(minutes=10)),
@@ -1289,6 +1317,42 @@ async def boost_check() -> None:
         LINE_ACTIONS["amplifier"].update(saved[0])
         BOOST_PROB.clear()
         BOOST_PROB.update(saved[1])
+
+    class Says:
+        name = "says"
+
+        def __init__(self, text: str) -> None:
+            self.text, self.prompts = text, []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            return self.text
+
+    team = StateStore(":memory:")
+    team.record("rosa_dives", _iso(now - timedelta(minutes=20)),
+                Action("post", content="Dive boats sat idle for months in 2021; I'm voting yes on the mandate.",
+                       topic_kind="issue", made_id=900))
+    writers = [p for p in personas if p["line"] == "background"][:BOOST_LIMITS["reply"] + 1]
+    global ACTION_WEIGHTS, TEAM_REPLY_PROB
+    saved_reply = ACTION_WEIGHTS, TEAM_REPLY_PROB
+    try:
+        ACTION_WEIGHTS, TEAM_REPLY_PROB = {"reply": 1}, 1.0
+        replies = []
+        for i, persona in enumerate(writers):
+            b = Bot(persona, FakePlatform(), Says(f"Same here, the ferry crews lost a whole season, voting yes ({i})."),
+                    load_world(), roster=Roster(npcs={"citizen_a"}), store=team)
+            action = await b.think({"feed": [{"id": 9, "author": "citizen_a", "content": "ferry late again"}]})
+            replies.append(action.post_id if action.type == "reply" else None)
+            if action.post_id == 900:
+                assert LEAN_GUIDE["team"] in b.llm.prompts[0] and action.hold.startswith("boost:reply:900:")
+        assert replies[:BOOST_LIMITS["reply"]] == [900] * BOOST_LIMITS["reply"] and replies[-1] != 900, replies
+        assert not team.claimed(["post:900"]), "a teammate's post isn't any one account's"
+        assert team.db.execute("SELECT COUNT(*) FROM reply_picks WHERE route = 'team'").fetchone()[0] == 2
+    finally:
+        ACTION_WEIGHTS, TEAM_REPLY_PROB = saved_reply
     print("boost ok")
 
 
@@ -1555,8 +1619,10 @@ async def quota_recovery_check() -> None:
             await a.step()
         except (httpx.HTTPStatusError, TimeoutError):
             pass
-        b = Bot(helpers[1], FakePlatform(), Says(""), load_world(), store=store)
-        assert (b._boost("repost") is None) == kept, (outcome, store.claimed([action.hold]))
+        assert bool(store.claimed([action.hold])) == kept, (outcome, store.claimed([action.hold]))
+        if not kept:  # its place is free again: a teammate can take it
+            b = Bot(helpers[1], FakePlatform(), Says(""), load_world(), store=store)
+            assert b._boost("repost") is not None
     print("quota recovery ok")
 
 
