@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
-from ctn.infra.fake_platform import NORMAL, URGENT, WRITE_PRIORITY, AmbiguousWrite, FakePlatform, RateLimited
+from ctn.infra.fake_platform import ANCHOR, LIFT, NORMAL, WRITE_PRIORITY, AmbiguousWrite, FakePlatform, RateLimited
 from ctn.infra.llm import FakeLLM, team_llms
 from ctn.infra.state import StateStore
 from ctn.red.rhythm import UniformPacer
@@ -155,7 +155,7 @@ RUSH_WINDOW = timedelta(minutes=30)
 RUSH_PROB = 0.9
 RUSH_ORDER = ("like", "repost", "reply")
 RUSH_WAIT = (20.0, 180.0)
-# The anchor post, and the reposts and replies lifting it in its rush, jump the write lane's queue: under S53 the
+# The anchor post, then the reposts and replies lifting it in its rush, jump the write lane's queue: under S53 the
 # 05:00 anchor waited 7.7 minutes behind writes for older anchors and citizens, and its first repost came nine
 # minutes after it was up.
 # A phrase two teammates used this week is refused in a third's draft (SHARED_LIMIT), and the writer kept reaching for
@@ -1131,9 +1131,14 @@ class Bot:
                    for prev in previous)
 
     async def act(self, action: Action) -> None:
-        urgent = action.topic_kind == "anchor" or action.type in ("repost", "reply") and \
-            action.post_id is not None and action.post_id == self._focus(datetime.now(timezone.utc))
-        token = WRITE_PRIORITY.set(URGENT if urgent else NORMAL)
+        if action.topic_kind == "anchor":  # ahead of lifts still going to the last one
+            priority = ANCHOR
+        elif action.type in ("repost", "reply") and action.post_id is not None and \
+                action.post_id == self._focus(datetime.now(timezone.utc)):
+            priority = LIFT
+        else:
+            priority = NORMAL
+        token = WRITE_PRIORITY.set(priority)
         try:
             await self._act(action)
         finally:
@@ -1827,8 +1832,8 @@ async def rush_check() -> None:
                    content="x"), Action("reply", post_id=9, content="x"),
                    Action("post", content="x", topic_kind="anchor"), Action("post", content="x", topic_kind="daily")):
         await lifter.act(action)
-    assert noting.sent == [("repost", 904, URGENT), ("repost", 902, NORMAL), ("reply", 904, URGENT),
-                           ("reply", 9, NORMAL), ("post", None, URGENT), ("post", None, NORMAL)], noting.sent
+    assert noting.sent == [("repost", 904, LIFT), ("repost", 902, NORMAL), ("reply", 904, LIFT),
+                           ("reply", 9, NORMAL), ("post", None, ANCHOR), ("post", None, NORMAL)], noting.sent
     assert WRITE_PRIORITY.get() == NORMAL, "the priority goes back after each write"
 
     global RUSH_WAIT

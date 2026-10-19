@@ -5,9 +5,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 REPORT_SUSPENSION = timedelta(hours=6)
-# How soon a write in this task goes out of the team's write lane: URGENT ones (an anchor post and the team's lift
-# of it in its rush) ahead of every NORMAL one waiting, which keep their order.
-URGENT, NORMAL = 0, 1
+# How soon a write in this task goes out of the team's write lane, lower first and in order of arrival within a
+# level: an ANCHOR post, then the team's LIFT of the anchor in its rush, then the rest.
+ANCHOR, LIFT, NORMAL = 0, 1, 2
 WRITE_PRIORITY = contextvars.ContextVar("write_priority", default=NORMAL)
 
 

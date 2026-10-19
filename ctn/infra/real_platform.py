@@ -16,7 +16,7 @@ from typing import Any, Optional
 import httpx
 
 from ctn import paths
-from ctn.infra.fake_platform import (NORMAL, URGENT, WRITE_PRIORITY, AmbiguousWrite, Incomplete, RateLimited,
+from ctn.infra.fake_platform import (ANCHOR, LIFT, NORMAL, WRITE_PRIORITY, AmbiguousWrite, Incomplete, RateLimited,
                                      ReportingSuspended, ReportQueueFull)
 
 log = logging.getLogger("platform")
@@ -1173,8 +1173,8 @@ async def _write_pace_demo() -> None:
         return mock.handler(request)
     p.client = httpx.AsyncClient(base_url="https://legit.test/api", transport=httpx.MockTransport(order))
 
-    async def urgent(name: str, text: str) -> dict:
-        token = WRITE_PRIORITY.set(URGENT)
+    async def at(priority: int, name: str, text: str) -> dict:
+        token = WRITE_PRIORITY.set(priority)
         try:
             return await p.post(name, text)
         finally:
@@ -1183,14 +1183,30 @@ async def _write_pace_demo() -> None:
     await lane.acquire()  # a write going out meanwhile
     queued = [asyncio.ensure_future(p.post(n, f"normal {i}")) for i, n in enumerate(("ana", "ben", "cai"))]
     gone = asyncio.ensure_future(p.post("ben", "cancelled"))
-    first = asyncio.ensure_future(urgent("cai", "anchor"))
+    lifts = [asyncio.ensure_future(at(LIFT, "ana", f"lift {i}")) for i in range(2)]
+    first = asyncio.ensure_future(at(ANCHOR, "cai", "anchor"))
     for _ in range(3):
         await asyncio.sleep(0)
     gone.cancel()
     lane.release()
-    await asyncio.gather(first, *queued)
-    assert gone.cancelled() and bodies == ["anchor", "normal 0", "normal 1", "normal 2"], bodies
+    await asyncio.gather(first, *lifts, *queued)
+    assert gone.cancelled() and bodies == ["anchor", "lift 0", "lift 1", "normal 0", "normal 1", "normal 2"], bodies
     assert not p._lane_locks["write"].locked(), "a cancelled write gives its turn back"
+    handed, ran = PriorityLock(), []  # handed the lock, then cancelled before it could run: the next one gets it
+
+    async def holder(name: str) -> None:
+        await handed.acquire()
+        try:
+            ran.append(name)
+        finally:
+            handed.release()
+    await handed.acquire()
+    second, third = asyncio.ensure_future(holder("second")), asyncio.ensure_future(holder("third"))
+    await asyncio.sleep(0)
+    handed.release()  # to second, which is cancelled in the same tick
+    second.cancel()
+    await asyncio.gather(second, third, return_exceptions=True)
+    assert ran == ["third"] and not handed.locked() and not handed._waiters, ran
     await p.aclose()
     print("write pace ok")
 
