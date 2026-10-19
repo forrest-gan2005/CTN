@@ -290,8 +290,7 @@ class StateStore:
         """Claim `prefix` + username: a quota shared by the team, one place per account. None if `limit` places
         are taken, counting the accounts in `used` (one each time listed) that used one without a key, or if this
         account has one already. Returns the key."""
-        holders = {k[len(prefix):] for (k,) in self.db.execute(
-            "SELECT key FROM claims WHERE substr(key, 1, ?) = ?", (len(prefix), prefix))}
+        holders = self.holders(prefix)
         used = list(used)
         if username in holders or username in used:
             return None
@@ -299,6 +298,11 @@ class StateStore:
             return None
         key = prefix + username
         return key if self.claim(key, username) else None
+
+    def holders(self, prefix: str) -> set:
+        """The accounts holding a place in the quota `prefix`, as `reserve` counts them."""
+        return {k[len(prefix):] for (k,) in self.db.execute(
+            "SELECT key FROM claims WHERE substr(key, 1, ?) = ?", (len(prefix), prefix))}
 
     def replied_since(self, author: str, since: str) -> list:
         """The accounts that replied to `author` since UTC ISO time `since`, once per reply."""
@@ -722,4 +726,6 @@ if __name__ == "__main__":
     assert replies.team_replies(77) == ["first", "second"], "one that may be live still counts"
     assert replies.acted_on("ana", "reply", 77) and replies.acted_on("joe", "reply", 77)
     assert not replies.acted_on("kai", "reply", 77) and not replies.acted_on("ana", "like", 77)
+    assert replies.reserve("boost:repost:77:", "ana", 2) and replies.reserve("boost:repost:77:", "joe", 2)
+    assert replies.holders("boost:repost:77:") == {"ana", "joe"} and replies.holders("boost:repost:7:") == set()
     print("state ok")

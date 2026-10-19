@@ -145,6 +145,22 @@ TAG_RE = re.compile(re.escape(TEAM_TAG), re.IGNORECASE)  # the code adds it; it 
 # show a certificate").
 SIBLINGS_SHOWN = 10
 TEAM_REPLY_PROB = 0.85  # of an account's replies, the share that go to an anchor post while one has places
+# Heat falls about 3 points an hour from the start, so an anchor's lift counts most in its first minutes (under S52
+# the first one had 12 of its 30 reposts after 20 minutes). While the newest anchor is under RUSH_WINDOW old, an
+# account that still owes it a repost, a reply or a like gives it that first, reposts first as they weigh most, and
+# looks round again within RUSH_WAIT seconds instead of at its next sitting; the write lane, three a minute for the
+# team, spreads the burst over a quarter-hour or so. An account tries each once an anchor, so a dropped reply isn't
+# redrafted over and over.
+RUSH_WINDOW = timedelta(minutes=30)
+RUSH_PROB = 0.9
+RUSH_ORDER = ("repost", "reply", "like")
+RUSH_WAIT = (20.0, 180.0)
+# A phrase two teammates used this week is refused in a third's draft (SHARED_LIMIT), and the writer kept reaching for
+# the same few: "certificate at the door" cost 18 drafts in S52's first half-hour. The most worn of the last day are
+# listed in every prompt as ones to leave alone.
+WORN_SHOWN = 12
+WORN_WINDOW = timedelta(days=1)
+WORN_TTL = timedelta(minutes=10)
 
 REFUSAL_MARKERS = (
     "as an ai",
@@ -277,6 +293,7 @@ class Bot:
         self.rejected = {}
         self.unsafe = set()  # posts judged to argue NO, never to be amplified
         self.seen = self.store.load_seen(self.username)
+        self.rushed = set()  # (anchor post id, kind) this process has tried in a rush
         self.followed = self.store.load_followed(self.username)
         self.history = [(row[0], Action(*row[1:])) for row in self.store.load_history(self.username)]
 
@@ -321,6 +338,18 @@ class Bot:
             anchor = await self._anchor()
             if anchor is not None:
                 return anchor
+        rush = self._rush() if random.random() < RUSH_PROB else None
+        if rush is not None:
+            kind, post_id = rush
+            self.rushed.add((post_id, kind))
+            if kind == "reply":
+                found = self._team_reply_target()
+                if found is not None:
+                    return await self._reply(found[0], "feed", "team", hold=found[1], referendum=True, claim=False)
+            else:
+                boost = self._boost(kind)
+                if boost is not None:
+                    return boost
 
         weights = QUIET_ACTIONS if self.quiet else LINE_ACTIONS.get(self.line, ACTION_WEIGHTS)
         kind = random.choices(list(weights), weights=list(weights.values()))[0]
@@ -614,12 +643,54 @@ class Bot:
             action.hold = hold
         return action
 
-    def _lift_posts(self, now: datetime) -> list:
+    def _lift_posts(self, now: datetime, window: timedelta = BOOST_WINDOW) -> list:
         """(author, post id, text) of teammates' anchor posts to lift, newest first: a minute old at least, two
-        hours at most."""
-        posts = self.store.team_posts(LIFT_TOPICS, _iso(now - BOOST_WINDOW), self.username)
+        hours (`window`) at most."""
+        posts = self.store.team_posts(LIFT_TOPICS, _iso(now - window), self.username)
         fresh = {pid for _, pid, _ in self.store.team_posts(LIFT_TOPICS, _iso(now - BOOST_DELAY), self.username)}
         return [p for p in reversed(posts) if p[1] not in fresh]
+
+    def _rush(self) -> Optional[tuple]:
+        """(kind, post id): what the newest anchor under RUSH_WINDOW old still has a place for and this account
+        hasn't given it, nor tried to; replies not from an account gone quiet."""
+        order = [k for k in RUSH_ORDER if k != "reply"] if self.quiet else RUSH_ORDER
+        for _, post_id, content in self._lift_posts(datetime.now(timezone.utc), RUSH_WINDOW):
+            for kind in order:
+                if (post_id, kind) in self.rushed or kind == "reply" and not content:
+                    continue
+                taken = self.store.holders(f"boost:{kind}:{post_id}:")
+                if (self.username not in taken and len(taken) < BOOST_LIMITS[kind]
+                        and not self.store.acted_on(self.username, kind, post_id)):
+                    return kind, post_id
+        return None
+
+    def _worn(self) -> tuple:
+        """(the phrases the most teammates used in the last WORN_WINDOW, at least SHARED_LIMIT of them each, that
+        `_shared_phrase` would refuse; how many teammates used each phrase then), worked out for the whole team
+        every WORN_TTL."""
+        now = datetime.now(timezone.utc)
+        cached = getattr(self.store, "worn_cache", None)
+        if cached is not None and cached[0] > now:
+            return cached[1], cached[2]
+        users = {}
+        for user, content in self.store.team_texts(_iso(now - WORN_WINDOW), ""):
+            for phrase in phrases(TAG_RE.sub(" ", content or "")):
+                users.setdefault(phrase, set()).add(user)
+        counts = {p: len(who) for p, who in users.items() if len(who) >= SHARED_LIMIT}
+        ranked = sorted(counts, key=lambda p: (-counts[p], p))
+        rivals = self._rivals() if ranked and self.said is not None else set()
+        # one many citizens use too ("i'm voting yes on") is never refused, and steering off it only blurs the stance
+        worn = [p for p in ranked[:WORN_SHOWN * 4] if not self._common(p, now - SHARED_WINDOW, rivals)][:WORN_SHOWN]
+        self.store.worn_cache = (now + WORN_TTL, worn, counts)
+        return worn, counts
+
+    def _sibling_worn(self, siblings: list) -> list:
+        """The phrases in the replies already under a post that the team has used most: the ones a writer, shown
+        those replies, still reached for ("certificate at the door", though citizens use it too, so only the
+        same-post check stops it)."""
+        counts = self._worn()[1]
+        found = set().union(*(phrases(TAG_RE.sub(" ", t or "")) for t in siblings))
+        return sorted((p for p in found if p in counts), key=lambda p: (-counts[p], p))[:WORN_SHOWN]
 
     def _team_reply_target(self) -> Optional[tuple]:
         """(post, place) of a teammate's anchor post this account may answer, the place among its BOOST_LIMITS
@@ -868,6 +939,9 @@ class Bot:
                 listed = "\n".join(f"- {TAG_RE.sub('', without_gifs(t)).strip()[:200]}" for t in siblings)
                 parts.append("Other people have already replied to it. Say something none of them said, from a "
                              "different part of life, and use none of their words or phrases:\n" + listed)
+                taken = self._sibling_worn(siblings)
+                if taken:
+                    parts.append("Above all, none of these: " + ", ".join(f'"{p}"' for p in taken) + ".")
             parts.append("Write a reply to that post, speaking to them directly; never mention their username or "
                          "talk about them in the third person. Don't open with stock phrases like \"I feel you\", "
                          "\"I get where you're coming from\", \"You're worried about\" or \"I see your point\"; start with "
@@ -924,6 +998,9 @@ class Bot:
         if recent:
             listed = "\n".join(f"- {c}" for c in recent)
             parts.append(f"You recently posted these. Do not repeat them or say the same thing again:\n{listed}")
+        worn = self._worn()[0]
+        if worn:
+            parts.append("These phrases are worn out here; use none of them: " + ", ".join(f'"{p}"' for p in worn) + ".")
 
         story = self.persona.get("backstory")
         if story:  # told outright, since a listed habit turns up in every post
@@ -1140,6 +1217,8 @@ class Bot:
         loop = asyncio.get_running_loop()
         while True:
             wait = pacer.next_wait(datetime.now(timezone.utc))
+            if wait > RUSH_WAIT[0] and self._rush() is not None:
+                wait = min(wait, random.uniform(*RUSH_WAIT))
             if loop.time() + wait >= until:
                 break
             await asyncio.sleep(wait)
@@ -1492,12 +1571,12 @@ async def boost_check() -> None:
     repost = seen._boost("repost")
     assert repost is not None and repost.post_id == 700, "one it liked or answered it may still repost"
     fresh.release(repost.hold)
-    global BOOST_PROB
-    saved = dict(LINE_ACTIONS["amplifier"]), BOOST_PROB
+    global BOOST_PROB, RUSH_PROB
+    saved = dict(LINE_ACTIONS["amplifier"]), BOOST_PROB, RUSH_PROB
     try:
         LINE_ACTIONS["amplifier"].clear()
         LINE_ACTIONS["amplifier"].update(like=1)
-        BOOST_PROB = 1.0
+        BOOST_PROB, RUSH_PROB = 1.0, 0.0  # the line's own like, not the rush's repost (rush_check)
         amplifier = next(p for p in personas if p["line"] == "amplifier")
         b = Bot(amplifier, FakePlatform(), FakeLLM(0, 0), load_world(), roster=Roster(npcs={"citizen_a"}), store=fresh)
         action = await b.think({"feed": [{"id": 9, "author": "citizen_a", "content": "ferry late again"}]})
@@ -1505,7 +1584,7 @@ async def boost_check() -> None:
     finally:
         LINE_ACTIONS["amplifier"].clear()
         LINE_ACTIONS["amplifier"].update(saved[0])
-        BOOST_PROB = saved[1]
+        BOOST_PROB, RUSH_PROB = saved[1], saved[2]
 
     class Says:
         name = "says"
@@ -1529,9 +1608,9 @@ async def boost_check() -> None:
                        topic_kind="issue", made_id=901))
     writers = [p for p in personas if p["line"] == "background"][:BOOST_LIMITS["reply"] + 1]
     global ACTION_WEIGHTS, TEAM_REPLY_PROB
-    saved_reply = ACTION_WEIGHTS, TEAM_REPLY_PROB
+    saved_reply = ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB
     try:
-        ACTION_WEIGHTS, TEAM_REPLY_PROB = {"reply": 1}, 1.0
+        ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB = {"reply": 1}, 1.0, 0.0
         replies = []
         for i, persona in enumerate(writers):
             b = Bot(persona, FakePlatform(), Says(f"Same here, the ferry crews lost a whole season, voting yes ({i})."),
@@ -1546,7 +1625,7 @@ async def boost_check() -> None:
         assert team.db.execute("SELECT COUNT(*) FROM reply_picks WHERE route = 'team'").fetchone()[0] == \
             BOOST_LIMITS["reply"]
     finally:
-        ACTION_WEIGHTS, TEAM_REPLY_PROB = saved_reply
+        ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB = saved_reply
     restored = StateStore(":memory:")  # a backup put back: the reply is in history, its place is gone
     restored.record("rosa_dives", _iso(now - timedelta(minutes=20)),
                     Action("post", content="Dive boats sat idle in 2021; voting yes.", topic_kind="anchor", made_id=950))
@@ -1604,6 +1683,74 @@ async def anchor_check() -> None:
     finally:
         ACTION_WEIGHTS = saved
     print("anchors ok")
+
+
+async def rush_check() -> None:
+    """While the newest anchor is under RUSH_WINDOW old, an account gives it a repost, then a reply, then a like
+    before anything else, each once, a dropped reply not tried again; nothing for an older anchor, and no reply from
+    an account gone quiet. Every prompt lists the phrases the most teammates wore out lately."""
+    class Says:
+        name = "says"
+
+        def __init__(self, text: str) -> None:
+            self.text, self.prompts = text, []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            return self.text
+
+    store = StateStore(":memory:")
+    now = datetime.now(timezone.utc)
+    store.record("rosa_dives", _iso(now - timedelta(minutes=50)),
+                 Action("post", content="Dive boats sat idle in 2021; voting yes.", topic_kind="anchor", made_id=800))
+    store.record("rosa_dives", _iso(now - timedelta(minutes=5)),
+                 Action("post", content="Dive boats sat idle in 2021; I'm voting yes on the mandate.",
+                        topic_kind="anchor", made_id=900))
+    for user, text in (("joe_tama", "A certificate at the door beats closing the cafe again."),
+                       ("ana_moala", "I'd show a certificate at the door any day."),
+                       ("walter_h", "The ferry at the door of winter, as ever.")):
+        store.record(user, _iso(now - timedelta(minutes=3)),
+                     Action("reply", post_id=900, content=text, angle="lean:team", target_author="rosa_dives"))
+    writers = [p for p in load_personas(status=None) if p["line"] == "background"][:3]
+    feed = {"feed": [{"id": 9, "author": "citizen_a", "content": "ferry late again"}]}
+
+    store.record("lena_brook", _iso(now - timedelta(minutes=4)), Action("post", content="I'm voting yes on it all."))
+    store.record("rawiri_laver", _iso(now - timedelta(minutes=4)), Action("post", content="I'm voting yes on the 2nd."))
+    everywhere = lambda words, since: [(f"local_{i}", "I'm voting yes on the mandate") for i in range(10)] \
+        if "voting" in words else []
+
+    def bot(persona: dict, text: str) -> Bot:
+        return Bot(persona, FakePlatform(), Says(text), load_world(), roster=Roster(npcs={"citizen_a"}), store=store,
+                   said=everywhere)
+
+    global ACTION_WEIGHTS, RUSH_PROB
+    saved = ACTION_WEIGHTS, RUSH_PROB
+    try:
+        ACTION_WEIGHTS, RUSH_PROB = {"none": 1}, 1.0
+        eager = bot(writers[0], "Our boat crew lost a whole season in 2021, so I'm voting yes.")
+        acted = [await eager.think(feed) for _ in range(4)]
+        assert [(a.type, a.post_id) if a else None for a in acted] == \
+            [("repost", 900), ("reply", 900), ("like", 900), None], acted
+        assert eager._rush() is None, "nothing left to give, so it keeps its own rhythm"
+        worn = eager.llm.prompts[0].split("These phrases are worn out here")[1]
+        assert '"certificate at the door"' in worn and "ferry" not in worn and "voting yes" not in worn, worn
+        taken = eager.llm.prompts[0].split("Above all, none of these")[1].split("\n")[0]
+        assert '"certificate at the door"' in taken and "ferry" not in taken, taken
+        dropped = bot(writers[1], "as an AI I can't write that")
+        acted = [await dropped.think(feed) for _ in range(3)]
+        assert [(a.type, a.post_id) if a else None for a in acted] == [("repost", 900), None, ("like", 900)], acted
+        assert len(dropped.llm.prompts) == 1, "a dropped reply isn't drafted again in the rush"
+        quiet = bot(writers[2], "Our boat crew lost a whole season in 2021, so I'm voting yes.")
+        quiet.quiet = True
+        acted = [await quiet.think(feed) for _ in range(2)]
+        assert [(a.type, a.post_id) for a in acted] == [("repost", 900), ("like", 900)], acted
+        assert not quiet.llm.prompts and quiet._rush() is None, "no reply from an account gone quiet"
+    finally:
+        ACTION_WEIGHTS, RUSH_PROB = saved
+    print("rush ok")
 
 
 async def sibling_check() -> None:
@@ -2318,6 +2465,7 @@ if __name__ == "__main__":
     asyncio.run(boost_check())
     asyncio.run(anchor_check())
     asyncio.run(sibling_check())
+    asyncio.run(rush_check())
     asyncio.run(case_post_check())
     asyncio.run(quota_recovery_check())
     asyncio.run(lukewarm_check())
