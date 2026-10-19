@@ -674,11 +674,11 @@ class Bot:
             return cached[1], cached[2]
         users = {}
         for user, content in self.store.team_texts(_iso(now - WORN_WINDOW), ""):
-            for phrase in phrases(TAG_RE.sub(" ", content or "")):
+            # as the checks see them, in the whole text: a phrase of the setting's ("a nurse at Crown Harbour
+            # Hospital") is never refused
+            for phrase in fresh_phrases(TAG_RE.sub(" ", content or ""), self.world):
                 users.setdefault(phrase, set()).add(user)
-        # as the checks see them: a phrase of the setting's ("at crown harbour hospital") is never refused
-        counts = {p: len(who) for p, who in users.items()
-                  if len(who) >= SHARED_LIMIT and p in fresh_phrases(p, self.world)}
+        counts = {p: len(who) for p, who in users.items() if len(who) >= SHARED_LIMIT}
         ranked = sorted(counts, key=lambda p: (-counts[p], p))
         rivals = self._rivals() if ranked and self.said is not None else set()
         # one many citizens use too ("i'm voting yes on") is never refused, and steering off it only blurs the stance
@@ -1734,8 +1734,8 @@ async def rush_check() -> None:
     feed = {"feed": [{"id": 9, "author": "citizen_a", "content": "ferry late again"}]}
 
     store.record("lena_brook", _iso(now - timedelta(minutes=4)), Action("post", content="I'm voting yes on it all."))
-    store.record("dan_reyes", _iso(now - timedelta(minutes=4)), Action("post", content="Nights at Crown Harbour Hospital."))
-    store.record("greg_wren", _iso(now - timedelta(minutes=4)), Action("post", content="A ward at Crown Harbour Hospital."))
+    store.record("dan_reyes", _iso(now - timedelta(minutes=4)), Action("post", content="A nurse at Crown Harbour Hospital."))
+    store.record("greg_wren", _iso(now - timedelta(minutes=4)), Action("post", content="I'm a nurse at Crown Harbour Hospital."))
     store.record("rawiri_laver", _iso(now - timedelta(minutes=4)), Action("post", content="I'm voting yes on the 2nd."))
     everywhere = lambda words, since: [(f"local_{i}", "I'm voting yes on the mandate") for i in range(10)] \
         if "voting" in words else []
@@ -1755,7 +1755,7 @@ async def rush_check() -> None:
         assert eager._rush() is None, "nothing left to give, so it keeps its own rhythm"
         worn = eager.llm.prompts[0].split("These phrases are worn out here")[1].split("\n")[0]
         assert '"certificate at the door"' in worn and "ferry" not in worn and "voting yes" not in worn, worn
-        assert "crown harbour" not in worn, "a phrase of the setting's is never refused, so never listed"
+        assert "crown" not in worn, "a phrase of the setting's is never refused, so never listed"
         taken = eager.llm.prompts[0].split("Above all, none of these")[1].split("\n")[0]
         assert '"certificate at the door"' in taken and "ferry" not in taken, taken
         dropped = bot(writers[1], "as an AI I can't write that")
