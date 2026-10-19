@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
-from ctn.infra.fake_platform import ANCHOR, LIFT, NORMAL, WRITE_PRIORITY, AmbiguousWrite, FakePlatform, RateLimited
+from ctn.infra.fake_platform import ANCHOR, LIFT, NORMAL, WRITE_LEFT, WRITE_PRIORITY, AmbiguousWrite, FakePlatform, RateLimited
 from ctn.infra.llm import FakeLLM, team_llms
 from ctn.infra.state import StateStore
 from ctn.red.rhythm import UniformPacer
@@ -1263,6 +1263,8 @@ class Bot:
                                            pick=action.pick, hold=action.hold)
         if write is None and action.hold is not None:
             self.store.attempt(action.hold)
+        left = {"left": False}
+        token = WRITE_LEFT.set(left)
         try:
             await self.act(action)
         except AmbiguousWrite as e:
@@ -1274,12 +1276,19 @@ class Bot:
                 self.gifs.disable(f"the platform refused {self.username}'s post with a GIF (HTTP {status})")
             if write is None and action.hold is not None and _never_sent(e):  # a like or repost that never went
                 self.store.release(action.hold)
+            # Stopped while it waited its turn in the write lane (a restart stops dozens so): it never went out.
+            unsent = isinstance(e, asyncio.CancelledError) and getattr(self.platform, "marks_sends", False) \
+                and not left["left"]
+            if write is None and action.hold is not None and unsent:
+                self.store.release(action.hold)
             if write is not None:
-                if _never_sent(e):
+                if _never_sent(e) or unsent:
                     self.store.end_write(write, "not_sent", error=_describe(e))  # frees any place it held
                 else:
                     self._maybe_live(action, write, _describe(e))
             raise
+        finally:
+            WRITE_LEFT.reset(token)
         if write is not None:
             if action.made_id is None:
                 self._maybe_live(action, write, "published without an id")
@@ -1952,6 +1961,40 @@ async def rush_check() -> None:
     finally:
         RUSH_WAIT = saved_wait
     print("rush ok")
+
+
+async def unsent_check() -> None:
+    """A reply stopped while it waits its turn in the write lane (a restart) never went out: its write is not_sent
+    and its place free at once, not left "may be live" for half an hour. Stopped once its request went, it may be."""
+    class Lane(FakePlatform):
+        marks_sends = True
+
+        def __init__(self, goes: bool) -> None:
+            super().__init__()
+            self.goes = goes
+
+        async def reply(self, username: str, parent_id: int, content: str) -> dict:
+            if self.goes:
+                WRITE_LEFT.get()["left"] = True
+            await asyncio.Event().wait()  # waits until cancelled
+            return {}
+
+    persona = next(p for p in load_personas(status=None) if p["line"] == "background")
+    for goes, status in ((False, "not_sent"), (True, "pending")):
+        store = StateStore(":memory:")
+        hold = store.reserve("boost:reply:900:", persona["username"], BOOST_LIMITS["reply"])
+        b = Bot(persona, Lane(goes), FakeLLM(0, 0), load_world(), store=store)
+
+        async def chosen(_obs: dict) -> Action:
+            return Action("reply", post_id=900, content="Same here on the ferry.", hold=hold)
+        b.think = chosen
+        running = asyncio.ensure_future(b.step())
+        await asyncio.sleep(0.05)
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
+        got = store.db.execute("SELECT status FROM writes").fetchone()[0]
+        assert got == status and (store.holders("boost:reply:900:") == set()) == (not goes), (goes, got)
+    print("unsent ok")
 
 
 async def sibling_check() -> None:
@@ -2667,6 +2710,7 @@ if __name__ == "__main__":
     asyncio.run(boost_check())
     asyncio.run(anchor_check())
     asyncio.run(sibling_check())
+    asyncio.run(unsent_check())
     asyncio.run(rush_check())
     asyncio.run(case_post_check())
     asyncio.run(quota_recovery_check())

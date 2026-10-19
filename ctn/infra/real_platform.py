@@ -16,7 +16,7 @@ from typing import Any, Optional
 import httpx
 
 from ctn import paths
-from ctn.infra.fake_platform import (ANCHOR, LIFT, NORMAL, WRITE_PRIORITY, AmbiguousWrite, Incomplete, RateLimited,
+from ctn.infra.fake_platform import (ANCHOR, LIFT, NORMAL, WRITE_LEFT, WRITE_PRIORITY, AmbiguousWrite, Incomplete, RateLimited,
                                      ReportingSuspended, ReportQueueFull)
 
 log = logging.getLogger("platform")
@@ -168,6 +168,8 @@ class RealPlatform:
     Posts name their author by account id, so usernames are looked up and cached. There is no notifications
     endpoint: a reply to one of our posts, seen in any page we read, becomes a notification for its author.
     """
+
+    marks_sends = True  # sets WRITE_LEFT as a write's request goes out
 
     def __init__(self, base_url: str, team_key: Optional[str] = None, accounts: Optional[AccountStore] = None,
                  transport: Optional[httpx.AsyncBaseTransport] = None, max_concurrent: int = MAX_CONCURRENT,
@@ -495,6 +497,9 @@ class RealPlatform:
                 if self.blocked_until.get(scope, 0.0) <= now and (not lane or self.lane_next[lane] <= now):
                     if lane:
                         self.lane_next[lane] = now + self.lane_gap[lane]
+                    left = WRITE_LEFT.get()
+                    if left is not None and method == "POST":
+                        left["left"] = True  # from here it may reach the server
                     return await self.client.request(method, path, **kwargs)
 
     async def _call(self, method: str, path: str, username: str, idempotent: bool = True,
@@ -1200,6 +1205,20 @@ async def _write_pace_demo() -> None:
     await asyncio.gather(first, *lifts, *queued)
     assert gone.cancelled() and bodies == ["anchor", "lift 0", "lift 1", "normal 0", "normal 1", "normal 2"], bodies
     assert not p._lane_locks["write"].locked(), "a cancelled write gives its turn back"
+    await lane.acquire()  # a write stopped while it waits its turn never left; one that went did
+    left = {"left": False}
+    token = WRITE_LEFT.set(left)
+    try:
+        stopped = asyncio.ensure_future(p.post("ana", "never sent"))
+        await asyncio.sleep(0)
+        stopped.cancel()
+        await asyncio.gather(stopped, return_exceptions=True)
+        assert left == {"left": False}, "cancelled in the queue: not sent"
+        lane.release()
+        await p.post("ana", "sent")
+        assert left == {"left": True}
+    finally:
+        WRITE_LEFT.reset(token)
     trending = await p.feed_trending(5)
     assert trending and all(isinstance(i, int) for i in trending), trending
     handed, ran = PriorityLock(), []  # handed the lock, then cancelled before it could run: the next one gets it

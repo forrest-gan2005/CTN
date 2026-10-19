@@ -9,6 +9,10 @@ REPORT_SUSPENSION = timedelta(hours=6)
 # level: an ANCHOR post, then the team's LIFT of the anchor in its rush, then the rest.
 ANCHOR, LIFT, NORMAL = 0, 1, 2
 WRITE_PRIORITY = contextvars.ContextVar("write_priority", default=NORMAL)
+# A writer's marker that a platform which `marks_sends` sets {"left": True} on just before a write's request goes
+# out: a write cancelled with it still False never left this machine. A dict, so a task the platform starts in a
+# copied context still marks the writer's.
+WRITE_LEFT = contextvars.ContextVar("write_left", default=None)
 
 
 class RateLimited(Exception):
