@@ -86,8 +86,8 @@ LEAN_GUIDE = {
                   "about: the benefit to them first, then to everyone."),
     "yes": "They lean YES already. Agree briefly in your own words and, if it fits, say you'll see them at the vote on 2 November.",
     "team": ("They're on your side. Add something of your own they didn't say, so people reading see more than one "
-             "voice; don't just agree, don't repeat their words and don't open with their name. One or two short "
-             "sentences, like a comment under a neighbour's post. Leave out what happened to you in 2021."),
+             "voice; don't just agree, don't repeat their words, and don't open with their name or your own. One or "
+             "two short sentences, like a comment under a neighbour's post. Leave out what happened to you in 2021."),
 }
 # Told only to add "a short story or another reason", three in five teammates' replies under an anchor went back to
 # 2021 and one in seven opened with its writer's name: what each adds is drawn from these instead, by weight.
@@ -155,9 +155,9 @@ CASE_SHAPES = {
     "values": (1.5, "Argue it from a value people voting NO hold dear (freedom, looking after their own, fairness to "
                     "those who can't be vaccinated) and show how the mandate serves that value."),
     "scene": (1.5, "Begin inside a small everyday moment from your week, then let it lead to your reason."),
-    "story": (1.0, "Open with who you are and what's at stake for you (your work, your family, your street), give "
-                   "the other side's worry its due in a few words of your own (not \"I get the worry\"), then say "
-                   "plainly why you're voting YES."),
+    "story": (1.0, "Open with who you are, in a few words of your own rather than as your profile puts it, and "
+                   "what's at stake for you (your work, your family, your street); give the other side's worry its "
+                   "due in a few words of your own (not \"I get the worry\"), then say plainly why you're voting YES."),
 }
 CASE_OPENING = ("Don't open by introducing yourself (\"I'm ...\", \"... here\", \"As a ...\") or with anyone's "
                 "name.")
@@ -1807,6 +1807,7 @@ async def anchor_check() -> None:
             prompt = styled.llm.prompts[0]
             assert action.angle.startswith(f"{shape}: ") and styled.case_shape is None, action.angle
             assert guide in prompt and (CASE_OPENING in prompt) == (shape not in OPENING_FREE), prompt
+            assert ("Open with who you are" in prompt) == (shape in OPENING_FREE), shape
             assert ("End with a genuine question" in prompt) == (shape in QUESTION_SHAPES), shape
     finally:
         CASE_SHAPES, QUESTION_PROB = saved
