@@ -88,7 +88,8 @@ LEAN_GUIDE = {
     "team": ("They're on your side. Add something of your own they didn't say, so people reading see more than one "
              "voice; don't just agree, don't repeat their words, and don't open with their name or your own. One or "
              "two short sentences, like a comment under a neighbour's post. Leave out what happened to you in 2021, "
-             "and concede nothing to the NO side here: a pile of replies that each grant a worry reads as doubt."),
+             "and don't grant a NO worry here (a pile of replies that each grant one reads as doubt; saying a limit is "
+             "worth asking for is fine), and never claim the rules come with an end date."),
 }
 # Told only to add "a short story or another reason", three in five teammates' replies under an anchor went back to
 # 2021 and one in seven opened with its writer's name: what each adds is drawn from these instead, by weight.
@@ -144,8 +145,9 @@ ANCHOR_LINES = {"persuade", "bridge"}
 # move works better than one in your own (Feinberg & Willer 2015, moral reframing); a convert's story moves the
 # hesitant (Lyons et al. 2019; Conlin et al. on COVID vaccines), though an account inventing a change of mind it
 # never had is a tell, so that one isn't used; and a short story, not argument alone, is what changed minds in
-# conversation (Kalla & Broockman 2020). "plain" is the leader's: no introduction, one case, its cost named, still
-# YES (per view their anchors drew outside likes at about our rate, 0.26 against 0.28). Each is an instruction, not
+# conversation (Kalla & Broockman 2020). "plain" began as the leader's (no introduction, one case, its cost named,
+# still YES); a cost named and left unanswered is the weakest form of all, so it now answers the cost with one of the
+# setting's facts, where "refute" answers the commonest NO worry. Each is an instruction, not
 # a sentence to copy: a phrase in it the writer echoes would be refused once two teammates had used it, and one
 # from the setting as a prompt leak.
 CASE_SHAPES = {
@@ -166,7 +168,8 @@ CASE_OPENING = ("Don't open by introducing yourself (\"I'm ...\", \"... here\", 
 # can move a reader's view of vaccination one way while their view of the mandate moves the other: scored as
 # favouring neither side. Citizens' general view of vaccination likely sits near the evidence already (Chuang et
 # al., NAACL Findings 2024); the referendum view is the one with room to move.
-CASE_FOCUS = "Keep to the referendum question; leave the vaccine's own unknowns out unless someone asks about them."
+CASE_FOCUS = ("Keep to the referendum question; leave the vaccine's own unknowns out unless the worry you answer is "
+              "about the vaccine itself.")
 QUESTION_SHAPES = {"refute", "scene", "story"}  # the rest end on their case
 OPENING_FREE = {"story"}  # the one shape that may open with who you are: some do, as people do, just not every one
 COVID_SHARE = 0.35  # of prompts that remind the writer what it did during covid: every one did, and 2021 was in most
@@ -188,7 +191,8 @@ TAG_RE = re.compile(re.escape(TEAM_TAG), re.IGNORECASE)  # the code adds it; it 
 # phrase with one of them goes, however common the phrase is elsewhere (three of the first seven said "I'd rather
 # show a certificate").
 SIBLINGS_SHOWN = 10
-# Of an account's replies, the share that go to an anchor post while one has places. At 0.85 the team's replies to
+# Of an account's replies, the share that go to an anchor post while one has places; most of an anchor's replies come
+# in its rush, which BOOST_LIMITS caps, so the cap is the bigger lever. Lifting anchors, the team's replies to
 # NO-leaning and undecided citizens fell from about ten an hour to one to five, and the hour's changes of mind
 # towards YES from seven to none while 38 favoured neither side (a reworded view, or one pulled both ways): a
 # post read by everyone in Trending mostly gets the already-YES to restate themselves. Dialogue moves people where
@@ -413,8 +417,11 @@ class Bot:
 
         weights = QUIET_ACTIONS if self.quiet else LINE_ACTIONS.get(self.line, ACTION_WEIGHTS)
         kind = random.choices(list(weights), weights=list(weights.values()))[0]
-        # A citizen who engaged us is worth more than a random feed action, so lean into replying back.
-        if not self.quiet and conv is not None and kind in ("like", "none") and random.random() < CONV_REPLY_PROB:
+        # A citizen who engaged us is worth more than a random feed action, so lean into replying back. Most who
+        # reply to us aren't known citizens (154 of 156 conversation picks one evening: accounts that joined after
+        # the opening, most likely other teams'), and a reply to one of those earns nothing.
+        citizen_conv = conv is not None and self.roster.classify(conv["author"]) == "npc"
+        if not self.quiet and citizen_conv and kind in ("like", "none") and random.random() < CONV_REPLY_PROB:
             kind = "reply"
         if kind in ("like", "repost", "reply") and not candidates and conv is None:
             kind = "none" if self.quiet else "post"
@@ -434,7 +441,12 @@ class Bot:
             if found is not None:
                 return await self._reply(found[0], "feed", "team", hold=found[1], referendum=True, claim=False)
         if kind == "reply":
-            target, route = (conv, "conversation") if conv is not None else await self._pick_reply_target(candidates)
+            if citizen_conv:
+                target, route = conv, "conversation"
+            else:  # a citizen in the feed before an account of unknown standing that answered us
+                target, route = await self._pick_reply_target(candidates)
+                if conv is not None and route in (None, "unknown-fallback"):
+                    target, route = conv, "conversation"
             if target is not None:
                 return await self._reply(target, "conversation" if target is conv else "feed", route)
             # nothing worth replying to; write something instead
@@ -1453,6 +1465,35 @@ async def arguments_check() -> None:
         assert (heading in writer.system) == wanted, (kind, topic)
         assert "# Who you are" in writer.system and "Kingstonia" in writer.system
     print("arguments ok")
+
+
+async def conversation_route_check() -> None:
+    """A citizen who answered us is answered back first; an account of unknown standing that did waits behind a
+    citizen in the feed, and is answered only when no citizen is there."""
+    persona = next(p for p in load_personas() if p["line"] == "background")
+    global ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB
+    saved = ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB
+    try:
+        ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB = {"reply": 1}, 0.0, 0.0
+        for answered_by, feed_author, expected in (("stranger_1", "citizen_a", ("citizen_a", False)),
+                                                   ("citizen_b", "citizen_a", ("citizen_b", True)),
+                                                   ("stranger_1", None, ("stranger_1", True))):
+            store, platform = StateStore(":memory:"), FakePlatform()
+            b = Bot(persona, platform, FakeLLM(0, 0), load_world(), roster=Roster(npcs={"citizen_a", "citizen_b"}),
+                    store=store)
+            theirs = await platform.post(answered_by, "fair point, but what about the ferry?")
+            store.ingest_notifications(b.username, [], [{"post_id": theirs["id"], "actor": answered_by}],
+                                       _iso(datetime.now(timezone.utc)))
+
+            async def chosen(target: dict, source: str, route: str, **_kw) -> tuple:
+                return target["author"], source == "conversation"
+            b._reply = chosen
+            feed = [{"id": 9, "author": feed_author, "content": "ferry late again, voting no on the mandate"}] \
+                if feed_author else []
+            assert await b.think({"feed": feed}) == expected, (answered_by, feed_author)
+    finally:
+        ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB = saved
+    print("conversation routes ok")
 
 
 async def thread_check() -> None:
@@ -2725,6 +2766,7 @@ if __name__ == "__main__":
     asyncio.run(anchor_check())
     asyncio.run(sibling_check())
     asyncio.run(unsent_check())
+    asyncio.run(conversation_route_check())
     asyncio.run(rush_check())
     asyncio.run(case_post_check())
     asyncio.run(quota_recovery_check())
