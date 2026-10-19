@@ -382,11 +382,11 @@ class NpcStore:
         return [tag for tag, k in counts.most_common(n) if k >= 2]
 
     def citizen_texts(self, since: datetime, cutoff: datetime = COMPETITION_START) -> list:
-        """The texts of citizens' posts since `since`."""
+        """The texts of ordinary citizens' posts since `since`: verified accounts (papers, campaigners) left out."""
         c = _iso(cutoff)
         return [content for (content,) in self.db.execute(
-            f"SELECT p.content FROM posts p JOIN authors a ON a.author = p.author WHERE p.created_at >= ? AND {PRE_START}",
-            (_iso(since), c, c, c)) if content]
+            "SELECT p.content FROM posts p JOIN authors a ON a.author = p.author "
+            f"WHERE p.created_at >= ? AND {PRE_START} AND a.verified = 0", (_iso(since), c, c, c)) if content]
 
     def gif_embeds(self, limit: int = 5000) -> list:
         """The GIF embeds on the newest posts that aren't ours: the GIFs people here actually post."""

@@ -360,6 +360,7 @@ class Bot:
         self.seen = self.store.load_seen(self.username)
         self.rushed = set()  # (anchor post id, kind) this process has tried in a rush
         self.case_shape = None  # the CASE_SHAPES entry the case post being written takes
+        self.case_worry = None  # the citizens' worry it was told to answer, if any
         self.last_shared = None  # the phrase that sank the last draft, if one did
         self.avoid = []  # phrases the draft being written must not use
         self.followed = self.store.load_followed(self.username)
@@ -606,12 +607,14 @@ class Bot:
         if kind != "post" or topic[0] not in ("issue", "anchor"):
             return await self._write(kind, topic, target, context, referendum)
         shape = self.case_shape = _draw_shape()
+        self.case_worry = None
         try:
             action = await self._write(kind, topic, target, context, referendum)
         finally:
-            self.case_shape = None
+            self.case_shape, worry = None, self.case_worry
+            self.case_worry = None
         if action is not None:
-            action.angle = f"{shape}: {action.angle or ''}"
+            action.angle = f"{shape}{'/' + worry if worry else ''}: {action.angle or ''}"
         return action
 
     async def _write_to_citizen(self, topic: tuple, target: dict, context: Optional[str],
@@ -1102,10 +1105,11 @@ class Bot:
                          "but make plain that you mean the referendum on proof of vaccination; nobody should have to guess.")
             shape = self.case_shape or _draw_shape()
             opening = "" if shape in OPENING_FREE else f" {CASE_OPENING}"
-            # The worry a refutation answers is one citizens are raising now: of 124 NO-leaning posts by citizens in
-            # two hours one morning, 44 wanted the rules temporary, 34 feared government power, 28 the ID card.
-            worry = f" The NO worry people here raise most lately is {random.choice(self.worries)}; answer that one." \
-                if shape == "refute" and self.worries else ""
+            # The worry a refutation answers is one citizens are raising now, rather than the writer's guess at it.
+            worry = ""
+            if shape == "refute" and self.worries:
+                self.case_worry, label = random.choice(self.worries)
+                worry = f" The NO worry people here raise most lately is {label}; answer that one."
             parts.append(f"{CASE_SHAPES[shape][1]}{worry}{opening} {CASE_FOCUS}")
         elif topic[0] == "vaccine":
             parts.append(f"Write a new post about vaccination in your everyday life: {topic[1]}. Don't mention the "
@@ -1947,10 +1951,13 @@ async def anchor_check() -> None:
             assert "raise most lately" not in prompt, "with no worries counted, none is named"
             assert ("Open with who you are" in prompt) == (shape in OPENING_FREE), shape
             assert ("End with a genuine question" in prompt) == (shape in QUESTION_SHAPES), shape
-        styled.worries = ['"It has to be temporary."']
+        styled.worries = [("id card", "that the ID cards could be used to track people")]
         CASE_SHAPES = {"refute": saved[0]["refute"]}  # a refutation answers a worry citizens raise now
-        assert 'raise most lately is "It has to be temporary."; answer that one.' in \
+        assert "raise most lately is that the ID cards could be used to track people; answer that one." in \
             styled._user_prompt("post", None, ("anchor", "acting early"))
+        tagged = Bot(writers[0], FakePlatform(), Noting(case), load_world(), store=StateStore(":memory:"))
+        tagged.worries = styled.worries
+        assert (await tagged._anchor()).angle.startswith("refute/id card: "), "the worry answered is recorded"
         CASE_SHAPES = {"plain": saved[0]["plain"]}
         assert "raise most lately" not in styled._user_prompt("post", None, ("anchor", "acting early"))
     finally:
