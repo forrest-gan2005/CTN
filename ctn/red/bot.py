@@ -914,7 +914,16 @@ class Bot:
         wanted = TARGET_LEANS.get(self.line)
         people = [p for p in npcs if p["author"] not in NEWS_OUTLETS]
         if people and wanted:
-            for p in random.sample(people, min(LEAN_CHECKS, len(people))):
+            # Citizens whose lean the team already knows cost nothing to look at, so only the ones not yet judged
+            # use up LEAN_CHECKS: a known YES voter in the sample used to take a persuader's place for nothing.
+            now, checks = datetime.now(timezone.utc), 0
+            for p in random.sample(people, len(people)):
+                known = self.roster.leans.get(p["author"])
+                fresh = known is not None and now - known[1] < LEAN_TTL
+                if not fresh:
+                    if checks >= LEAN_CHECKS:
+                        continue
+                    checks += 1
                 if await self._lean(p["author"], p.get("content") or "") in wanted:
                     return p, "lean-hit"
         if npcs and (not unknown or random.random() < NPC_REPLY_PREF):
@@ -1602,6 +1611,21 @@ async def thread_check() -> None:
     assert await b._conversation_target() is None and store.inbox(b.username) == []
     store.ingest_notifications(b.username, [], [{"post_id": shallow["id"], "actor": "citizen_a"}], _iso(now))
     assert (await b._conversation_target())["id"] == shallow["id"], "a conversation doesn't wait out the cooldown"
+    persuader = next(p for p in load_personas() if p["line"] == "persuade")
+    citizens = {f"citizen_{c}" for c in "defgh"}
+    known = Bot(persuader, FakePlatform(), FakeLLM(0, 0), load_world(), roster=Roster(npcs=citizens),
+                store=StateStore(":memory:"))
+    known.roster.leans = {f"citizen_{c}": ("yes", now) for c in "defg"} | {"citizen_h": ("no", now)}
+    feed = [{"id": 300 + i, "author": a, "content": "the mandate vote is soon"} for i, a in enumerate(sorted(citizens))]
+    routes = set()
+    for _ in range(10):
+        post, route = await known._pick_reply_target(feed)
+        routes.add((post["author"], route))
+    assert routes == {("citizen_h", "lean-hit")}, ("known YES voters take no check", routes)
+    fresh = Bot(persuader, FakePlatform(), FakeLLM(0, 0), load_world(), roster=Roster(npcs=citizens),
+                store=StateStore(":memory:"))
+    await fresh._pick_reply_target(feed)
+    assert len(fresh.roster.leans) == LEAN_CHECKS, "no more than LEAN_CHECKS citizens judged a step"
     print("threads ok")
 
 
