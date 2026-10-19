@@ -92,7 +92,7 @@ LEAN_GUIDE = {
 # Told only to add "a short story or another reason", three in five teammates' replies under an anchor went back to
 # 2021 and one in seven opened with its writer's name: what each adds is drawn from these instead, by weight.
 TEAM_SHAPES = (
-    ("Another reason for YES they didn't give, as a sentence of your own; no story this time.", 2.0),
+    ("Give a reason they didn't, in a sentence of your own; no story this time.", 2.0),
     ("Say which point in their post matters most to you and why, briefly.", 1.5),
     ("Back them up with one of the facts given above, in your own words.", 1.0),
     ("A small moment from your own week that shows why you're with them on YES.", 1.5),
@@ -152,7 +152,7 @@ CASE_SHAPES = {
     "refute": (2.0, "Name the worry people voting NO raise most, fairly and in a few words, then answer it with one "
                     "concrete reason."),
     "plain": (2.0, "Make that one case only, plainly. Then admit honestly, in your own words, who the rule would keep "
-                   "out of where, and still come down for the mandate."),
+                   "out of where, and still back it."),
     "values": (1.5, "Argue it from a value people voting NO hold dear (freedom, looking after their own, fairness to "
                     "those who can't be vaccinated) and show how the mandate serves that value."),
     "scene": (1.5, "Begin inside a small everyday moment from your week, then let it lead to your reason."),
@@ -168,7 +168,7 @@ NO_COVID = "Don't describe what you did during covid."  # when it isn't reminded
 # The writer mirrors "You are <name>, <age>..." and opens with it whatever it is told; a case post or a teammate's
 # reply that still does ("I'm Mere, ...", "Sam, 41, ...", or its own or the anchor writer's first name, as in "Greg
 # here" or "Greg, ...") is dropped.
-INTRODUCTION_RE = re.compile(r"^\W*([Ii]'?m [A-Z][a-z]+\b|[A-Z][a-z]+, \d{1,2}\b)")
+INTRODUCTION_RE = re.compile(r"^\W*([Ii]'?m [A-Z][a-z]+,|[A-Za-z]+, \d{2}(,| ?yo\b| years))")
 ANCHOR_GAP = timedelta(minutes=30)
 ANCHOR_REST = timedelta(minutes=75)
 LIFT_TOPICS = ("anchor",)
@@ -974,7 +974,7 @@ class Bot:
         text = plain(text)
         names = [(PERSONA_NAMES.get(u) or "").split(" ")[0] for u in (self.username, addressee) if u]
         return bool(INTRODUCTION_RE.match(text)) or any(
-            n and re.match(rf"\W*{re.escape(n)}\b", text) is not None for n in names)
+            n and re.match(rf"\W*(i'?m\s+)?{re.escape(n)}\b", text, re.IGNORECASE) is not None for n in names)
 
     def _user_prompt(self, kind: str, target: Optional[dict], topic: tuple, earlier: Optional[str] = None,
                      about: Optional[list] = None, sign=PICK, referendum: Optional[bool] = None,
