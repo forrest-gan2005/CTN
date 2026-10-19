@@ -263,6 +263,22 @@ class StateStore:
         with self.db:
             self.db.execute("UPDATE suspects SET reason = ? WHERE author = ?", (reason, author))
 
+    def suspect(self, author: str) -> Optional[tuple]:
+        """(reason, post_id) for one account, read fresh: another process may have decided on it since."""
+        return self.db.execute("SELECT reason, post_id FROM suspects WHERE author = ?", (author,)).fetchone()
+
+    def escalate_suspect(self, author: str, reason: str, post_id: int, found_at: str, waiting: tuple,
+                         prefix: str) -> bool:
+        """Turn a suspect still waiting for a look (reason in `waiting`, or starting with `prefix`) into one caught
+        outright by `post_id`, in one statement: a decision someone made meanwhile (cleared, written up) stands."""
+        marks = ",".join("?" * len(waiting))
+        with self.db:
+            cur = self.db.execute(
+                f"UPDATE suspects SET reason = ?, post_id = ?, found_at = ? WHERE author = ? "
+                f"AND (substr(reason, 1, ?) = ? OR reason IN ({marks}))",
+                (reason, post_id, found_at, author, len(prefix), prefix, *waiting))
+        return cur.rowcount == 1
+
     def suspects(self) -> dict:
         """author -> (reason, post_id)."""
         return {a: (r, p) for a, r, p in self.db.execute("SELECT author, reason, post_id FROM suspects")}

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from ctn import paths
-from ctn.blue.blue import CLEARED, MANUAL, REVIEW, YES_LEAN_RE, BlueScanner
+from ctn.blue.blue import CLEARED, MANUAL, REVIEW, YES_LEAN_RE, BlueScanner, waiting
 from ctn.infra.collector import COMPETITION_START, GAME_OPENS, NpcStore
 from ctn.infra.state import StateStore
 from ctn.text.content import load_personas
@@ -65,7 +65,7 @@ def describe(npc_store: NpcStore, author: str, posts: int, joined: Optional[dict
 def queue(npc_store: NpcStore, state: StateStore, posts: int = 4) -> list:
     """Suspects not cleared: those waiting for review first, then the ones being reported."""
     out = []
-    suspects = sorted(state.suspects().items(), key=lambda kv: (not kv[1][0].startswith(REVIEW), kv[0]))
+    suspects = sorted(state.suspects().items(), key=lambda kv: (not waiting(kv[1][0]), kv[0]))
     for author, (reason, _) in suspects:
         if reason == CLEARED:
             continue
