@@ -327,6 +327,16 @@ class NpcStore:
         )
         return [json.loads(r[0]) for r in rows]
 
+    def recent_from(self, authors: Iterable[str], since: datetime) -> list:
+        """These accounts' posts created since `since`, as the API returned them, newest first."""
+        authors = list(authors)
+        if not authors:
+            return []
+        marks = ",".join("?" * len(authors))
+        rows = self.db.execute(f"SELECT raw FROM posts WHERE author IN ({marks}) AND created_at >= ? ORDER BY id DESC",
+                               authors + [_iso(since)])
+        return [json.loads(r[0]) for r in rows]
+
     def recent_by(self, author: str, n: int = 3) -> list:
         """This account's newest post texts, to tailor a reply to the person."""
         rows = self.db.execute(

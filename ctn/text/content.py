@@ -33,6 +33,16 @@ def load_vaccine_angles() -> list:
     return json.loads((CONTENT_DIR / "archetypes.json").read_text(encoding="utf-8"))["vaccine_angles"]
 
 
+def load_journalists() -> dict:
+    """The papers' journalists on Legit Social (journalists.json): username -> {"name", "paper", "role", "cares",
+    "angles"}. Citizens read the papers daily, and the journalists write from what they discuss here."""
+    journalists = json.loads((CONTENT_DIR / "journalists.json").read_text(encoding="utf-8"))
+    for username, j in journalists.items():
+        if not all(j.get(k) for k in ("name", "paper", "role", "cares", "angles")):
+            raise ValueError(f"journalist {username!r} needs a name, paper, role, what they care about and angles")
+    return journalists
+
+
 def load_backstories() -> dict:
     """The key accounts' own stories (backstories.md): username -> {"story", "people", "voice"}."""
     text = (CONTENT_DIR / "backstories.md").read_text(encoding="utf-8")

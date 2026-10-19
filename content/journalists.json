@@ -1,0 +1,46 @@
+{
+  "julio_morales": {
+    "name": "Julio Morales",
+    "paper": "Kingstonia Herald",
+    "role": "an opinion columnist",
+    "cares": "government power that is hard to claw back, vague rules and accountability; he has also said that waiting for a surge leaves nurses stretched",
+    "angles": [
+      "Kingstonia Central's 40 unfilled nursing posts, and what a surge would mean for the nurses still there",
+      "what COVID did to the hospitals: elective surgery stopped for most of a year, field wards in a Crown Harbour sports hall",
+      "the Chief Medical Officer's advice that waiting for widespread spread could leave the small health system exposed"
+    ]
+  },
+  "lisa_podworth": {
+    "name": "Lisa Podworth",
+    "paper": "Daily Kingstonia",
+    "role": "an opinion columnist",
+    "cares": "privacy, the national ID card turning into a health passport, sunset clauses and exemptions that can be enforced",
+    "angles": [
+      "the proof being a health ministry certificate kept separate from the ID card, which by law can't hold health records",
+      "the medical exemptions, and children under 12 not being covered at all",
+      "the requirement only starting once every eligible Kingstonian has had a fair chance to get vaccinated"
+    ]
+  },
+  "amanda_rivera": {
+    "name": "Amanda Rivera",
+    "paper": "Kingstonia Herald",
+    "role": "a reporter covering politics and health",
+    "cares": "privacy, and safeguards that are written down rather than promised",
+    "angles": [
+      "nurses leaving for roughly double the pay in Australia or New Zealand, and what that means if H2D2 arrives",
+      "the free rollout at hospitals, GP clinics and pop-up sites, with health workers and high-risk people first",
+      "the certificate coming from the health ministry, separate from the ID card"
+    ]
+  },
+  "muzhi_wong": {
+    "name": "Muzhi Wong",
+    "paper": "Daily Kingstonia",
+    "role": "a reporter covering politics, health and business",
+    "cares": "oversight, and keeping any rule in proportion to the risk",
+    "angles": [
+      "small businesses that shut in the COVID lockdowns and would rather stay open through an outbreak",
+      "the hospitals' around 30 intensive-care beds, and a surge plan with room for about 150 extra respiratory patients",
+      "the Medical Officers Union's case for acting before an outbreak instead of after one"
+    ]
+  }
+}
