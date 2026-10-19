@@ -73,6 +73,11 @@ REGISTERED_ONLY = "SELECT author FROM registered WHERE created_at < ? AND author
 FLEET_MIN_CHARS = 20
 FLEET_AUTHORS = 3
 HASHTAG_RE = re.compile(r"#\w{2,30}")
+# Some citizens tag every word ("#spent #the #morning"): common words and very short tags aren't trends.
+TAG_STOP = set("the and for are but not you all any can had her was one our out day get has him his how man new now old "
+               "see two way who did its let put say she too use this that with have from they will just been more "
+               "what when your some them than then very also into like only over such time even most here much "
+               "well back after again where would there their about which could other think".split())
 FRACTION_RE = re.compile(r"\.(\d+)")
 
 
@@ -353,7 +358,8 @@ class NpcStore:
             f"WHERE p.created_at >= ? AND {PRE_START} AND p.content LIKE '%#%'",
             (_iso(since), c, c, c),
         )
-        counts = Counter(tag.lower() for (content,) in rows for tag in set(HASHTAG_RE.findall(content)))
+        counts = Counter(tag.lower() for (content,) in rows for tag in set(HASHTAG_RE.findall(content))
+                         if len(tag) > 4 and tag[1:].lower() not in TAG_STOP)
         return [tag for tag, k in counts.most_common(n) if k >= 2]
 
     def gif_embeds(self, limit: int = 5000) -> list:
@@ -598,8 +604,19 @@ async def _demo(seconds: float) -> None:
         post["author"] == a for post in p.posts.values())}
     _fleet_check()
     _registered_check()
+    _hashtag_check()
     print(f"\ncollected {store.count()}/{len(p.posts)} posts, filled {collector.gaps} gaps, "
           f"whitelist {len(wl)} accounts")
+
+
+def _hashtag_check() -> None:
+    """A citizen who tags every word doesn't make "#the" a trend; real tags still count."""
+    store = NpcStore(":memory:")
+    t0 = datetime(2026, 10, 19, 1, 0, tzinfo=timezone.utc)
+    texts = ["#spent #the #morning at the wharf", "#the ferry again #H2D2", "#h2d2 worries me #the end", "#NHS #NHS"]
+    store.add_posts([{"id": i, "author": f"citizen_{i}", "content": t, "created_at": _iso(t0)}
+                     for i, t in enumerate(texts)])
+    assert store.top_hashtags(t0 - timedelta(hours=1), cutoff=t0 + timedelta(hours=1)) == ["#h2d2"]
 
 
 def _registered_check() -> None:
