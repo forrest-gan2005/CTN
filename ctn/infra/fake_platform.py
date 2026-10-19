@@ -1,9 +1,14 @@
 import asyncio
+import contextvars
 import itertools
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 REPORT_SUSPENSION = timedelta(hours=6)
+# How soon a write in this task goes out of the team's write lane: URGENT ones (an anchor post and the team's lift
+# of it in its rush) ahead of every NORMAL one waiting, which keep their order.
+URGENT, NORMAL = 0, 1
+WRITE_PRIORITY = contextvars.ContextVar("write_priority", default=NORMAL)
 
 
 class RateLimited(Exception):

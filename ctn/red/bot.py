@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
-from ctn.infra.fake_platform import AmbiguousWrite, FakePlatform, RateLimited
+from ctn.infra.fake_platform import NORMAL, URGENT, WRITE_PRIORITY, AmbiguousWrite, FakePlatform, RateLimited
 from ctn.infra.llm import FakeLLM, team_llms
 from ctn.infra.state import StateStore
 from ctn.red.rhythm import UniformPacer
@@ -155,6 +155,9 @@ RUSH_WINDOW = timedelta(minutes=30)
 RUSH_PROB = 0.9
 RUSH_ORDER = ("like", "repost", "reply")
 RUSH_WAIT = (20.0, 180.0)
+# The anchor post, and the reposts and replies lifting it in its rush, jump the write lane's queue: under S53 the
+# 05:00 anchor waited 7.7 minutes behind writes for older anchors and citizens, and its first repost came nine
+# minutes after it was up.
 # A phrase two teammates used this week is refused in a third's draft (SHARED_LIMIT), and the writer kept reaching for
 # the same few: "certificate at the door" cost 18 drafts in S52's first half-hour. The most worn of the last day are
 # listed in every prompt as ones to leave alone.
@@ -650,11 +653,22 @@ class Bot:
         fresh = {pid for _, pid, _ in self.store.team_posts(LIFT_TOPICS, _iso(now - BOOST_DELAY), self.username)}
         return [p for p in reversed(posts) if p[1] not in fresh]
 
+    def _focus(self, now: datetime) -> Optional[int]:
+        """The newest anchor under RUSH_WINDOW old, the account's own and one just up included: the one in its
+        rush."""
+        rushing = self.store.team_posts(LIFT_TOPICS, _iso(now - RUSH_WINDOW), "")
+        return rushing[-1][1] if rushing else None
+
     def _rush(self) -> Optional[tuple]:
-        """(kind, post id): what the newest anchor under RUSH_WINDOW old still has a place for and this account
-        hasn't given it, nor tried to; replies not from an account gone quiet."""
+        """(kind, post id): what the anchor in its rush still has a place for and this account hasn't given it,
+        nor tried to; replies not from an account gone quiet. Nothing while it is the account's own or under
+        BOOST_DELAY old, and nothing for an older anchor then."""
         order = [k for k in RUSH_ORDER if k != "reply"] if self.quiet else RUSH_ORDER
-        for _, post_id, content in self._lift_posts(datetime.now(timezone.utc), RUSH_WINDOW):
+        now = datetime.now(timezone.utc)
+        focus = self._focus(now)
+        for _, post_id, content in self._lift_posts(now, RUSH_WINDOW):
+            if post_id != focus:
+                continue
             for kind in order:
                 if (post_id, kind) in self.rushed or kind == "reply" and not content:
                     continue
@@ -1117,6 +1131,15 @@ class Bot:
                    for prev in previous)
 
     async def act(self, action: Action) -> None:
+        urgent = action.topic_kind == "anchor" or action.type in ("repost", "reply") and \
+            action.post_id is not None and action.post_id == self._focus(datetime.now(timezone.utc))
+        token = WRITE_PRIORITY.set(URGENT if urgent else NORMAL)
+        try:
+            await self._act(action)
+        finally:
+            WRITE_PRIORITY.reset(token)
+
+    async def _act(self, action: Action) -> None:
         if action.type == "like":
             await self.platform.like(self.username, action.post_id)
         elif action.type == "repost":
@@ -1779,6 +1802,34 @@ async def rush_check() -> None:
     picky = Bot(writers[0], FakePlatform(), FakeLLM(0, 0), load_world(), store=two)
     assert picky._boost("like").post_id == 902 and picky._boost("repost", only=900).post_id == 900
     assert picky._team_reply_target(only=900)[0]["id"] == 900
+    two.record("lena_brook", _iso(now - timedelta(seconds=20)),
+               Action("post", content="Ferry crews lost 2021; voting yes.", topic_kind="anchor", made_id=904))
+    assert picky._rush() is None, "an anchor just up is the one in its rush: nothing yet, and nothing for 902"
+
+    class Noting(FakePlatform):  # the lane priority each write is sent with
+        def __init__(self) -> None:
+            super().__init__()
+            self.sent = []
+
+        async def repost(self, username: str, post_id: int) -> bool:
+            self.sent.append(("repost", post_id, WRITE_PRIORITY.get()))
+            return True
+
+        async def post(self, username: str, content: str, parent_id: Optional[int] = None) -> dict:
+            self.sent.append(("post" if parent_id is None else "reply", parent_id, WRITE_PRIORITY.get()))
+            return {"id": 990}
+
+        async def reply(self, username: str, parent_id: int, content: str) -> dict:
+            return await self.post(username, content, parent_id)
+    noting = Noting()
+    lifter = Bot(writers[1], noting, FakeLLM(0, 0), load_world(), store=two)
+    for action in (Action("repost", post_id=904), Action("repost", post_id=902), Action("reply", post_id=904,
+                   content="x"), Action("reply", post_id=9, content="x"),
+                   Action("post", content="x", topic_kind="anchor"), Action("post", content="x", topic_kind="daily")):
+        await lifter.act(action)
+    assert noting.sent == [("repost", 904, URGENT), ("repost", 902, NORMAL), ("reply", 904, URGENT),
+                           ("reply", 9, NORMAL), ("post", None, URGENT), ("post", None, NORMAL)], noting.sent
+    assert WRITE_PRIORITY.get() == NORMAL, "the priority goes back after each write"
 
     global RUSH_WAIT
     saved_wait = RUSH_WAIT

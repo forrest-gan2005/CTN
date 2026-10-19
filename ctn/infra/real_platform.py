@@ -1,5 +1,6 @@
 import asyncio
 import email.utils
+import heapq
 import logging
 import random
 import secrets
@@ -15,7 +16,8 @@ from typing import Any, Optional
 import httpx
 
 from ctn import paths
-from ctn.infra.fake_platform import AmbiguousWrite, Incomplete, RateLimited, ReportingSuspended, ReportQueueFull
+from ctn.infra.fake_platform import (NORMAL, URGENT, WRITE_PRIORITY, AmbiguousWrite, Incomplete, RateLimited,
+                                     ReportingSuspended, ReportQueueFull)
 
 log = logging.getLogger("platform")
 
@@ -123,6 +125,39 @@ FEED_GAP = 6.5
 # Posts, replies and reposts share a route the platform allows a team 3 times a minute: spaced out ahead, so that
 # accounts writing at once queue instead of running into 429s and losing drafts (live, 12 in 19 minutes).
 WRITE_GAP = 20.5
+
+
+class PriorityLock:
+    """An asyncio lock whose waiters get it by priority (lower first), then in the order they came."""
+
+    def __init__(self) -> None:
+        self._held = False
+        self._waiters = []  # heap of (priority, arrival, future)
+        self._arrivals = itertools.count()
+
+    def locked(self) -> bool:
+        return self._held
+
+    async def acquire(self, priority: int = NORMAL) -> None:
+        if not self._held and not self._waiters:
+            self._held = True
+            return
+        turn = asyncio.get_running_loop().create_future()
+        heapq.heappush(self._waiters, (priority, next(self._arrivals), turn))
+        try:
+            await turn
+        except asyncio.CancelledError:
+            if not turn.cancelled():  # handed the lock just as it was cancelled: pass it on
+                self.release()
+            raise
+
+    def release(self) -> None:
+        while self._waiters:
+            turn = heapq.heappop(self._waiters)[2]
+            if not turn.done():  # one cancelled while waiting is skipped
+                turn.set_result(None)  # the lock passes straight to it
+                return
+        self._held = False
 
 
 class RealPlatform:
@@ -428,9 +463,13 @@ class RealPlatform:
         if lane is None or not self.lane_gap[lane]:
             return await self._dispatch_when(scope, method, path, None, **kwargs)
         if lane not in self._lane_locks:
-            self._lane_locks[lane] = asyncio.Lock()
-        async with self._lane_locks[lane]:
+            self._lane_locks[lane] = PriorityLock()
+        lock = self._lane_locks[lane]
+        await lock.acquire(WRITE_PRIORITY.get() if lane == "write" else NORMAL)
+        try:
             return await self._dispatch_when(scope, method, path, lane, **kwargs)
+        finally:
+            lock.release()
 
     async def _dispatch_when(self, scope: str, method: str, path: str, lane: Optional[str],
                              **kwargs) -> httpx.Response:
@@ -1125,6 +1164,33 @@ async def _write_pace_demo() -> None:
     assert len(writes) == 4 and all(b - a >= WRITE_GAP for a, b in zip(writes, writes[1:])), sent
     assert max(sum(t <= u < t + 60 for u in writes) for t in writes) <= 3
     assert [t for m, t in sent if m == "GET"][0] < writes[-1], "the feed read didn't queue behind the writes"
+
+    bodies = []
+
+    def order(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/posts"):
+            bodies.append(json.loads(request.content)["body"])
+        return mock.handler(request)
+    p.client = httpx.AsyncClient(base_url="https://legit.test/api", transport=httpx.MockTransport(order))
+
+    async def urgent(name: str, text: str) -> dict:
+        token = WRITE_PRIORITY.set(URGENT)
+        try:
+            return await p.post(name, text)
+        finally:
+            WRITE_PRIORITY.reset(token)
+    lane = p._lane_locks["write"]
+    await lane.acquire()  # a write going out meanwhile
+    queued = [asyncio.ensure_future(p.post(n, f"normal {i}")) for i, n in enumerate(("ana", "ben", "cai"))]
+    gone = asyncio.ensure_future(p.post("ben", "cancelled"))
+    first = asyncio.ensure_future(urgent("cai", "anchor"))
+    for _ in range(3):
+        await asyncio.sleep(0)
+    gone.cancel()
+    lane.release()
+    await asyncio.gather(first, *queued)
+    assert gone.cancelled() and bodies == ["anchor", "normal 0", "normal 1", "normal 2"], bodies
+    assert not p._lane_locks["write"].locked(), "a cancelled write gives its turn back"
     await p.aclose()
     print("write pace ok")
 
