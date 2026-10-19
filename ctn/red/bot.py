@@ -127,12 +127,21 @@ QUESTION_PROB = 0.5
 # leader's, with 40 replies and up to 40 reposts, held the top ten. So half as many anchors, each liked by the
 # whole team and reposted by most of it: a repost lifts as much as two or three replies and needs no draft.
 ANCHOR_LINES = {"persuade", "bridge"}
+# The leader's anchors open with no introduction and make one case, name its cost plainly ("some unvaccinated
+# people would be shut out, and I take that seriously") and still back it, in about 350 characters with no tag or
+# question; per view they drew outside likes at about our rate (0.26 against 0.28), so it isn't plainly better.
+# Half our anchors are written that way and their angle marked "plain: " (the rest "story: "), to compare.
+PLAIN_SHARE = 0.5
+PLAIN_GUIDE = ("Don't introduce yourself or tell your own story. Make one case only, the one above, in plain words "
+               "a neighbour would use; then name its cost honestly (some people who aren't vaccinated would be kept "
+               "out of designated public places) and say why you still think YES is worth it. No question at the "
+               "end.")
 ANCHOR_GAP = timedelta(minutes=30)
 ANCHOR_REST = timedelta(minutes=75)
 LIFT_TOPICS = ("anchor",)
 BOOST_WINDOW = timedelta(hours=2)
 BOOST_DELAY = timedelta(minutes=1)
-BOOST_LIMITS = {"like": 50, "repost": 30, "reply": 20}
+BOOST_LIMITS = {"like": 50, "repost": 45, "reply": 20}
 BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post still has places
 # Popular tags were all campaign accounts' on the opening night, a NO team's #keepkingstoniaopen first; the papers'
 # reporters write up what is popular here. The team carries the YES campaign's own words: on every anchor post, and
@@ -297,6 +306,7 @@ class Bot:
         self.unsafe = set()  # posts judged to argue NO, never to be amplified
         self.seen = self.store.load_seen(self.username)
         self.rushed = set()  # (anchor post id, kind) this process has tried in a rush
+        self.plain_case = False  # the anchor being written takes the leader's plain style (PLAIN_SHARE)
         self.followed = self.store.load_followed(self.username)
         self.history = [(row[0], Action(*row[1:])) for row in self.store.load_history(self.username)]
 
@@ -637,13 +647,16 @@ class Bot:
         if hold is None:
             return None
         action = None
+        self.plain_case = random.random() < PLAIN_SHARE
         try:
             action = await self._compose("post", topic=("anchor", random.choice(self.persona["angles"])))
         finally:
+            plain, self.plain_case = self.plain_case, False
             if action is None:
                 self.store.release(hold)
         if action is not None:
             action.hold = hold
+            action.angle = ("plain: " if plain else "story: ") + (action.angle or "")
         return action
 
     def _lift_posts(self, now: datetime, window: timedelta = BOOST_WINDOW) -> list:
@@ -989,9 +1002,12 @@ class Bot:
         elif topic[0] in ("issue", "anchor"):
             parts.append(f"Write a new post about the referendum, along this line: {topic[1]}. A comparison is fine, "
                          "but make plain that you mean the referendum on proof of vaccination; nobody should have to guess.")
-            parts.append("Open with who you are and what's at stake for you (your work, your family, your street), "
-                         "give the other side's worry its due in a few words of your own (not \"I get the worry\"), "
-                         "then say plainly why you're voting YES.")
+            if topic[0] == "anchor" and self.plain_case:
+                parts.append(PLAIN_GUIDE)
+            else:
+                parts.append("Open with who you are and what's at stake for you (your work, your family, your "
+                             "street), give the other side's worry its due in a few words of your own (not \"I get "
+                             "the worry\"), then say plainly why you're voting YES.")
         elif topic[0] == "vaccine":
             parts.append(f"Write a new post about vaccination in your everyday life: {topic[1]}. Don't mention the "
                          "referendum or any mandate in this one, and don't give anyone medical advice.")
@@ -1005,7 +1021,8 @@ class Bot:
                 parts.append("You don't know when it's on this year, so write about past years or looking forward to "
                              "the next one, not as if it's happening now.")
 
-        if kind == "post" and topic[0] in ("issue", "anchor") and random.random() < QUESTION_PROB:
+        if kind == "post" and topic[0] in ("issue", "anchor") and not (topic[0] == "anchor" and self.plain_case) \
+                and random.random() < QUESTION_PROB:
             parts.append("End with a genuine question to the people reading, one they'd want to answer; not a "
                          "rhetorical one.")
 
@@ -1726,6 +1743,28 @@ async def anchor_check() -> None:
         assert acted is None or acted.topic_kind != "anchor", "only persuaders and bridges anchor"
     finally:
         ACTION_WEIGHTS = saved
+
+    class Noting(Says):
+        def __init__(self, text: str) -> None:
+            super().__init__(text)
+            self.prompts = []
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            return self.text
+    global PLAIN_SHARE, QUESTION_PROB
+    saved = PLAIN_SHARE, QUESTION_PROB
+    try:
+        for share, style in ((1.0, "plain: "), (0.0, "story: ")):
+            PLAIN_SHARE, QUESTION_PROB = share, 1.0
+            styled = Bot(writers[0], FakePlatform(), Noting(case), load_world(), store=StateStore(":memory:"))
+            action = await styled._anchor()
+            prompt = styled.llm.prompts[0]
+            assert action.angle.startswith(style) and not styled.plain_case, action.angle
+            assert (PLAIN_GUIDE in prompt) == (share == 1.0) and ("Open with who you are" in prompt) == (share == 0.0)
+            assert ("End with a genuine question" in prompt) == (share == 0.0), "a plain anchor asks nothing"
+    finally:
+        PLAIN_SHARE, QUESTION_PROB = saved
     print("anchors ok")
 
 

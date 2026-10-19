@@ -1205,7 +1205,7 @@ async def _write_pace_demo() -> None:
     await asyncio.sleep(0)
     handed.release()  # to second, which is cancelled in the same tick
     second.cancel()
-    await asyncio.gather(second, third, return_exceptions=True)
+    await asyncio.wait_for(asyncio.gather(second, third, return_exceptions=True), 1)  # fails, not hangs
     assert ran == ["third"] and not handed.locked() and not handed._waiters, ran
     await p.aclose()
     print("write pace ok")
