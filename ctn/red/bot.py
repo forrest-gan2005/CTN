@@ -89,6 +89,12 @@ INBOX_TTL = timedelta(hours=12)  # answering a much older reply looks odd
 SHARED_WINDOW = timedelta(days=7)  # a phrase two teammates used this recently is one too many for a third
 SHARED_LIMIT = 2
 MAX_REPLIES_PER_AUTHOR = 4  # team-wide per 24h: no ping-pong with competitor bots, no crowding one citizen
+# A citizen who has changed a view in a session is much harder to move again on it before signing out, so after one
+# of our replies the team leaves them be for a while (a session's length isn't published; two hours covers it).
+# Answering someone who replied to us is a conversation, not another push, and doesn't wait.
+CITIZEN_COOLDOWN = timedelta(hours=2)
+# Citizens seldom reply once a conversation is more than eight messages deep: no reply to a post that deep.
+THREAD_DEPTH_LIMIT = 8
 # The papers' journalists are citizens too, and the ones whose views reach everyone: every citizen reads the news
 # daily, and the journalists write from what they discuss here (the organisers, at the launch). Persuaders and
 # bridges answer a journalist's referendum post first, each at most once a day, and now and then point one to a
@@ -216,7 +222,8 @@ class Bot:
     def __init__(self, persona: dict, platform, llm, world: str, stance_llm=None,
                  roster: Optional[Roster] = None, store: Optional[StateStore] = None,
                  examples=None, feed: Optional[Callable[[], list]] = None,
-                 profile: Optional[Callable[[str], list]] = None, twins=None, injection=None) -> None:
+                 profile: Optional[Callable[[str], list]] = None, twins=None, injection=None,
+                 depth: Optional[Callable[[int], int]] = None) -> None:
         self.username = persona["username"]
         self.persona = persona
         self.line = persona["line"]
@@ -230,6 +237,7 @@ class Bot:
         self.examples = examples  # NpcExamples; None means the persona's own examples
         self.feed = feed  # shared copy of Latest kept by the collector; None reads the API directly
         self.profile = profile  # author -> their recent post texts, for tailoring replies
+        self.depth = depth  # post id -> how many messages deep it sits in its thread; None: not known
         self.hashtags = []  # what citizens are tagging today, refreshed by the team
         self.twins = twins  # semantic.NearIndex of the whole team's recent posts; None skips the check
         self.injection = injection  # injection.InjectionClassifier; None leaves probe-spotting to the regexes
@@ -540,7 +548,7 @@ class Bot:
                     post = await self.platform.get_post(post_id)
                 except KeyError:
                     pass
-            if post is not None and not self._probe(post.get("content") or ""):
+            if post is not None and not self._probe(post.get("content") or "") and not self._too_deep(post_id):
                 return post
             self.store.drop_inbox(self.username, post_id)
         return None
@@ -573,6 +581,9 @@ class Bot:
                 return Action(kind, post_id=post_id, line=self.line, target_author=author, target_class="own",
                               hold=hold)
         return None
+
+    def _too_deep(self, post_id: int) -> bool:
+        return self.depth is not None and self.depth(post_id) >= THREAD_DEPTH_LIMIT
 
     def _rivals(self) -> set:
         """Accounts Blue has down as competitors' (written up, waiting for a look, or set aside): replying to or
@@ -621,11 +632,13 @@ class Bot:
     async def _pick_reply_target(self, candidates: list) -> tuple:
         """(post, route), or (None, None). Only replies to citizens score; prefer them, but still engage unknown
         (post-start) accounts."""
-        since = _iso(datetime.now(timezone.utc) - timedelta(hours=24))
+        now = datetime.now(timezone.utc)
+        since, rested = _iso(now - timedelta(hours=24)), _iso(now - CITIZEN_COOLDOWN)
         rivals = self._rivals()
         open_ = [p for p in candidates if self.store.replies_to(p["author"], since) < MAX_REPLIES_PER_AUTHOR
+                 and not self.store.replies_to(p["author"], rested)  # not pushed by one of us just now
                  and p["author"] not in JOURNALISTS  # those have their own route, for persuaders and bridges
-                 and p["author"] not in rivals]
+                 and p["author"] not in rivals and not self._too_deep(p["id"])]
         npcs = [p for p in open_ if self.roster.classify(p["author"]) == "npc"]
         unknown = [p for p in open_ if self.roster.classify(p["author"]) == "unknown"]
         wanted = TARGET_LEANS.get(self.line)
@@ -1132,6 +1145,37 @@ async def arguments_check() -> None:
         assert (heading in writer.system) == wanted, (kind, topic)
         assert "# Who you are" in writer.system and "Kingstonia" in writer.system
     print("arguments ok")
+
+
+async def thread_check() -> None:
+    """No reply to a post more than THREAD_DEPTH_LIMIT - 1 messages deep, nor a conversation that deep; a citizen
+    one of us replied to lately is left be until CITIZEN_COOLDOWN has passed."""
+    depths = {101: 2, 102: THREAD_DEPTH_LIMIT, 103: 3}
+    store = StateStore(":memory:")
+    now = datetime.now(timezone.utc)
+    store.record("mate", _iso(now - CITIZEN_COOLDOWN + timedelta(minutes=30)),
+                 Action("reply", post_id=50, content="x", target_author="citizen_c"))
+    persona = next(p for p in load_personas() if p["line"] == "background")
+    platform = FakePlatform()
+    b = Bot(persona, platform, FakeLLM(0, 0), load_world(),
+            roster=Roster(npcs={"citizen_a", "citizen_b", "citizen_c"}), store=store,
+            depth=lambda post_id: depths.get(post_id, 1))
+    feed = [{"id": 101, "author": "citizen_a", "content": "ferry late"},
+            {"id": 102, "author": "citizen_b", "content": "deep"},
+            {"id": 103, "author": "citizen_c", "content": "again"}]
+    picked = {(await b._pick_reply_target(feed))[0]["author"] for _ in range(20)}
+    assert picked == {"citizen_a"}, picked
+    store.db.execute("UPDATE history SET ts = ?", (_iso(now - CITIZEN_COOLDOWN - timedelta(minutes=5)),))
+    picked = {(await b._pick_reply_target(feed))[0]["author"] for _ in range(30)}
+    assert picked == {"citizen_a", "citizen_c"}, picked
+    deep = await platform.post("citizen_b", "still going")
+    depths[deep["id"]] = THREAD_DEPTH_LIMIT
+    shallow = await platform.post("citizen_a", "fair point")
+    store.ingest_notifications(b.username, [], [{"post_id": deep["id"], "actor": "citizen_b"}], _iso(now))
+    assert await b._conversation_target() is None and store.inbox(b.username) == []
+    store.ingest_notifications(b.username, [], [{"post_id": shallow["id"], "actor": "citizen_a"}], _iso(now))
+    assert (await b._conversation_target())["id"] == shallow["id"], "a conversation doesn't wait out the cooldown"
+    print("threads ok")
 
 
 async def rival_check() -> None:
@@ -2018,6 +2062,7 @@ if __name__ == "__main__":
     asyncio.run(quota_recovery_check())
     asyncio.run(lukewarm_check())
     asyncio.run(rival_check())
+    asyncio.run(thread_check())
     asyncio.run(news_reply_check())
     asyncio.run(reply_context_check())
     asyncio.run(implicit_no_check())

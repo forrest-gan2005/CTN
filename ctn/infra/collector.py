@@ -342,6 +342,18 @@ class NpcStore:
                                authors + [_iso(since)])
         return [json.loads(r[0]) for r in rows]
 
+    def depth(self, post_id: int, limit: int = 10) -> int:
+        """How many messages deep a post sits in its thread (a post 1, a reply to it 2, ...), as far as the stored
+        posts show, counting no further than `limit`."""
+        depth, current = 0, post_id
+        while current is not None and depth < limit:
+            row = self.db.execute("SELECT parent_id FROM posts WHERE id = ?", (current,)).fetchone()
+            if row is None:
+                break
+            depth += 1
+            current = row[0]
+        return depth
+
     def recent_by(self, author: str, n: int = 3) -> list:
         """This account's newest post texts, to tailor a reply to the person."""
         rows = self.db.execute(
@@ -610,13 +622,18 @@ async def _demo(seconds: float) -> None:
 
 
 def _hashtag_check() -> None:
-    """A citizen who tags every word doesn't make "#the" a trend; real tags still count."""
+    """A citizen who tags every word doesn't make "#the" a trend; real tags still count. Thread depth counts up
+    the stored parents."""
     store = NpcStore(":memory:")
     t0 = datetime(2026, 10, 19, 1, 0, tzinfo=timezone.utc)
     texts = ["#spent #the #morning at the wharf", "#the ferry again #H2D2", "#h2d2 worries me #the end", "#NHS #NHS"]
     store.add_posts([{"id": i, "author": f"citizen_{i}", "content": t, "created_at": _iso(t0)}
                      for i, t in enumerate(texts)])
     assert store.top_hashtags(t0 - timedelta(hours=1), cutoff=t0 + timedelta(hours=1)) == ["#h2d2"]
+    store.add_posts([{"id": 100 + i, "author": "a", "content": "x", "created_at": _iso(t0),
+                      "parent_id": 99 + i if i else None} for i in range(12)])
+    assert [store.depth(100), store.depth(101), store.depth(107), store.depth(111)] == [1, 2, 8, 10]
+    assert store.depth(5000) == 0 and store.depth(111, limit=4) == 4
 
 
 def _registered_check() -> None:

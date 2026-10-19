@@ -99,7 +99,7 @@ class Team:
         world = load_world()
         self.bots = [Bot(p, platform, llm, world, stance_llm=stance_llm, roster=self.roster, store=state,
                          feed=self.feed, profile=lambda author: npc_store.recent_by(author, 5), twins=self.twins,
-                         injection=injection)
+                         injection=injection, depth=npc_store.depth)
                      for p in personas]
         self.gifs = GifPool() if gifs else None  # one pool, so the whole team spaces out reusing a GIF
         if self.gifs is not None:  # and across restarts, from what the team has posted or may have
@@ -952,7 +952,7 @@ async def reply_route_check() -> None:
     try:
         with tempfile.TemporaryDirectory() as tmp:
             p, state, npc_store = Flaky(), StateStore(f"{tmp}/bots.db"), NpcStore(":memory:", own_usernames={me})
-            roster = Roster(own={me}, npcs=["npc_no", "npc_chat", "npc_late"])
+            roster = Roster(own={me}, npcs=["npc_no", "npc_chat", "npc_late", "npc_rain"])
             b = Bot(persona, p, Fresh(0, 0), load_world(), roster=roster, store=state)
             last = lambda: state.db.execute("SELECT route, author, author_class, outcome, write_id FROM reply_picks "
                                             "ORDER BY id DESC LIMIT 1").fetchone()
@@ -986,7 +986,7 @@ async def reply_route_check() -> None:
             except RateLimited:
                 pass
             assert last()[3] == "written" and state.reply_mix("")["outcomes"]["not_sent"] == 1
-            await p.post("npc_chat", "Wet season's going to be a long one")
+            await p.post("npc_rain", "Wet season's going to be a long one")  # npc_chat had a reply from us just now
             p.fail = ["landed"]
             await b.step()
             assert state.reply_mix("")["outcomes"]["pending"] == 1
