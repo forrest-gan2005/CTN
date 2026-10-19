@@ -74,9 +74,9 @@ FLEET_MIN_CHARS = 20
 FLEET_AUTHORS = 3
 HASHTAG_RE = re.compile(r"#\w{2,30}")
 # Some citizens tag every word ("#spent #the #morning"): common words and very short tags aren't trends.
-TAG_STOP = set("the and for are but not you all any can had her was one our out day get has him his how man new now old "
-               "see two way who did its let put say she too use this that with have from they will just been more "
-               "what when your some them than then very also into like only over such time even most here much "
+TAG_STOP = set("the and for are but not you all any can had her was one our out day get has him his how man new "
+               "now old see two way who did its let put say she too use this that with have from they will just been "
+               "more what when your some them than then very also into like only over such time even most here much "
                "well back after again where would there their about which could other think".split())
 FRACTION_RE = re.compile(r"\.(\d+)")
 

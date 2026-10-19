@@ -120,6 +120,9 @@ class AccountStore:
 
 # The three feeds allow a team 10 reads a minute between them (SDK 0.5.0): every feed request waits its turn.
 FEED_GAP = 6.5
+# Posts, replies and reposts share a route the platform allows a team 3 times a minute: spaced out ahead, so that
+# accounts writing at once queue instead of running into 429s and losing drafts (live, 12 in 19 minutes).
+WRITE_GAP = 20.5
 
 
 class RealPlatform:
@@ -133,7 +136,7 @@ class RealPlatform:
 
     def __init__(self, base_url: str, team_key: Optional[str] = None, accounts: Optional[AccountStore] = None,
                  transport: Optional[httpx.AsyncBaseTransport] = None, max_concurrent: int = MAX_CONCURRENT,
-                 feed_gap: float = FEED_GAP) -> None:
+                 feed_gap: float = FEED_GAP, write_gap: float = 0.0) -> None:
         self.client = httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=30, transport=transport)
         self.team_key = team_key
         self.accounts = accounts or AccountStore()
@@ -141,9 +144,10 @@ class RealPlatform:
         self._sem: Optional[asyncio.Semaphore] = None  # created inside the running loop (Python 3.9)
         self.blocked_until = {}  # rate-limit scope -> monotonic time before which nothing in it is sent
         self.clock = time.monotonic  # replaced by a fake clock in tests
-        self.feed_gap = feed_gap
-        self.feed_next = 0.0  # clock time before which no feed request may be sent
-        self._feed_lock: Optional[asyncio.Lock] = None
+        # Requests sent one at a time, each lane's a gap after its last one went: feed reads, and writes of posts.
+        self.lane_gap = {"feed": feed_gap, "write": write_gap}
+        self.lane_next = {"feed": 0.0, "write": 0.0}  # clock time before which nothing in the lane may be sent
+        self._lane_locks = {}
         self.sleep = asyncio.sleep
         self.ids = self.accounts.ids()  # username -> account id
         self.names = {i: u for u, i in self.ids.items()}  # account id -> username
@@ -427,31 +431,33 @@ class RealPlatform:
     async def _dispatch(self, scope: str, method: str, path: str, **kwargs) -> httpx.Response:
         """Send once the scope's rate-limit block allows it. Checked again after getting a connection slot and
         after every wait, since another request may hit a limit (or extend one) meanwhile; a blocked request
-        gives its slot back while it waits. Feed requests, retries included, also leave one at a time, `feed_gap`
-        after the last one actually went."""
-        feed = bool(self.feed_gap) and method == "GET" and path == "/posts"
-        if not feed:
-            return await self._dispatch_when(scope, method, path, False, **kwargs)
-        if self._feed_lock is None:
-            self._feed_lock = asyncio.Lock()
-        async with self._feed_lock:
-            return await self._dispatch_when(scope, method, path, True, **kwargs)
+        gives its slot back while it waits. Feed reads, and writes of posts, replies and reposts, retries
+        included, also leave one at a time, their lane's gap after the last one actually went."""
+        lane = "feed" if method == "GET" and path == "/posts" else "write" if method == "POST" and path == "/posts" \
+            else None
+        if lane is None or not self.lane_gap[lane]:
+            return await self._dispatch_when(scope, method, path, None, **kwargs)
+        if lane not in self._lane_locks:
+            self._lane_locks[lane] = asyncio.Lock()
+        async with self._lane_locks[lane]:
+            return await self._dispatch_when(scope, method, path, lane, **kwargs)
 
-    async def _dispatch_when(self, scope: str, method: str, path: str, feed: bool, **kwargs) -> httpx.Response:
+    async def _dispatch_when(self, scope: str, method: str, path: str, lane: Optional[str],
+                             **kwargs) -> httpx.Response:
         while True:
             wait = self.blocked_until.get(scope, 0.0) - self.clock()
             if wait > MAX_RATE_WAIT:
                 raise RateLimited(wait)
-            if feed:
-                wait = max(wait, self.feed_next - self.clock())
+            if lane:
+                wait = max(wait, self.lane_next[lane] - self.clock())
             if wait > 0:
                 await self.sleep(wait + random.uniform(0, JITTER))
                 continue
             async with self._sem:
                 now = self.clock()
-                if self.blocked_until.get(scope, 0.0) <= now and (not feed or self.feed_next <= now):
-                    if feed:
-                        self.feed_next = now + self.feed_gap
+                if self.blocked_until.get(scope, 0.0) <= now and (not lane or self.lane_next[lane] <= now):
+                    if lane:
+                        self.lane_next[lane] = now + self.lane_gap[lane]
                     return await self.client.request(method, path, **kwargs)
 
     async def _call(self, method: str, path: str, username: str, idempotent: bool = True,
@@ -1094,6 +1100,45 @@ async def _retry_demo() -> None:
     print("retries ok")
 
 
+async def _write_pace_demo() -> None:
+    """Posts, replies and reposts written at once leave a write gap apart, so the team stays under 3 a minute, and
+    a feed read doesn't wait behind them."""
+    sent = []
+
+    class Clock:
+        now = 0.0
+
+        def __call__(self) -> float:
+            return self.now
+
+        async def sleep(self, seconds: float) -> None:
+            until = self.now + seconds
+            await asyncio.sleep(0)
+            self.now = max(self.now, until)
+
+    mock, clock = MockLegitSocial(team_key="k"), Clock()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/posts"):
+            sent.append((request.method, clock.now))
+        return mock.handler(request)
+
+    p = RealPlatform("https://legit.test/api", feed_gap=0, write_gap=WRITE_GAP, team_key="k",
+                     accounts=AccountStore(":memory:"), transport=httpx.MockTransport(handler))
+    p.clock, p.sleep = clock, clock.sleep
+    for name in ("ana", "ben", "cai"):
+        await p.ensure_account(name, name)
+    first = await p.post("ana", "first")
+    await asyncio.gather(p.post("ben", "second"), p.reply("cai", first["id"], "third"), p.repost("ana", first["id"]),
+                         p.feed_latest(n=5))
+    writes = [t for m, t in sent if m == "POST"]
+    assert len(writes) == 4 and all(b - a >= WRITE_GAP for a, b in zip(writes, writes[1:])), sent
+    assert max(sum(t <= u < t + 60 for u in writes) for t in writes) <= 3
+    assert [t for m, t in sent if m == "GET"][0] < writes[-1], "the feed read didn't queue behind the writes"
+    await p.aclose()
+    print("write pace ok")
+
+
 async def _feed_pace_demo() -> None:
     """Every feed request waits its turn, however many callers want one at once and however a call pages: at most
     10 reach the server in any minute."""
@@ -1207,7 +1252,7 @@ async def _feed_pace_demo() -> None:
         await waiting
     except asyncio.CancelledError:
         pass
-    assert await q.feed_latest(n=5) and not q._feed_lock.locked(), "a cancelled read gives its turn back"
+    assert await q.feed_latest(n=5) and not q._lane_locks["feed"].locked(), "a cancelled read gives its turn back"
     await q.aclose()
     print("feed pace ok")
 
@@ -1215,5 +1260,6 @@ async def _feed_pace_demo() -> None:
 if __name__ == "__main__":
     asyncio.run(_demo())
     asyncio.run(_feed_pace_demo())
+    asyncio.run(_write_pace_demo())
     asyncio.run(_repost_gap_demo())
     asyncio.run(_retry_demo())

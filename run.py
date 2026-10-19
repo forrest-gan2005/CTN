@@ -19,7 +19,7 @@ from ctn.infra.fake_platform import AmbiguousWrite, FakePlatform, RateLimited
 from ctn.infra.health import Health
 from ctn.infra.llm import FakeLLM, game_day_start, ledger, load_env, team_llms
 from ctn.infra.news import News, NewsStore
-from ctn.infra.real_platform import AccountStore, MockLegitSocial, RealPlatform
+from ctn.infra.real_platform import WRITE_GAP, AccountStore, MockLegitSocial, RealPlatform
 from ctn.infra.state import StateStore
 from ctn.red.bot import JOURNALISTS, PRESS_WINDOW, Bot, Roster
 from ctn.red.rhythm import Rhythm, UniformPacer, npc_curve
@@ -441,7 +441,7 @@ def real_platform() -> RealPlatform:
     key = os.environ.get("CTN_TEAM_KEY")
     if not key:
         raise SystemExit("set CTN_TEAM_KEY (the team code from the accounts portal) in .env")
-    return RealPlatform(os.environ.get("CTN_API_URL") or API_URL, team_key=key)
+    return RealPlatform(os.environ.get("CTN_API_URL") or API_URL, team_key=key, write_gap=WRITE_GAP)
 
 
 async def live(limit: Optional[int], stagger_hours: float, opens: datetime = GAME_OPENS) -> None:
