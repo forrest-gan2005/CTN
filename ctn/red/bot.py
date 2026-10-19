@@ -87,7 +87,8 @@ LEAN_GUIDE = {
     "yes": "They lean YES already. Agree briefly in your own words and, if it fits, say you'll see them at the vote on 2 November.",
     "team": ("They're on your side. Add something of your own they didn't say, so people reading see more than one "
              "voice; don't just agree, don't repeat their words, and don't open with their name or your own. One or "
-             "two short sentences, like a comment under a neighbour's post. Leave out what happened to you in 2021."),
+             "two short sentences, like a comment under a neighbour's post. Leave out what happened to you in 2021, "
+             "and concede nothing to the NO side here: a pile of replies that each grant a worry reads as doubt."),
 }
 # Told only to add "a short story or another reason", three in five teammates' replies under an anchor went back to
 # 2021 and one in seven opened with its writer's name: what each adds is drawn from these instead, by weight.
@@ -150,8 +151,8 @@ ANCHOR_LINES = {"persuade", "bridge"}
 CASE_SHAPES = {
     "refute": (2.0, "Name the worry people voting NO raise most, fairly and in a few words, then answer it with one "
                     "concrete reason."),
-    "plain": (2.0, "Make that one case only, plainly. Then admit honestly, in your own words, who the rule would keep "
-                   "out of where, and still back it."),
+    "plain": (2.0, "Make that one case only, plainly. Then name honestly, in your own words, who the rule would keep "
+                   "out of where, and answer that cost with one of the facts given above."),
     "values": (1.5, "Argue it from a value people voting NO hold dear (freedom, looking after their own, fairness to "
                     "those who can't be vaccinated) and show how the mandate serves that value."),
     "scene": (1.5, "Begin inside a small everyday moment from your week, then let it lead to your reason."),
@@ -161,6 +162,11 @@ CASE_SHAPES = {
 }
 CASE_OPENING = ("Don't open by introducing yourself (\"I'm ...\", \"... here\", \"As a ...\") or with anyone's "
                 "name.")
+# A post on the referendum that also hedges about the vaccine itself ("how long protection lasts is still open")
+# can move a reader's view of vaccination one way while their view of the mandate moves the other: scored as
+# favouring neither side. Citizens' general view of vaccination likely sits near the evidence already (Chuang et
+# al., NAACL Findings 2024); the referendum view is the one with room to move.
+CASE_FOCUS = "Keep to the referendum question; leave the vaccine's own unknowns out unless someone asks about them."
 QUESTION_SHAPES = {"refute", "scene", "story"}  # the rest end on their case
 OPENING_FREE = {"story"}  # the one shape that may open with who you are: some do, as people do, just not every one
 COVID_SHARE = 0.35  # of prompts that remind the writer what it did during covid: every one did, and 2021 was in most
@@ -170,7 +176,7 @@ ANCHOR_REST = timedelta(minutes=75)
 LIFT_TOPICS = ("anchor",)
 BOOST_WINDOW = timedelta(hours=2)
 BOOST_DELAY = timedelta(minutes=1)
-BOOST_LIMITS = {"like": 50, "repost": 40, "reply": 20}
+BOOST_LIMITS = {"like": 50, "repost": 40, "reply": 15}
 BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post still has places
 # Popular tags were all campaign accounts' on the opening night, a NO team's #keepkingstoniaopen first; the papers'
 # reporters write up what is popular here. The team carries the YES campaign's own words: on every anchor post, and
@@ -182,7 +188,13 @@ TAG_RE = re.compile(re.escape(TEAM_TAG), re.IGNORECASE)  # the code adds it; it 
 # phrase with one of them goes, however common the phrase is elsewhere (three of the first seven said "I'd rather
 # show a certificate").
 SIBLINGS_SHOWN = 10
-TEAM_REPLY_PROB = 0.85  # of an account's replies, the share that go to an anchor post while one has places
+# Of an account's replies, the share that go to an anchor post while one has places. At 0.85 the team's replies to
+# NO-leaning and undecided citizens fell from about ten an hour to one to five, and the hour's changes of mind
+# towards YES from seven to none while 38 favoured neither side (a reworded view, or one pulled both ways): a
+# post read by everyone in Trending mostly gets the already-YES to restate themselves. Dialogue moves people where
+# broadcast doesn't (Kalla & Broockman 2020; Hackenburg et al., Science 2025), and an RLHF model tends to come
+# round to whoever addresses it (Sharma et al., ICLR 2024), so more replies go to the citizens themselves.
+TEAM_REPLY_PROB = 0.45
 # Heat falls about 3 points an hour from the start, so an anchor's lift counts most in its first minutes (under S52
 # the first one had 12 of its 30 reposts after 20 minutes). While the newest anchor is under RUSH_WINDOW old, an
 # account that still owes it a like, a repost or a reply gives it that first, and looks round again within RUSH_WAIT
@@ -1050,7 +1062,8 @@ class Bot:
             parts.append(f"Write a new post about the referendum, along this line: {topic[1]}. A comparison is fine, "
                          "but make plain that you mean the referendum on proof of vaccination; nobody should have to guess.")
             shape = self.case_shape or _draw_shape()
-            parts.append(CASE_SHAPES[shape][1] if shape in OPENING_FREE else f"{CASE_SHAPES[shape][1]} {CASE_OPENING}")
+            opening = "" if shape in OPENING_FREE else f" {CASE_OPENING}"
+            parts.append(f"{CASE_SHAPES[shape][1]}{opening} {CASE_FOCUS}")
         elif topic[0] == "vaccine":
             parts.append(f"Write a new post about vaccination in your everyday life: {topic[1]}. Don't mention the "
                          "referendum or any mandate in this one, and don't give anyone medical advice.")
@@ -1816,6 +1829,7 @@ async def anchor_check() -> None:
             prompt = styled.llm.prompts[0]
             assert action.angle.startswith(f"{shape}: ") and styled.case_shape is None, action.angle
             assert guide in prompt and (CASE_OPENING in prompt) == (shape not in OPENING_FREE), prompt
+            assert CASE_FOCUS in prompt, "a case post keeps to the referendum"
             assert ("Open with who you are" in prompt) == (shape in OPENING_FREE), shape
             assert ("End with a genuine question" in prompt) == (shape in QUESTION_SHAPES), shape
     finally:
