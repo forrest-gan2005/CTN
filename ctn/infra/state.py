@@ -238,6 +238,24 @@ class StateStore:
             "AND content IS NOT NULL UNION ALL SELECT username, content FROM writes WHERE sent_at >= ? "
             "AND username != ? AND status IN ('sending', 'pending')", (since, exclude, since, exclude)).fetchall()
 
+    def acted_on(self, username: str, kind: str, post_id: int) -> bool:
+        """Whether this account has liked, reposted or replied to (`kind`) this post as far as history shows, or
+        has a reply to it that went out or may have; history alone survives a restore that loses the quota place."""
+        if self.db.execute("SELECT 1 FROM history WHERE username = ? AND type = ? AND post_id = ?",
+                           (username, kind, post_id)).fetchone():
+            return True
+        return kind == "reply" and self.db.execute(
+            "SELECT 1 FROM writes WHERE username = ? AND kind = 'reply' AND parent_id = ? "
+            "AND status NOT IN ('not_sent', 'not_found')", (username, post_id)).fetchone() is not None
+
+    def team_replies(self, post_id: int) -> list:
+        """Texts of the replies our accounts have made to this post, oldest first, counting ones still being sent
+        and ones that may be live."""
+        return [r[0] for r in self.db.execute(
+            "SELECT content, ts FROM history WHERE type = 'reply' AND post_id = ? AND content IS NOT NULL "
+            "UNION ALL SELECT content, sent_at FROM writes WHERE kind = 'reply' AND parent_id = ? "
+            "AND status IN ('sending', 'pending') ORDER BY 2", (post_id, post_id))]
+
     def team_posts(self, topics: tuple, since: str, exclude: str) -> list:
         """(username, post id, text) of the other accounts' published posts on these topics since UTC ISO time
         `since`, oldest first."""
@@ -693,4 +711,15 @@ if __name__ == "__main__":
         assert mix["unknown_now"] == {"npc": 1, "unknown": 1}
         before = again.reply_mix("2026-10-20T12:00:00+00:00")
         assert before["picked"]["npc-random"] == 1 and before["outcomes"]["open"] == 1
+    replies = StateStore(":memory:")
+    replies.record("ana", "2026-10-20T13:00:00+00:00", A("reply", post_id=77, content="first"))
+    sending = replies.begin_write("joe", "reply", 77, "second", "2026-10-20T13:01:00+00:00")
+    gone = replies.begin_write("kai", "reply", 77, "never went", "2026-10-20T13:02:00+00:00")
+    replies.end_write(gone, "not_sent")
+    replies.begin_write("kai", "reply", 78, "elsewhere", "2026-10-20T13:03:00+00:00")
+    assert replies.team_replies(77) == ["first", "second"], replies.team_replies(77)
+    replies.end_write(sending, "pending")
+    assert replies.team_replies(77) == ["first", "second"], "one that may be live still counts"
+    assert replies.acted_on("ana", "reply", 77) and replies.acted_on("joe", "reply", 77)
+    assert not replies.acted_on("kai", "reply", 77) and not replies.acted_on("ana", "like", 77)
     print("state ok")

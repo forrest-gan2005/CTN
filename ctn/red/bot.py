@@ -135,6 +135,11 @@ BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post sti
 # on half the replies lifting one and half the other referendum posts. Never the other side's tags.
 TEAM_TAG = "#ProtectKingstonia"
 TEAM_TAG_SHARE = {"anchor": 1.0, "team": 0.5, "issue": 0.5}
+TAG_RE = re.compile(re.escape(TEAM_TAG), re.IGNORECASE)  # the code adds it; it says nothing about the writer
+# The replies lifting an anchor sit side by side: the writer sees the ones already there, and a reply sharing a
+# phrase with one of them goes, however common the phrase is elsewhere (three of the first seven said "I'd rather
+# show a certificate").
+SIBLINGS_SHOWN = 10
 TEAM_REPLY_PROB = 0.85  # of an account's replies, the share that go to an anchor post while one has places
 
 REFUSAL_MARKERS = (
@@ -511,8 +516,11 @@ class Bot:
                 about = [t for t in self.profile(target["author"]) if t != target.get("content")][:3]
         sign = self._pick_sign_off(kind)
         gif = self.gifs is not None and self.gifs.ready() and random.random() < GIF_SHARE.get(kind, 0.0)
+        thread = target["id"] if kind == "reply" and topic[1] == "team" else None
+        siblings = self.store.team_replies(thread)[-SIBLINGS_SHOWN:] if thread is not None else None
         raw = await self.llm.generate(system, self._user_prompt(kind, target, topic, earlier, about, sign=sign,
-                                                                referendum=referendum, gif=gif, context=context))
+                                                                referendum=referendum, gif=gif, context=context,
+                                                                siblings=siblings))
         model = getattr(raw, "model", None) or getattr(self.llm, "name", None)  # a fallback model may have written it
         text, query = split_gif(raw)  # a GIF line goes even when none was asked for
         content = self._clean(text, CASE_MAX_LEN if case else MAX_LEN)
@@ -542,7 +550,7 @@ class Bot:
         argue = kind == "reply" and (referendum and topic[1] != "yes" or about_referendum(content))
         problem = await self._check(content, system,
                                     takes_side=kind == "post" and topic[0] in CASE_TOPICS or argue,
-                                    replying_to=target.get("content") if target else None)
+                                    replying_to=target.get("content") if target else None, thread=thread)
         if problem:
             self.rejected[problem] = self.rejected.get(problem, 0) + 1
             source = f" (replying to #{target['id']} by {target['author']})" if target else ""
@@ -613,7 +621,7 @@ class Bot:
         """(post, place) of a teammate's anchor post this account may answer, the place among its BOOST_LIMITS
         replies taken; or None."""
         for author, post_id, content in self._lift_posts(datetime.now(timezone.utc)):
-            if post_id in self.seen or not content:
+            if not content or self.store.acted_on(self.username, "reply", post_id):
                 continue
             hold = self.store.reserve(f"boost:reply:{post_id}:", self.username, BOOST_LIMITS["reply"])
             if hold is not None:
@@ -622,9 +630,11 @@ class Bot:
 
     def _boost(self, kind: str) -> Optional[Action]:
         """Like or repost the newest teammate's anchor post that still has fewer than BOOST_LIMITS of ours; the
-        place is taken with nothing awaited, so teammates acting at once can't pass the limit."""
+        place is taken with nothing awaited, so teammates acting at once can't pass the limit. Each kind has its own
+        places, one an account: one that answered an anchor may like and repost it too, as people do (live, the
+        first anchor's likes stopped at 20 of 40 once the accounts that had replied or reposted were left)."""
         for author, post_id, _ in self._lift_posts(datetime.now(timezone.utc)):
-            if post_id in self.seen:
+            if self.store.acted_on(self.username, kind, post_id):
                 continue
             hold = self.store.reserve(f"boost:{kind}:{post_id}:", self.username, BOOST_LIMITS[kind])
             if hold is not None:
@@ -798,10 +808,11 @@ class Bot:
 
     def _user_prompt(self, kind: str, target: Optional[dict], topic: tuple, earlier: Optional[str] = None,
                      about: Optional[list] = None, sign=PICK, referendum: Optional[bool] = None,
-                     gif: bool = False, context: Optional[str] = None) -> str:
+                     gif: bool = False, context: Optional[str] = None, siblings: Optional[list] = None) -> str:
         """`earlier` is our own post that `target` replies to; `about` is what the author posted lately; `sign`
         the sign-off this post may end with; `referendum` whether a reply takes up the referendum (by default,
-        whether the post names it); `context` the post a journalist's `target` answers."""
+        whether the post names it); `context` the post a journalist's `target` answers; `siblings` the replies
+        already under `target` that this one must not echo."""
         recent = [without_gifs(a.content) for _, a in self.history if a.content][-5:]  # links aren't for copying
         parts = []
 
@@ -849,6 +860,10 @@ class Bot:
                 listed = "\n".join(wrap_external(target["author"], t) for t in about)
                 parts.append("Other things they posted lately, so you understand who they are "
                              f"(don't quote them or mention that you looked):\n{listed}")
+            if siblings:
+                listed = "\n".join(f"- {TAG_RE.sub('', without_gifs(t)).strip()[:200]}" for t in siblings)
+                parts.append("Other people have already replied to it. Say something none of them said, from a "
+                             "different part of life, and use none of their words or phrases:\n" + listed)
             parts.append("Write a reply to that post, speaking to them directly; never mention their username or "
                          "talk about them in the third person. Don't open with stock phrases like \"I feel you\", "
                          "\"I get where you're coming from\", \"You're worried about\" or \"I see your point\"; start with "
@@ -941,7 +956,7 @@ class Bot:
         return text
 
     async def _check(self, text: str, system: str, takes_side: bool = False,
-                     replying_to: Optional[str] = None) -> Optional[str]:
+                     replying_to: Optional[str] = None, thread: Optional[int] = None) -> Optional[str]:
         """Last gate before publishing: reason to drop the post, or None. With `takes_side`, a post or reply that
         doesn't plainly back the mandate is dropped too: a hint the reader has to decode moves nobody. A reply's side
         is judged next to `replying_to`, the post it answers."""
@@ -952,6 +967,10 @@ class Bot:
         shared = self._shared_phrase(text)
         if shared:
             log.info("%s: %r is already in %d teammates' posts", self.username, shared, SHARED_LIMIT)
+            return "shared phrase"
+        shared = self._sibling_phrase(text, thread) if thread is not None else None
+        if shared:
+            log.info("%s: %r is already in a teammate's reply to #%s", self.username, shared, thread)
             return "shared phrase"
         problem = output_problem(text, system)
         if problem:
@@ -971,17 +990,26 @@ class Bot:
         """A phrase at least SHARED_LIMIT other accounts of ours used this week, setting names aside: the same
         turn of phrase across accounts is what links them, even when the posts say different things. One that
         COMMON_ACCOUNTS accounts outside the team (competitors aside) used too links nobody."""
-        mine = fresh_phrases(text, self.world)
+        mine = fresh_phrases(TAG_RE.sub(" ", text), self.world)
         if not mine:
             return None
         users = {}
         since = datetime.now(timezone.utc) - SHARED_WINDOW
         for user, content in self.store.team_texts(_iso(since), self.username):
-            for phrase in mine & phrases(content):
+            for phrase in mine & phrases(TAG_RE.sub(" ", content)):
                 users.setdefault(phrase, set()).add(user)
         shared = [phrase for phrase, who in users.items() if len(who) >= SHARED_LIMIT]
         rivals = self._rivals() if shared and self.said is not None else set()
         return next((phrase for phrase in shared if not self._common(phrase, since, rivals)), None)
+
+    def _sibling_phrase(self, text: str, post_id: int) -> Optional[str]:
+        """A phrase this reply shares with one of ours already under the same post."""
+        mine = fresh_phrases(TAG_RE.sub(" ", text), self.world)
+        for other in self.store.team_replies(post_id):
+            shared = mine & phrases(TAG_RE.sub(" ", other))
+            if shared:
+                return min(shared)
+        return None
 
     def _common(self, phrase: str, since: datetime, rivals: set) -> bool:
         if self.said is None:
@@ -1049,6 +1077,10 @@ class Bot:
             shared = self._shared_phrase(action.content)
             if shared:
                 self._drop(action, f"{shared!r} is already in {SHARED_LIMIT} teammates' posts")
+                return None
+            shared = self._sibling_phrase(action.content, action.post_id) if action.angle == "lean:team" else None
+            if shared:
+                self._drop(action, f"{shared!r} is already in a teammate's reply to #{action.post_id}")
                 return None
         sent_at = _iso(datetime.now(timezone.utc))
         write = None
@@ -1421,8 +1453,9 @@ async def press_check() -> None:
 
 async def boost_check() -> None:
     """Teammates like an anchor post once it is a minute old and until it is two hours old, BOOST_LIMITS of them at
-    most, the newest anchor first, and repost it; never another kind of post, never their own, never one they
-    already liked. BOOST_LIMITS of them answer it too, adding their own story, the post not claimed by any one."""
+    most, the newest anchor first, and repost it; never another kind of post, never their own, never twice the same
+    way, but one that liked it may still repost it. BOOST_LIMITS of them answer it too, adding their own story, the
+    post not claimed by any one."""
     store = StateStore(":memory:")
     now = datetime.now(timezone.utc)
     for user, made_id, topic, minutes in (("rosa_dives", 500, "anchor", 10), ("joe_tama", 501, "issue", 5),
@@ -1448,7 +1481,11 @@ async def boost_check() -> None:
                  Action("post", content="x", topic_kind="anchor", made_id=700))
     seen = Bot(helpers[0], FakePlatform(), FakeLLM(0, 0), load_world(), store=fresh)
     seen.seen.add(700)
+    assert fresh.reserve("boost:like:700:", seen.username, BOOST_LIMITS["like"])
     assert seen._boost("like") is None, "not one it already liked"
+    repost = seen._boost("repost")
+    assert repost is not None and repost.post_id == 700, "one it liked or answered it may still repost"
+    fresh.release(repost.hold)
     global BOOST_PROB
     saved = dict(LINE_ACTIONS["amplifier"]), BOOST_PROB
     try:
@@ -1504,6 +1541,13 @@ async def boost_check() -> None:
             BOOST_LIMITS["reply"]
     finally:
         ACTION_WEIGHTS, TEAM_REPLY_PROB = saved_reply
+    restored = StateStore(":memory:")  # a backup put back: the reply is in history, its place is gone
+    restored.record("rosa_dives", _iso(now - timedelta(minutes=20)),
+                    Action("post", content="Dive boats sat idle in 2021; voting yes.", topic_kind="anchor", made_id=950))
+    restored.record(writers[0]["username"], _iso(now - timedelta(minutes=5)), Action("reply", post_id=950, content="x"))
+    again = Bot(writers[0], FakePlatform(), FakeLLM(0, 0), load_world(), store=restored)
+    assert again._team_reply_target() is None, "an anchor it already answered, whatever the places say"
+    assert again._boost("like").post_id == 950, "but it may still like it"
     print("boost ok")
 
 
@@ -1554,6 +1598,58 @@ async def anchor_check() -> None:
     finally:
         ACTION_WEIGHTS = saved
     print("anchors ok")
+
+
+async def sibling_check() -> None:
+    """A reply lifting an anchor sees the replies already under it and is dropped if it shares a phrase with one,
+    however common the phrase is elsewhere; the team's tag doesn't count; one new to the thread goes; and a sibling
+    sent while it was being written stops it at the last check."""
+    class Says:
+        name = "says"
+
+        def __init__(self, text: str) -> None:
+            self.text, self.prompts = text, []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            return self.text
+
+    store = StateStore(":memory:")
+    now = datetime.now(timezone.utc)
+    store.record("rosa_dives", _iso(now - timedelta(minutes=10)),
+                 Action("post", content="Dive boats sat idle in 2021; I'm voting yes on the mandate.",
+                        topic_kind="anchor", made_id=900))
+    store.record("joe_tama", _iso(now - timedelta(minutes=5)),
+                 Action("reply", post_id=900, content="Cafe shut for five months, so I'd rather show a certificate "
+                        f"than close again. Count me in {TEAM_TAG}", angle="lean:team", target_author="rosa_dives"))
+    everywhere = lambda words, since: [(f"local_{i}", "I'd rather show a certificate than close") for i in range(10)]
+    writers = [p for p in load_personas() if p["line"] == "background"][:4]
+    target = {"id": 900, "author": "rosa_dives", "content": "Dive boats sat idle in 2021; I'm voting yes.",
+              "parent_id": None}
+
+    def bot(persona: dict, text: str) -> Bot:
+        return Bot(persona, FakePlatform(), Says(text), load_world(), store=store, said=everywhere)
+
+    echo = bot(writers[0], "Same at the bakery, I'd rather show a certificate than lose the summer.")
+    assert await echo._compose("reply", ("feed", "team"), target) is None and echo.rejected == {"shared phrase": 1}
+    prompt = echo.llm.prompts[0]
+    assert "Cafe shut for five months" in prompt and TEAM_TAG not in prompt, prompt
+    tagged = bot(writers[1], f"My nan's ward was full in 2021. Count me in {TEAM_TAG}")
+    assert await tagged._compose("reply", ("feed", "team"), target) is not None, "the tag is no shared phrase"
+    late = bot(writers[2], "Our street went quiet for months in 2021, and my shop with it.")
+    action = await late._compose("reply", ("feed", "team"), target)
+    assert action is not None and action.angle == "lean:team"
+    store.record("ana_moala", _iso(now), Action("reply", post_id=900, content="Our street went quiet for months too.",
+                                                angle="lean:team", target_author="rosa_dives"))
+
+    async def chosen(_obs: dict) -> Action:
+        return action
+    late.think = chosen
+    assert await late.step() is None and not late.platform.posts, "a sibling sent meanwhile stops it"
+    print("siblings ok")
 
 
 async def case_post_check() -> None:
@@ -2215,6 +2311,7 @@ if __name__ == "__main__":
     asyncio.run(press_quota_check())
     asyncio.run(boost_check())
     asyncio.run(anchor_check())
+    asyncio.run(sibling_check())
     asyncio.run(case_post_check())
     asyncio.run(quota_recovery_check())
     asyncio.run(lukewarm_check())

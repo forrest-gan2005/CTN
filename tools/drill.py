@@ -312,13 +312,18 @@ async def verify(stage: Stage, tmp: Path, port: int, marks: dict) -> list:
     ours = [p for p in posts if p["author"]["username"] in own and not p.get("repost_of")]  # a repost is a post now
     when = lambda p: datetime.fromisoformat(p["created_at"]).timestamp() - marks["t0_wall"]
     texts = Counter(p["content"] for p in ours)
-    replied = Counter(p["parent_id"] for p in ours if p["parent_id"] is not None)
+    # One of our accounts per post, except the team's own anchor posts, which teammates lift: one reply each.
+    mine = {p["id"] for p in ours}
+    replied = Counter(p["parent_id"] for p in ours if p["parent_id"] is not None and p["parent_id"] not in mine)
+    lifted = Counter((p["parent_id"], p["author"]["username"]) for p in ours if p["parent_id"] in mine)
     for text in (t for t, n in texts.items() if n > 1):
         copies = [(p["id"], p["author"]["username"], p["parent_id"], round(when(p), 1)) for p in ours
                   if p["content"] == text]
         failures.append(f"posted twice (id, author, parent, seconds): {copies} {text!r}")
     if any(n > 1 for n in replied.values()):
         failures.append(f"answered twice: {[pid for pid, n in replied.items() if n > 1]}")
+    if any(n > 1 for n in lifted.values()):
+        failures.append(f"one account answered our post twice: {[k for k, n in lifted.items() if n > 1]}")
     tracked = [r[0] for r in state.db.execute("SELECT made_id FROM history WHERE made_id IS NOT NULL")]
     untracked = {p["id"] for p in ours} - set(tracked)
     if untracked:
