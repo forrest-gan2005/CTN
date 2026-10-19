@@ -8,14 +8,15 @@ import json
 import logging
 import re
 import sqlite3
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import httpx
 
 from ctn import paths
-from ctn.infra.real_platform import iso
 
 log = logging.getLogger("news")
 
@@ -27,10 +28,27 @@ BRIEF_DAYS = 3  # how far back the writers' news brief reaches
 BRIEF_MAX = 6  # articles in it, newest first
 SETTLE = timedelta(hours=6)  # an article is fetched again on every refresh until this long after it came out
 PAUSE = 1.0  # seconds between article fetches
+SYDNEY = ZoneInfo("Australia/Sydney")
+FRACTION_RE = re.compile(r"\.\d+")
 
 
 def _at(value: str) -> datetime:
     return datetime.fromisoformat(value)
+
+
+def published(value) -> Optional[str]:
+    """UTC ISO of when an article came out. The papers give Sydney wall-clock time marked "Z": the story listed
+    for 18:00Z on 19 October was new at 18:01 Sydney time, when the game opened, and an opinion piece listed for
+    14:22Z was live at 03:24 UTC, two minutes after its journalist posted on the platform. An explicit offset is
+    taken as given."""
+    if not isinstance(value, str) or not value:
+        return None
+    text = FRACTION_RE.sub("", value[:-1] if value.endswith("Z") else value)
+    try:
+        when = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return (when if when.tzinfo else when.replace(tzinfo=SYDNEY)).astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 class NewsStore:
@@ -40,6 +58,20 @@ class NewsStore:
         self.db = sqlite3.connect(str(path))
         self.db.execute("CREATE TABLE IF NOT EXISTS articles (url TEXT PRIMARY KEY, site TEXT NOT NULL, "
                         "title TEXT NOT NULL, summary TEXT, published_at TEXT, fetched_at TEXT NOT NULL, raw TEXT)")
+        self._retime()
+
+    def _retime(self) -> None:
+        """Articles stored when their time was read as UTC get the right one, from the page as fetched."""
+        fixed = []
+        for url, stored, raw in self.db.execute("SELECT url, published_at, raw FROM articles WHERE raw IS NOT NULL"):
+            try:
+                when = published(json.loads(raw).get("published_at"))
+            except (ValueError, AttributeError):
+                continue
+            if when != stored:
+                fixed.append((when, url))
+        with self.db:
+            self.db.executemany("UPDATE articles SET published_at = ? WHERE url = ?", fixed)
 
     def known(self, url: str) -> bool:
         return self.db.execute("SELECT 1 FROM articles WHERE url = ?", (url,)).fetchone() is not None
@@ -49,7 +81,7 @@ class NewsStore:
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO articles VALUES (?, ?, ?, ?, ?, ?, ?)",
                             (article["url"], site, article["title"], article.get("summary"),
-                             iso(article.get("published_at")), fetched_at.isoformat(timespec="seconds"),
+                             published(article.get("published_at")), fetched_at.isoformat(timespec="seconds"),
                              json.dumps(article, ensure_ascii=False)))
 
     def remove(self, url: str) -> None:
@@ -133,8 +165,8 @@ class News:
         rows = self.store.recent(now or self.clock())
         if not rows:
             return ""
-        listed = "\n".join(f"- {SITES.get(site, site)}, {published[:10]}: {title}. {summary or ''}".rstrip()
-                           for site, title, summary, published in rows)
+        listed = "\n".join(f"- {SITES.get(site, site)}, {_at(when).astimezone(SYDNEY):%Y-%m-%d}: {title}. "
+                           f"{summary or ''}".rstrip() for site, title, summary, when in rows)
         return ("In the local papers lately (people here may have read these; bring one up only when it fits, as "
                 "something you read, in your own words, adding nothing the story doesn't say):\n" + listed)
 
@@ -165,8 +197,14 @@ async def _demo() -> None:
             return httpx.Response(200, json={"article": {**articles[path[:-5]], "url": path[:-5]}})
         return httpx.Response(404)
 
-    def at(day: int, hour: int) -> datetime:
-        return datetime(2026, 10, day, hour, tzinfo=timezone.utc)
+    def at(day: int, hour: int) -> datetime:  # Sydney wall-clock time, as the papers give it, in UTC as we keep it
+        return datetime(2026, 10, day, hour, tzinfo=SYDNEY).astimezone(timezone.utc)
+
+    assert published("2026-10-19T18:00:00Z") == "2026-10-19T07:00:00+00:00"
+    assert published("2026-10-19T14:22:00.5Z") == "2026-10-19T03:22:00+00:00"
+    assert published("2026-10-19T07:00:00+00:00") == "2026-10-19T07:00:00+00:00", "an explicit offset stands"
+    assert published("2026-11-02T12:00:00Z") == "2026-11-02T01:00:00+00:00"
+    assert published(None) is None and published("") is None and published("soon") is None
 
     def jsons() -> int:
         return sum(c.endswith(".json") for c in calls)
@@ -230,6 +268,21 @@ async def _demo() -> None:
     log.removeHandler(handler_)
     assert any("front page" in r.getMessage() for r in seen), "a front page with no links goes unremarked"
     await news.aclose()
+
+    with tempfile.TemporaryDirectory() as tmp:  # stored when the papers' times were read as UTC
+        old = NewsStore(f"{tmp}/news.db")
+        old.add("daily-kingstonia", {"url": "/daily-kingstonia/articles/q", "title": "Tech jobs",
+                                     "published_at": "2026-10-19T18:00:00Z"}, at(19, 18))
+        with old.db:
+            old.db.execute("UPDATE articles SET published_at = '2026-10-19T18:00:00+00:00'")
+        old.db.close()
+        store = NewsStore(f"{tmp}/news.db")
+        assert [r[0] for r in store.db.execute("SELECT published_at FROM articles")] == ["2026-10-19T07:00:00+00:00"]
+        brief = News(store).brief(at(19, 19))
+        assert "Daily Kingstonia, 2026-10-19: Tech jobs" in brief, brief
+        store.add("kingstonia-herald", {"url": "/kingstonia-herald/articles/m", "title": "Morning edition",
+                                        "published_at": "2026-10-20T09:00:00Z"}, at(20, 9))
+        assert "Kingstonia Herald, 2026-10-20: Morning edition" in News(store).brief(at(20, 10)), "Sydney's date"
     print("news ok")
 
 
