@@ -172,9 +172,10 @@ CASE_OPENING = ("Don't open by introducing yourself (\"I'm ...\", \"... here\", 
 CASE_FOCUS = ("Keep to the referendum question; leave the vaccine's own unknowns out unless the worry you answer is "
               "about the vaccine itself.")
 QUESTION_SHAPES = {"refute", "scene", "story"}  # the rest end on their case
-# Off since 10/20 10:15: the first hour refutations named the worry citizens raised most ("that it should be a
-# personal choice") brought the night's first two changes of mind away from YES (-212 in all), maybe the worry
-# restated doing more than the answer; off for an hour to see whether they stop.
+# Off since 10/20 10:25: the first hour refutations named the worry citizens raised most ("that it should be a
+# personal choice") brought the night's first two primary changes of mind away from YES (-212 in all, with four
+# lesser away hits), maybe the worry restated doing more than the answer, though other changes ran that hour too;
+# off for an hour to see whether they stop.
 ANSWER_WORRIES = False
 OPENING_FREE = {"story"}  # the one shape that may open with who you are: some do, as people do, just not every one
 COVID_SHARE = 0.35  # of prompts that remind the writer what it did during covid: every one did, and 2021 was in most
