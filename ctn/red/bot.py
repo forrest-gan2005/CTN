@@ -87,16 +87,15 @@ LEAN_GUIDE = {
     "yes": "They lean YES already. Agree briefly in your own words and, if it fits, say you'll see them at the vote on 2 November.",
     "team": ("They're on your side. Add something of your own they didn't say, so people reading see more than one "
              "voice; don't just agree, don't repeat their words and don't open with their name. One or two short "
-             "sentences, like a comment under a neighbour's post. Leave 2021 and the lockdowns out of this one."),
+             "sentences, like a comment under a neighbour's post. Leave out what happened to you in 2021."),
 }
 # Told only to add "a short story or another reason", three in five teammates' replies under an anchor went back to
 # 2021 and one in seven opened with its writer's name: what each adds is drawn from these instead, by weight.
 TEAM_SHAPES = (
-    ("One more reason for YES they didn't give, in a sentence of your own; no story this time.", 2.0),
-    ("The one thing in their post that matters most to you, and why, in a few words.", 1.5),
-    ("One fact about the referendum from what you know that backs them up, in your own words.", 1.0),
-    ("One genuine follow-up question to them that people reading would want answered.", 1.0),
-    ("A small moment from your own week that backs them up.", 1.5),
+    ("Another reason for YES they didn't give, as a sentence of your own; no story this time.", 2.0),
+    ("Say which point in their post matters most to you and why, briefly.", 1.5),
+    ("Back them up with one of the facts given above, in your own words.", 1.0),
+    ("A small moment from your own week that shows why you're with them on YES.", 1.5),
 )
 DEFAULT_GUIDE = ("Respond to their actual point. If they lean NO, acknowledge their worry in a few words, then give "
                  "your own reason for voting YES.")
@@ -118,6 +117,7 @@ THREAD_DEPTH_LIMIT = 8
 # bridges answer a journalist's referendum post first, each at most once a day, and now and then point one to a
 # story with an @mention: one pitch per journalist a day for the whole team.
 JOURNALISTS = load_journalists()
+PERSONA_NAMES = {p["username"]: p["name"] for p in load_personas(status=None)}  # a teammate's name opens no reply
 PRESS_LINES = {"persuade", "bridge"}
 PRESS_WINDOW = timedelta(hours=6)  # a journalist's post this old is still worth answering
 PITCH_PROB = 0.2  # share of these accounts' new posts that go to a journalist still due a pitch today
@@ -142,23 +142,20 @@ ANCHOR_LINES = {"persuade", "bridge"}
 # persuasion research: answering the other side's case beats ignoring it, and naming it without answering is worse
 # than either (O'Keefe 1999, refutational two-sided messages); an argument in the values of the people you want to
 # move works better than one in your own (Feinberg & Willer 2015, moral reframing); a convert's story moves the
-# hesitant (Lyons et al. 2019; Conlin et al. on COVID vaccines); and a short story, not argument alone, is what
-# changed minds in conversation (Kalla & Broockman 2020). "plain" is the leader's: no introduction, one case, its
-# cost named, still YES (per view their anchors drew outside likes at about our rate, 0.26 against 0.28). The cost
-# is put in the setting's own words, which the shared-phrase check doesn't count against us.
+# hesitant (Lyons et al. 2019; Conlin et al. on COVID vaccines), though an account inventing a change of mind it
+# never had is a tell, so that one isn't used; and a short story, not argument alone, is what changed minds in
+# conversation (Kalla & Broockman 2020). "plain" is the leader's: no introduction, one case, its cost named, still
+# YES (per view their anchors drew outside likes at about our rate, 0.26 against 0.28). Each is an instruction, not
+# a sentence to copy: a phrase in it the writer echoes would be refused once two teammates had used it, and one
+# from the setting as a prompt leak.
 CASE_SHAPES = {
-    "refute": (2.0, "Put the strongest argument for NO you've heard in one fair sentence of your own, then answer it "
-                    "with one concrete reason. Answer it; don't just mention it."),
-    "plain": (2.0, "Make that one case only, in plain everyday words. Then name its real cost honestly, in your own "
-                   "words (unvaccinated people would stay out of designated public spaces), and say why you still "
-                   "land on YES."),
-    "values": (1.5, "Make the case from something people voting NO care about too: being free to keep working and "
-                    "see family, looking after your own island, or fairness to people who can't be vaccinated. Show "
-                    "how YES serves it."),
-    "convert": (1.0, "Say how you went from unsure about this to YES: what you thought at first and the one thing "
-                     "that changed your mind. Keep it honest and short."),
-    "scene": (1.5, "Start in the middle of a small everyday moment from your week, then let it lead to why you're "
-                   "voting YES."),
+    "refute": (2.0, "Name the worry people voting NO raise most, fairly and in a few words, then answer it with one "
+                    "concrete reason."),
+    "plain": (2.0, "Make that one case only, plainly. Then admit honestly, in your own words, who the rule would keep "
+                   "out of where, and still come down for the mandate."),
+    "values": (1.5, "Argue it from a value people voting NO hold dear (freedom, looking after their own, fairness to "
+                    "those who can't be vaccinated) and show how the mandate serves that value."),
+    "scene": (1.5, "Begin inside a small everyday moment from your week, then let it lead to your reason."),
     "story": (0.5, "Say what's at stake for you (your work, your family, your street), give the other side's worry "
                    "its due in a few words of your own (not \"I get the worry\"), then say plainly why you're voting "
                    "YES."),
@@ -167,6 +164,11 @@ CASE_OPENING = ("Don't open by introducing yourself (\"I'm ...\", \"... here\", 
                 "name.")
 QUESTION_SHAPES = {"refute", "scene", "story"}  # the rest end on their case
 COVID_SHARE = 0.35  # of prompts that remind the writer what it did during covid: every one did, and 2021 was in most
+NO_COVID = "Don't describe what you did during covid."  # when it isn't reminded, so as not to make it up
+# The writer mirrors "You are <name>, <age>..." and opens with it whatever it is told; a case post or a teammate's
+# reply that still does ("I'm Mere, ...", "Sam, 41, ...", or its own or the anchor writer's first name, as in "Greg
+# here" or "Greg, ...") is dropped.
+INTRODUCTION_RE = re.compile(r"^\W*([Ii]'?m [A-Z][a-z]+\b|[A-Z][a-z]+, \d{1,2}\b)")
 ANCHOR_GAP = timedelta(minutes=30)
 ANCHOR_REST = timedelta(minutes=75)
 LIFT_TOPICS = ("anchor",)
@@ -289,6 +291,12 @@ def topic_mix(line: str, day: date) -> dict:
     if line == "mobilise" and any(0 <= (poll - day).days <= RUNUP_DAYS for poll in POLL_DAYS):
         return RUNUP_MIX
     return TOPIC_MIX[line]
+
+
+def _draw_shape() -> str:
+    """A case post's shape, by CASE_SHAPES weight."""
+    shapes = list(CASE_SHAPES)
+    return random.choices(shapes, weights=[CASE_SHAPES[k][0] for k in shapes])[0]
 
 
 def _iso(dt: datetime) -> str:
@@ -571,12 +579,11 @@ class Bot:
         post takes one of CASE_SHAPES, named at the front of its angle."""
         if kind != "post" or topic[0] not in ("issue", "anchor"):
             return await self._write(kind, topic, target, context, referendum)
-        shapes = list(CASE_SHAPES)
-        self.case_shape = random.choices(shapes, weights=[CASE_SHAPES[k][0] for k in shapes])[0]
+        shape = self.case_shape = _draw_shape()
         try:
             action = await self._write(kind, topic, target, context, referendum)
         finally:
-            shape, self.case_shape = self.case_shape, None
+            self.case_shape = None
         if action is not None:
             action.angle = f"{shape}: {action.angle or ''}"
         return action
@@ -640,6 +647,11 @@ class Bot:
         # along does no harm, unless the reply itself takes the referendum up: one to a post that never named it
         # still echoed the NO side ("the venues list ... still hasn't been published").
         argue = kind == "reply" and (referendum and topic[1] != "yes" or about_referendum(content))
+        if (kind == "post" and topic[0] in ("issue", "anchor") or thread is not None) and \
+                self._introduces(content, target["author"] if thread is not None else None):
+            self.rejected["introduction"] = self.rejected.get("introduction", 0) + 1
+            log.warning("%s rejected introduction: %r", self.username, content)
+            return None
         problem = await self._check(content, system,
                                     takes_side=kind == "post" and topic[0] in CASE_TOPICS or argue,
                                     replying_to=target.get("content") if target else None, thread=thread)
@@ -928,7 +940,7 @@ class Bot:
                    f"How you write:\n{habits}\n\n")
             own_words = " Say things in your own words; don't repeat sentences from your story."
         else:
-            covid = f"During covid you {p['covid']}.\n" if random.random() < COVID_SHARE else ""
+            covid = f"During covid you {p['covid']}.\n" if random.random() < COVID_SHARE else f"{NO_COVID}\n"
             who = (f"You are {p['name']}, {p['age']}, from {p['home']}. You {p['job']}.\n{covid}"
                    f"{LINE_BRIEF[self.line].format(why=p['why_yes'])}\n"
                    f"Other things you think: {'; '.join(p['views'])}.\n"
@@ -955,6 +967,14 @@ class Bot:
     def _pick_sign_off(self, kind: str) -> Optional[str]:
         signoffs = self._sign_offs()
         return random.choice(signoffs) if kind == "post" and signoffs and random.random() < SIGN_OFF_PROB else None
+
+    def _introduces(self, text: str, addressee: Optional[str]) -> bool:
+        """Whether `text` opens by introducing its writer ("I'm Mere", "Sam, 41"), or with its writer's or
+        `addressee`'s (a teammate's) first name."""
+        text = plain(text)
+        names = [(PERSONA_NAMES.get(u) or "").split(" ")[0] for u in (self.username, addressee) if u]
+        return bool(INTRODUCTION_RE.match(text)) or any(
+            n and re.match(rf"\W*{re.escape(n)}\b", text) is not None for n in names)
 
     def _user_prompt(self, kind: str, target: Optional[dict], topic: tuple, earlier: Optional[str] = None,
                      about: Optional[list] = None, sign=PICK, referendum: Optional[bool] = None,
@@ -1046,7 +1066,7 @@ class Bot:
         elif topic[0] in ("issue", "anchor"):
             parts.append(f"Write a new post about the referendum, along this line: {topic[1]}. A comparison is fine, "
                          "but make plain that you mean the referendum on proof of vaccination; nobody should have to guess.")
-            parts.append(f"{CASE_SHAPES[self.case_shape][1]} {CASE_OPENING}")
+            parts.append(f"{CASE_SHAPES[self.case_shape or _draw_shape()][1]} {CASE_OPENING}")
         elif topic[0] == "vaccine":
             parts.append(f"Write a new post about vaccination in your everyday life: {topic[1]}. Don't mention the "
                          "referendum or any mandate in this one, and don't give anyone medical advice.")
@@ -1796,6 +1816,7 @@ async def anchor_check() -> None:
     saved = CASE_SHAPES, QUESTION_PROB
     try:
         for shape, (weight, guide) in saved[0].items():
+            assert not copies(guide, load_world()), f"{shape}: a sentence the setting has, which a post may not copy"
             CASE_SHAPES, QUESTION_PROB = {shape: (weight, guide)}, 1.0
             styled = Bot(writers[0], FakePlatform(), Noting(case), load_world(), store=StateStore(":memory:"))
             action = await styled._anchor()
@@ -1805,6 +1826,10 @@ async def anchor_check() -> None:
             assert ("End with a genuine question" in prompt) == (shape in QUESTION_SHAPES), shape
     finally:
         CASE_SHAPES, QUESTION_PROB = saved
+    first = PERSONA_NAMES[writers[0]["username"]].split(" ")[0]
+    for opening in (f"I'm {first}, and", f"{first} here, and", f"{first}, 44, and"):
+        intro = Bot(writers[0], FakePlatform(), Noting(f"{opening} {case}"), load_world(), store=StateStore(":memory:"))
+        assert await intro._anchor() is None and intro.rejected == {"introduction": 1}, (opening, intro.rejected)
     daily = Bot(writers[0], FakePlatform(), Noting("Ferry was late again."), load_world(), store=StateStore(":memory:"))
     action = await daily._compose("post", ("daily", "the ferry"))
     assert action.angle == "the ferry" and CASE_OPENING not in daily.llm.prompts[0], "an everyday post takes no shape"

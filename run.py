@@ -1184,7 +1184,16 @@ def persona_story_check() -> None:
     plain_bot = Bot(by["rosa_dives"], FakePlatform(), FakeLLM(0, 0), load_world(), store=state)
     system = key._system_prompt([], False)
     assert "the biscuit" in system and "never a new relative, job or past event" in system and "During covid" not in system
-    assert "During covid you" in plain_bot._system_prompt([], False) and "Your life" not in plain_bot._system_prompt([], False)
+    saved_covid = bot_module.COVID_SHARE
+    try:
+        bot_module.COVID_SHARE = 1.0
+        reminded = plain_bot._system_prompt([], False)
+        assert "During covid you" in reminded and "Your life" not in reminded and bot_module.NO_COVID not in reminded
+        bot_module.COVID_SHARE = 0.0
+        unreminded = plain_bot._system_prompt([], False)
+        assert "During covid you" not in unreminded and bot_module.NO_COVID in unreminded, "not reminded, not made up"
+    finally:
+        bot_module.COVID_SHARE = saved_covid
     assert "Sign-offs" not in system, "sign-offs are handed out post by post, not listed"
     assert f"{by['jordan_wake']['age']} (born in {datetime.now(timezone.utc).year - by['jordan_wake']['age']})" in system
 
