@@ -56,6 +56,7 @@ TARGET_LEANS = {"persuade": ("undecided", "no"), "bridge": ("no", "undecided"), 
 # Share of replies that go to posts on the referendum or vaccines when the feed has any: chat about someone's rabbit
 # earns a like and moves no one. The rest keeps the accounts talking like people.
 TOPICAL_REPLY_PROB = 0.9
+CITIZEN_REDRAFTS = 1  # more drafts of a reply to a citizen when a shared phrase sank the first
 LEAN_CHECKS = 3  # citizens profiled per reply decision; each can cost a few LLM calls
 LEAN_TTL = timedelta(hours=12)
 HASHTAG_PROB = 0.3
@@ -80,8 +81,8 @@ LINE_BRIEF = {
 }
 LEAN_GUIDE = {
     "no": ("They seem to lean NO. Don't argue or lecture: show in your own words that you understand the worry they "
-           "actually raised, share a short bit of your own story or ask them a genuine question about theirs, and say "
-           "what tipped you towards YES. Answer their specific reason, not a generic one."),
+           "actually raised, share a short bit of your own story or ask them a genuine question about theirs, and give "
+           "your own reason for YES. Answer their specific reason, not a generic one."),
     "undecided": ("They seem undecided. Give one concrete reason from your own life that speaks to what they care "
                   "about: the benefit to them first, then to everyone."),
     "yes": "They lean YES already. Agree briefly in your own words and, if it fits, say you'll see them at the vote on 2 November.",
@@ -358,6 +359,8 @@ class Bot:
         self.seen = self.store.load_seen(self.username)
         self.rushed = set()  # (anchor post id, kind) this process has tried in a rush
         self.case_shape = None  # the CASE_SHAPES entry the case post being written takes
+        self.last_shared = None  # the phrase that sank the last draft, if one did
+        self.avoid = []  # phrases the draft being written must not use
         self.followed = self.store.load_followed(self.username)
         self.history = [(row[0], Action(*row[1:])) for row in self.store.load_history(self.username)]
 
@@ -597,6 +600,8 @@ class Bot:
         """Generate, clean and vet content; returns a publishable Action or None. `context` is the post a
         journalist's `target` answers and `referendum` whether a reply takes up the referendum, when known. A case
         post takes one of CASE_SHAPES, named at the front of its angle."""
+        if kind == "reply" and target is not None and self.roster.classify(target["author"]) == "npc":
+            return await self._write_to_citizen(topic, target, context, referendum)
         if kind != "post" or topic[0] not in ("issue", "anchor"):
             return await self._write(kind, topic, target, context, referendum)
         shape = self.case_shape = _draw_shape()
@@ -607,6 +612,23 @@ class Bot:
         if action is not None:
             action.angle = f"{shape}: {action.angle or ''}"
         return action
+
+    async def _write_to_citizen(self, topic: tuple, target: dict, context: Optional[str],
+                                referendum: Optional[bool]) -> Optional[Action]:
+        """A reply to a citizen, drafted again once, told to avoid the phrase, if teammates' wording is what sank
+        it: one evening 26 of the 31 dropped replies to citizens went for a shared phrase ("tipped me to yes", "the
+        vote on 2"), and a reply to a citizen is the one kind that can move a mind."""
+        avoid = []
+        for _ in range(1 + CITIZEN_REDRAFTS):
+            self.last_shared, self.avoid = None, avoid
+            try:
+                action = await self._write("reply", topic, target, context, referendum)
+            finally:
+                self.avoid = []
+            if action is not None or self.last_shared is None:
+                return action
+            avoid = avoid + [self.last_shared]
+        return None
 
     async def _write(self, kind: str, topic: tuple, target: Optional[dict], context: Optional[str],
                      referendum: Optional[bool]) -> Optional[Action]:
@@ -1104,6 +1126,8 @@ class Bot:
         if recent:
             listed = "\n".join(f"- {c}" for c in recent)
             parts.append(f"You recently posted these. Do not repeat them or say the same thing again:\n{listed}")
+        if self.avoid:
+            parts.append("Don't use these words: " + ", ".join(f'"{p}"' for p in self.avoid) + ".")
         worn = self._worn()[0]
         if worn:
             parts.append("These phrases are worn out here; use none of them: " + ", ".join(f'"{p}"' for p in worn) + ".")
@@ -1154,10 +1178,12 @@ class Bot:
         shared = self._shared_phrase(text)
         if shared:
             log.info("%s: %r is already in %d teammates' posts", self.username, shared, SHARED_LIMIT)
+            self.last_shared = shared
             return "shared phrase"
         shared = self._sibling_phrase(text, thread) if thread is not None else None
         if shared:
             log.info("%s: %r is already in a teammate's reply to #%s", self.username, shared, thread)
+            self.last_shared = shared
             return "shared phrase"
         problem = output_problem(text, system)
         if problem:
@@ -1467,6 +1493,41 @@ async def arguments_check() -> None:
         assert (heading in writer.system) == wanted, (kind, topic)
         assert "# Who you are" in writer.system and "Kingstonia" in writer.system
     print("arguments ok")
+
+
+async def redraft_check() -> None:
+    """A reply to a citizen that a phrase two teammates used sank is drafted once more, told to leave the phrase out;
+    one to an account of unknown standing, or a second draft that fails too, isn't."""
+    class Twice:
+        name = "twice"
+
+        def __init__(self, *texts: str) -> None:
+            self.texts, self.prompts = list(texts), []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            return self.texts[min(len(self.prompts), len(self.texts)) - 1]
+
+    persona = next(p for p in load_personas() if p["line"] == "background")
+    sunk = "A quiet ferry winter is what tipped me to yes on the mandate."
+    clean = "The ferry crews sat idle for months, and that's my reason for yes on the mandate."
+    for author, texts, made, drafts in (("citizen_a", (sunk, clean), True, 2), ("stranger_1", (sunk, clean), False, 1),
+                                        ("citizen_a", (sunk, sunk), False, 2)):
+        store = StateStore(":memory:")
+        for user in ("mate_a", "mate_b"):
+            store.record(user, _iso(datetime.now(timezone.utc)), Action("post", content="Losing the regatta is what "
+                                                                         "tipped me to yes, honestly."))
+        writer = Twice(*texts)
+        b = Bot(persona, FakePlatform(), writer, load_world(), roster=Roster(npcs={"citizen_a"}), store=store)
+        target = {"id": 9, "author": author, "content": "Not sure about the ferry rule.", "parent_id": None}
+        action = await b._compose("reply", ("feed", "undecided"), target, referendum=False)
+        assert (action is not None) == made and len(writer.prompts) == drafts, (author, len(writer.prompts))
+        if drafts == 2:
+            assert 'Don\'t use these words: "tipped me to yes"' in writer.prompts[1] and not b.avoid, writer.prompts[1]
+    print("redrafts ok")
 
 
 async def conversation_route_check() -> None:
@@ -2770,6 +2831,7 @@ if __name__ == "__main__":
     asyncio.run(sibling_check())
     asyncio.run(unsent_check())
     asyncio.run(conversation_route_check())
+    asyncio.run(redraft_check())
     asyncio.run(rush_check())
     asyncio.run(case_post_check())
     asyncio.run(quota_recovery_check())
