@@ -117,9 +117,20 @@ NO_LEAN_RE = re.compile(
 REFERENDUM_RE = re.compile(
     r"vacc|\bvax|\bjabs?\b|mandate|referendum|h2d2|dolphin flu|\bvot(e|ing)\b|proof of|"
     r"\bdoor[- ]?checks?\b|\b(checks?|pass(es)?|papers) at (the|every) door\b|"
-    # how people argue it without naming it: "publish the venue list and a hard sunset clause"
-    r"certificate|venues? list|list of venues|designated (public )?(spaces?|venues?|places?)|two[- ]tier|"
-    r"sunset (clause|date)|medical exemption",
+    # How people argue it without naming it ("publish the venue list and a hard sunset clause"), in words tied to
+    # the rule: a certificate, a venue list or a designated space on its own is just as often a welding course, a
+    # wedding or a wheelchair bay.
+    r"\bcertificates? (rules?|requirements?|schemes?|systems?|checks?)\b|"
+    r"\bcertificates? (at (the|my|our|your|every|a) (door|counter|gate|ramp|till|entrance)|"
+    r"for (shops|buses|the bus|schools|entry|everything)|to (enter|get into|get on|go into|board))\b|"
+    r"\b(show|shows|showing|showed|flash|wave|waves|waving|carry|carrying|check|checks|checking|checked|"
+    r"asks? (for|to see)|asking (for|to see)|asked (for|to see)) (a |my |your |the |their |our |people's )?certificates?\b|"
+    r"\bcertificates?\b.{0,60}\bid card|\bid card\b.{0,60}\bcertificates?\b|"
+    r"\b(venues|spaces) list\b|\b(publish|release)\w*\b.{0,20}\b(venues?|spaces|designated) list\b|"
+    r"\b(venues?|spaces) list\b.{0,30}\b(publish|release)|\blist of (designated )?(venues|public spaces)\b|"
+    r"\bdesignated (public )?(spaces?|places?|venues?)\b(?! for)|"
+    r"\btwo[- ]tier\b(?! (cakes?|fountains?|stands?|shel(f|ves)|bunks?|beds?|decks?|trays?|planters?|gardens?))|"
+    r"\bsunset (clauses?|provisions?)\b|\b(hard|firm|fixed|clear) sunset\b|\bmedical exemptions?\b",
     re.IGNORECASE,
 )
 
@@ -398,7 +409,13 @@ if __name__ == "__main__":
     assert about_referendum("Passes at every door? Bit much. No from me.")
     assert about_referendum("Publish the venue list and a hard sunset clause first.")
     assert about_referendum("The certificate isn't the ID card, and that matters to me.")
-    assert not about_referendum("Gorgeous sunset from the wharf tonight.")
+    assert about_referendum("Two-tier? Not true, it's free.") and about_referendum("they still haven't published the venues list")
+    assert about_referendum("a certificate at my counter doesn't add a nurse")
+    for daily in ("Gorgeous sunset from the wharf tonight.", "That welding certificate took real effort.",
+                  "My birth certificate finally arrived.", "Our wedding venue list is ready.",
+                  "The cinema has designated spaces for wheelchairs.", "We got a two-tier cake for her birthday.",
+                  "Got my first aid certificate for work, finally!"):
+        assert not about_referendum(daily), daily
     # Contrast pairs on each fact boundary: the first of each breaks the setting, the second doesn't.
     for bad, good in (
             ("My cousin caught dolphin flu last week", "My cousin keeps reading about dolphin flu in Fiji"),

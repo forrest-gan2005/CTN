@@ -1267,6 +1267,10 @@ async def lukewarm_check() -> None:
         "a reply that takes up the referendum unasked must back YES"
     assert await bot_for(background, "NEUTRAL")._compose("reply", ("feed", "yes"), target) is None
     assert await bot_for(background, "SUPPORT")._compose("reply", ("feed", "unknown"), chat) is not None
+    reply = "Congratulations on finishing the welding course. That certificate took real effort."
+    course = {"id": 9, "author": "citizen_a", "parent_id": None, "content": "Passed my welding course today!"}
+    assert await bot_for(background, "NEUTRAL")._compose("reply", ("feed", "unknown"), course) is not None, \
+        "an everyday reply needn't take a side"
     print("lukewarm ok")
 
 
