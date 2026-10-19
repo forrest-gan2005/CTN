@@ -1020,11 +1020,11 @@ async def reply_abort_check() -> None:
     propagates."""
     from ctn.red import bot as bot_module
 
-    # A background account doesn't weigh leans when choosing, so here _lean only runs inside _reply.
+    # With no line weighing leans when choosing, _lean only runs inside _reply.
     personas = [x for x in load_personas() if x["line"] == "background"][:1] + load_personas()[:1]
     me, mate = personas[0]["username"], personas[1]["username"]
-    saved = bot_module.ACTION_WEIGHTS
-    bot_module.ACTION_WEIGHTS = {"reply": 1}
+    saved, saved_leans = bot_module.ACTION_WEIGHTS, bot_module.TARGET_LEANS
+    bot_module.ACTION_WEIGHTS, bot_module.TARGET_LEANS = {"reply": 1}, {}
     try:
         for stage in ("_lean", "_compose"):
             for error in (RuntimeError("generation failed"), asyncio.CancelledError()):
@@ -1049,7 +1049,7 @@ async def reply_abort_check() -> None:
                 assert state.claimed([key]) == set(), f"{stage}: the post stayed claimed after {error!r}"
                 assert state.claim(key, mate), "a teammate can take it"
     finally:
-        bot_module.ACTION_WEIGHTS = saved
+        bot_module.ACTION_WEIGHTS, bot_module.TARGET_LEANS = saved, saved_leans
     print("reply abort ok")
 
 

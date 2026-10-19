@@ -30,26 +30,30 @@ TIMEZONE = ZoneInfo("Australia/Sydney")  # in-world dates follow Sydney time
 # What each line posts about. issue: the referendum; vaccine: vaccination in general and yearly shots, two of
 # the three scored vaccination views without the heat of the mandate; view: another issue, which scores in
 # either direction; daily: everyday life.
+# Live, everyday posts drew a like or two and moved no one, and another issue's views don't score, so every line
+# mostly makes the case; a quarter or so of everyday posts is left so the accounts still read as people.
 TOPIC_MIX = {
-    "persuade": {"issue": 0.45, "vaccine": 0.15, "view": 0.1, "daily": 0.3},
-    "mobilise": {"issue": 0.3, "vaccine": 0.1, "view": 0.15, "daily": 0.45},
-    "bridge": {"issue": 0.5, "vaccine": 0.15, "view": 0.1, "daily": 0.25},
-    # Everyday accounts take up the referendum more than they did: what trends and what scores is people's stance
-    # and story; enough everyday posts are left that they still read as ordinary people.
-    "background": {"issue": 0.35, "vaccine": 0.1, "view": 0.15, "daily": 0.4},
-    "amplifier": {"issue": 0.15, "vaccine": 0.05, "view": 0.15, "daily": 0.65},
+    "persuade": {"issue": 0.55, "vaccine": 0.2, "view": 0.05, "daily": 0.2},
+    "mobilise": {"issue": 0.4, "vaccine": 0.15, "view": 0.05, "daily": 0.4},
+    "bridge": {"issue": 0.6, "vaccine": 0.15, "view": 0.05, "daily": 0.2},
+    "background": {"issue": 0.5, "vaccine": 0.2, "view": 0.05, "daily": 0.25},
+    "amplifier": {"issue": 0.2, "vaccine": 0.1, "view": 0.05, "daily": 0.65},
 }
 # Mobilise accounts on a poll day and the day before: poll answers follow what's on citizens' minds.
 RUNUP_MIX = {"issue": 0.7, "vaccine": 0.1, "view": 0.05, "daily": 0.15}
 RUNUP_DAYS = 1
 # Leaning to replies and posts: citizens' likes and replies to us, and their minds changing, are what score.
-ACTION_WEIGHTS = {"like": 5, "reply": 3, "post": 1.5, "repost": 0.5, "follow": 0.5, "none": 1}
+ACTION_WEIGHTS = {"like": 4, "reply": 4, "post": 2, "repost": 0.5, "follow": 0.5, "none": 1}
 LINE_ACTIONS = {"amplifier": {"like": 6, "reply": 0.3, "post": 0.2, "repost": 2, "follow": 1, "none": 2}}
 # An account two takedowns from a ban stops writing; likes, reposts and follows can't be reported.
 QUIET_ACTIONS = {"like": 6, "repost": 1, "follow": 1, "none": 3}
 # Citizens each line looks for when replying. Agreement alone never changes a mind, so persuasion goes
 # to the undecided and NO-leaning; mobilise keeps YES voters certain and turning up.
-TARGET_LEANS = {"persuade": ("undecided", "no"), "bridge": ("no", "undecided"), "mobilise": ("yes", "undecided")}
+TARGET_LEANS = {"persuade": ("undecided", "no"), "bridge": ("no", "undecided"), "mobilise": ("yes", "undecided"),
+                "background": ("undecided", "no")}
+# Share of replies that go to posts on the referendum or vaccines when the feed has any: chat about someone's rabbit
+# earns a like and moves no one. The rest keeps the accounts talking like people.
+TOPICAL_REPLY_PROB = 0.9
 LEAN_CHECKS = 3  # citizens profiled per reply decision; each can cost a few LLM calls
 LEAN_TTL = timedelta(hours=12)
 HASHTAG_PROB = 0.3
@@ -68,7 +72,8 @@ LINE_BRIEF = {
     "bridge": ("You were torn about the referendum and still understand the NO side well, but you have come down "
                "on YES: {why}. You sound like an ordinary person who changed their mind, never like a campaigner, "
                "and you always end up leaning YES."),
-    "background": "You are voting YES in the referendum ({why}), but it isn't what you mostly post about.",
+    "background": ("You are voting YES in the referendum ({why}) and say so when it comes up: an ordinary person "
+                   "with a life beyond it, never a campaigner."),
     "amplifier": "You are voting YES in the referendum ({why}), but it isn't what you mostly post about.",
 }
 LEAN_GUIDE = {
@@ -515,8 +520,9 @@ class Bot:
         # Any reply on the referendum has to come down for YES: live, replies to NO worries often just agreed ("a
         # sunset clause might still be needed", from a persuader; "my worry is the list gets written quietly later",
         # from an everyday account), which the judge called neutral. Not to someone already leaning YES, where going
-        # along does no harm.
-        argue = kind == "reply" and referendum and topic[1] != "yes"
+        # along does no harm, unless the reply itself takes the referendum up: one to a post that never named it
+        # still echoed the NO side ("the venues list ... still hasn't been published").
+        argue = kind == "reply" and (referendum and topic[1] != "yes" or about_referendum(content))
         problem = await self._check(content, system,
                                     takes_side=kind == "post" and topic[0] in ("issue", "pitch") or argue,
                                     replying_to=target.get("content") if target else None)
@@ -641,6 +647,9 @@ class Bot:
                  and not self.store.replies_to(p["author"], rested)  # not pushed by one of us just now
                  and p["author"] not in JOURNALISTS  # those have their own route, for persuaders and bridges
                  and p["author"] not in rivals and not self._too_deep(p["id"])]
+        topical = [p for p in open_ if about_referendum(p.get("content") or "")]
+        if topical and self.line != "amplifier" and random.random() < TOPICAL_REPLY_PROB:
+            open_ = topical
         npcs = [p for p in open_ if self.roster.classify(p["author"]) == "npc"]
         unknown = [p for p in open_ if self.roster.classify(p["author"]) == "unknown"]
         wanted = TARGET_LEANS.get(self.line)
@@ -1220,7 +1229,8 @@ async def rival_check() -> None:
 
 async def lukewarm_check() -> None:
     """A reply to a NO-leaning referendum post goes only if the judge says it backs YES, whatever the account's
-    line; one to someone already leaning YES may just go along."""
+    line; one to someone already leaning YES may just go along, unless it takes the referendum up itself, as must a
+    reply to a post that never named it."""
     class Fixed:
         name = "fixed"
 
@@ -1250,7 +1260,33 @@ async def lukewarm_check() -> None:
     everyday = bot_for(background, "NEUTRAL")
     assert await everyday._compose("reply", ("feed", "no"), target) is None and everyday.rejected == {"lukewarm": 1}
     assert await bot_for(background, "SUPPORT")._compose("reply", ("feed", "no"), target) is not None
+    reply = "The venue list still hasn't been published, so who knows what a normal day looks like."
+    chat = {"id": 8, "author": "citizen_a", "parent_id": None, "content": "Ferry was packed again this morning."}
+    echo = bot_for(background, "NEUTRAL")
+    assert await echo._compose("reply", ("feed", "unknown"), chat) is None and echo.rejected == {"lukewarm": 1}, \
+        "a reply that takes up the referendum unasked must back YES"
+    assert await bot_for(background, "NEUTRAL")._compose("reply", ("feed", "yes"), target) is None
+    assert await bot_for(background, "SUPPORT")._compose("reply", ("feed", "unknown"), chat) is not None
     print("lukewarm ok")
+
+
+async def topical_check() -> None:
+    """Replies go to posts on the referendum or vaccines when the feed has some, for every line but amplifiers."""
+    global TOPICAL_REPLY_PROB
+    saved, TOPICAL_REPLY_PROB = TOPICAL_REPLY_PROB, 1.0
+    try:
+        feed = [{"id": 201, "author": "citizen_a", "content": "my rabbit dug up the herbs again"},
+                {"id": 202, "author": "citizen_b", "content": "Not sure about the certificate rule yet"}]
+        for line, wanted in (("background", {202}), ("persuade", {202}), ("amplifier", {201, 202})):
+            persona = next(p for p in load_personas() if p["line"] == line)
+            b = Bot(persona, FakePlatform(), FakeLLM(0, 0), load_world(),
+                    roster=Roster(npcs={"citizen_a", "citizen_b"}), store=StateStore(":memory:"))
+            picked = {(await b._pick_reply_target(feed))[0]["id"] for _ in range(30)}
+            assert picked == wanted, (line, picked)
+            assert (await b._pick_reply_target(feed[:1]))[0]["id"] == 201, "nothing topical: chat is fine"
+    finally:
+        TOPICAL_REPLY_PROB = saved
+    print("topical replies ok")
 
 
 async def press_check() -> None:
@@ -2077,6 +2113,7 @@ if __name__ == "__main__":
     asyncio.run(case_post_check())
     asyncio.run(quota_recovery_check())
     asyncio.run(lukewarm_check())
+    asyncio.run(topical_check())
     asyncio.run(rival_check())
     asyncio.run(thread_check())
     asyncio.run(news_reply_check())

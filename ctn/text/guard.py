@@ -116,7 +116,10 @@ NO_LEAN_RE = re.compile(
 # Posts that touch the referendum; only these are worth an LLM stance check before we amplify them.
 REFERENDUM_RE = re.compile(
     r"vacc|\bvax|\bjabs?\b|mandate|referendum|h2d2|dolphin flu|\bvot(e|ing)\b|proof of|"
-    r"\bdoor[- ]?checks?\b|\b(checks?|pass(es)?|papers) at (the|every) door\b",
+    r"\bdoor[- ]?checks?\b|\b(checks?|pass(es)?|papers) at (the|every) door\b|"
+    # how people argue it without naming it: "publish the venue list and a hard sunset clause"
+    r"certificate|venues? list|list of venues|designated (public )?(spaces?|venues?|places?)|two[- ]tier|"
+    r"sunset (clause|date)|medical exemption",
     re.IGNORECASE,
 )
 
@@ -393,6 +396,9 @@ if __name__ == "__main__":
     assert not about_referendum("My salon reopens November 2 after the repaint.")
     assert not about_referendum("No from me, the pie was awful.")
     assert about_referendum("Passes at every door? Bit much. No from me.")
+    assert about_referendum("Publish the venue list and a hard sunset clause first.")
+    assert about_referendum("The certificate isn't the ID card, and that matters to me.")
+    assert not about_referendum("Gorgeous sunset from the wharf tonight.")
     # Contrast pairs on each fact boundary: the first of each breaks the setting, the second doesn't.
     for bad, good in (
             ("My cousin caught dolphin flu last week", "My cousin keeps reading about dolphin flu in Fiji"),
