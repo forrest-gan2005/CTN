@@ -117,7 +117,6 @@ THREAD_DEPTH_LIMIT = 8
 # bridges answer a journalist's referendum post first, each at most once a day, and now and then point one to a
 # story with an @mention: one pitch per journalist a day for the whole team.
 JOURNALISTS = load_journalists()
-PERSONA_NAMES = {p["username"]: p["name"] for p in load_personas(status=None)}  # a teammate's name opens no reply
 PRESS_LINES = {"persuade", "bridge"}
 PRESS_WINDOW = timedelta(hours=6)  # a journalist's post this old is still worth answering
 PITCH_PROB = 0.2  # share of these accounts' new posts that go to a journalist still due a pitch today
@@ -156,19 +155,16 @@ CASE_SHAPES = {
     "values": (1.5, "Argue it from a value people voting NO hold dear (freedom, looking after their own, fairness to "
                     "those who can't be vaccinated) and show how the mandate serves that value."),
     "scene": (1.5, "Begin inside a small everyday moment from your week, then let it lead to your reason."),
-    "story": (0.5, "Say what's at stake for you (your work, your family, your street), give the other side's worry "
-                   "its due in a few words of your own (not \"I get the worry\"), then say plainly why you're voting "
-                   "YES."),
+    "story": (1.0, "Open with who you are and what's at stake for you (your work, your family, your street), give "
+                   "the other side's worry its due in a few words of your own (not \"I get the worry\"), then say "
+                   "plainly why you're voting YES."),
 }
 CASE_OPENING = ("Don't open by introducing yourself (\"I'm ...\", \"... here\", \"As a ...\") or with anyone's "
                 "name.")
 QUESTION_SHAPES = {"refute", "scene", "story"}  # the rest end on their case
+OPENING_FREE = {"story"}  # the one shape that may open with who you are: some do, as people do, just not every one
 COVID_SHARE = 0.35  # of prompts that remind the writer what it did during covid: every one did, and 2021 was in most
 NO_COVID = "Don't describe what you did during covid."  # when it isn't reminded, so as not to make it up
-# The writer mirrors "You are <name>, <age>..." and opens with it whatever it is told; a case post or a teammate's
-# reply that still does ("I'm Mere, ...", "Sam, 41, ...", or its own or the anchor writer's first name, as in "Greg
-# here" or "Greg, ...") is dropped.
-INTRODUCTION_RE = re.compile(r"^\W*([Ii]'?m [A-Z][a-z]+,|[A-Za-z]+, \d{2}(,| ?yo\b| years))")
 ANCHOR_GAP = timedelta(minutes=30)
 ANCHOR_REST = timedelta(minutes=75)
 LIFT_TOPICS = ("anchor",)
@@ -647,11 +643,6 @@ class Bot:
         # along does no harm, unless the reply itself takes the referendum up: one to a post that never named it
         # still echoed the NO side ("the venues list ... still hasn't been published").
         argue = kind == "reply" and (referendum and topic[1] != "yes" or about_referendum(content))
-        if (kind == "post" and topic[0] in ("issue", "anchor") or thread is not None) and \
-                self._introduces(content, target["author"] if thread is not None else None):
-            self.rejected["introduction"] = self.rejected.get("introduction", 0) + 1
-            log.warning("%s rejected introduction: %r", self.username, content)
-            return None
         problem = await self._check(content, system,
                                     takes_side=kind == "post" and topic[0] in CASE_TOPICS or argue,
                                     replying_to=target.get("content") if target else None, thread=thread)
@@ -968,14 +959,6 @@ class Bot:
         signoffs = self._sign_offs()
         return random.choice(signoffs) if kind == "post" and signoffs and random.random() < SIGN_OFF_PROB else None
 
-    def _introduces(self, text: str, addressee: Optional[str]) -> bool:
-        """Whether `text` opens by introducing its writer ("I'm Mere", "Sam, 41"), or with its writer's or
-        `addressee`'s (a teammate's) first name."""
-        text = plain(text)
-        names = [(PERSONA_NAMES.get(u) or "").split(" ")[0] for u in (self.username, addressee) if u]
-        return bool(INTRODUCTION_RE.match(text)) or any(
-            n and re.match(rf"\W*(i'?m\s+)?{re.escape(n)}\b", text, re.IGNORECASE) is not None for n in names)
-
     def _user_prompt(self, kind: str, target: Optional[dict], topic: tuple, earlier: Optional[str] = None,
                      about: Optional[list] = None, sign=PICK, referendum: Optional[bool] = None,
                      gif: bool = False, context: Optional[str] = None, siblings: Optional[list] = None) -> str:
@@ -1066,7 +1049,8 @@ class Bot:
         elif topic[0] in ("issue", "anchor"):
             parts.append(f"Write a new post about the referendum, along this line: {topic[1]}. A comparison is fine, "
                          "but make plain that you mean the referendum on proof of vaccination; nobody should have to guess.")
-            parts.append(f"{CASE_SHAPES[self.case_shape or _draw_shape()][1]} {CASE_OPENING}")
+            shape = self.case_shape or _draw_shape()
+            parts.append(CASE_SHAPES[shape][1] if shape in OPENING_FREE else f"{CASE_SHAPES[shape][1]} {CASE_OPENING}")
         elif topic[0] == "vaccine":
             parts.append(f"Write a new post about vaccination in your everyday life: {topic[1]}. Don't mention the "
                          "referendum or any mandate in this one, and don't give anyone medical advice.")
@@ -1822,14 +1806,12 @@ async def anchor_check() -> None:
             action = await styled._anchor()
             prompt = styled.llm.prompts[0]
             assert action.angle.startswith(f"{shape}: ") and styled.case_shape is None, action.angle
-            assert guide in prompt and CASE_OPENING in prompt and "Open with who you are" not in prompt, prompt
+            assert guide in prompt and (CASE_OPENING in prompt) == (shape not in OPENING_FREE), prompt
             assert ("End with a genuine question" in prompt) == (shape in QUESTION_SHAPES), shape
     finally:
         CASE_SHAPES, QUESTION_PROB = saved
-    first = PERSONA_NAMES[writers[0]["username"]].split(" ")[0]
-    for opening in (f"I'm {first}, and", f"{first} here, and", f"{first}, 44, and"):
-        intro = Bot(writers[0], FakePlatform(), Noting(f"{opening} {case}"), load_world(), store=StateStore(":memory:"))
-        assert await intro._anchor() is None and intro.rejected == {"introduction": 1}, (opening, intro.rejected)
+    intro = Bot(writers[0], FakePlatform(), Noting(f"I'm Joe, and {case}"), load_world(), store=StateStore(":memory:"))
+    assert await intro._anchor() is not None, "a post that opens with who wrote it still goes, just not as a rule"
     daily = Bot(writers[0], FakePlatform(), Noting("Ferry was late again."), load_world(), store=StateStore(":memory:"))
     action = await daily._compose("post", ("daily", "the ferry"))
     assert action.angle == "the ferry" and CASE_OPENING not in daily.llm.prompts[0], "an everyday post takes no shape"
