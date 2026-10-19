@@ -85,10 +85,19 @@ LEAN_GUIDE = {
     "undecided": ("They seem undecided. Give one concrete reason from your own life that speaks to what they care "
                   "about: the benefit to them first, then to everyone."),
     "yes": "They lean YES already. Agree briefly in your own words and, if it fits, say you'll see them at the vote on 2 November.",
-    "team": ("They're on your side. Add something of your own they didn't say, a short story or another reason, so "
-             "people reading see more than one voice; don't just agree, and don't repeat their words. One or two "
-             "short sentences, like a comment under a neighbour's post."),
+    "team": ("They're on your side. Add something of your own they didn't say, so people reading see more than one "
+             "voice; don't just agree, don't repeat their words and don't open with their name. One or two short "
+             "sentences, like a comment under a neighbour's post. Leave 2021 and the lockdowns out of this one."),
 }
+# Told only to add "a short story or another reason", three in five teammates' replies under an anchor went back to
+# 2021 and one in seven opened with its writer's name: what each adds is drawn from these instead, by weight.
+TEAM_SHAPES = (
+    ("One more reason for YES they didn't give, in a sentence of your own; no story this time.", 2.0),
+    ("The one thing in their post that matters most to you, and why, in a few words.", 1.5),
+    ("One fact about the referendum from what you know that backs them up, in your own words.", 1.0),
+    ("One genuine follow-up question to them that people reading would want answered.", 1.0),
+    ("A small moment from your own week that backs them up.", 1.5),
+)
 DEFAULT_GUIDE = ("Respond to their actual point. If they lean NO, acknowledge their worry in a few words, then give "
                  "your own reason for voting YES.")
 NPC_REPLY_PREF = 0.8  # how strongly reply targeting prefers citizens over unknown accounts
@@ -127,21 +136,43 @@ QUESTION_PROB = 0.5
 # leader's, with 40 replies and up to 40 reposts, held the top ten. So half as many anchors, each liked by the
 # whole team and reposted by most of it: a repost lifts as much as two or three replies and needs no draft.
 ANCHOR_LINES = {"persuade", "bridge"}
-# The leader's anchors open with no introduction and make one case, name its cost plainly ("some unvaccinated
-# people would be shut out, and I take that seriously") and still back it, in about 350 characters with no tag or
-# question; per view they drew outside likes at about our rate (0.26 against 0.28), so it isn't plainly better.
-# Half our anchors are written that way and their angle marked "plain: " (the rest "story: "), to compare.
-PLAIN_SHARE = 0.5
-PLAIN_GUIDE = ("Don't introduce yourself or tell your own story. Make one case only, the one above, in plain words "
-               "a neighbour would use; then name its cost honestly (some people who aren't vaccinated would be kept "
-               "out of designated public places) and say why you still think YES is worth it. No question at the "
-               "end.")
+# Case posts (anchors and other referendum posts) all came out as "I'm Greg, electrician in Crown Harbour..." then
+# a 2021 story: one shape repeated is a pattern readers and Blue teams spot. Each is now written in one of these
+# shapes, drawn by weight, and its angle marked "<shape>: " so their reach can be compared. They follow the
+# persuasion research: answering the other side's case beats ignoring it, and naming it without answering is worse
+# than either (O'Keefe 1999, refutational two-sided messages); an argument in the values of the people you want to
+# move works better than one in your own (Feinberg & Willer 2015, moral reframing); a convert's story moves the
+# hesitant (Lyons et al. 2019; Conlin et al. on COVID vaccines); and a short story, not argument alone, is what
+# changed minds in conversation (Kalla & Broockman 2020). "plain" is the leader's: no introduction, one case, its
+# cost named, still YES (per view their anchors drew outside likes at about our rate, 0.26 against 0.28). The cost
+# is put in the setting's own words, which the shared-phrase check doesn't count against us.
+CASE_SHAPES = {
+    "refute": (2.0, "Put the strongest argument for NO you've heard in one fair sentence of your own, then answer it "
+                    "with one concrete reason. Answer it; don't just mention it."),
+    "plain": (2.0, "Make that one case only, in plain everyday words. Then name its real cost honestly, in your own "
+                   "words (unvaccinated people would stay out of designated public spaces), and say why you still "
+                   "land on YES."),
+    "values": (1.5, "Make the case from something people voting NO care about too: being free to keep working and "
+                    "see family, looking after your own island, or fairness to people who can't be vaccinated. Show "
+                    "how YES serves it."),
+    "convert": (1.0, "Say how you went from unsure about this to YES: what you thought at first and the one thing "
+                     "that changed your mind. Keep it honest and short."),
+    "scene": (1.5, "Start in the middle of a small everyday moment from your week, then let it lead to why you're "
+                   "voting YES."),
+    "story": (0.5, "Say what's at stake for you (your work, your family, your street), give the other side's worry "
+                   "its due in a few words of your own (not \"I get the worry\"), then say plainly why you're voting "
+                   "YES."),
+}
+CASE_OPENING = ("Don't open by introducing yourself (\"I'm ...\", \"... here\", \"As a ...\") or with anyone's "
+                "name.")
+QUESTION_SHAPES = {"refute", "scene", "story"}  # the rest end on their case
+COVID_SHARE = 0.35  # of prompts that remind the writer what it did during covid: every one did, and 2021 was in most
 ANCHOR_GAP = timedelta(minutes=30)
 ANCHOR_REST = timedelta(minutes=75)
 LIFT_TOPICS = ("anchor",)
 BOOST_WINDOW = timedelta(hours=2)
 BOOST_DELAY = timedelta(minutes=1)
-BOOST_LIMITS = {"like": 50, "repost": 45, "reply": 20}
+BOOST_LIMITS = {"like": 50, "repost": 40, "reply": 20}
 BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post still has places
 # Popular tags were all campaign accounts' on the opening night, a NO team's #keepkingstoniaopen first; the papers'
 # reporters write up what is popular here. The team carries the YES campaign's own words: on every anchor post, and
@@ -306,7 +337,7 @@ class Bot:
         self.unsafe = set()  # posts judged to argue NO, never to be amplified
         self.seen = self.store.load_seen(self.username)
         self.rushed = set()  # (anchor post id, kind) this process has tried in a rush
-        self.plain_case = False  # the anchor being written takes the leader's plain style (PLAIN_SHARE)
+        self.case_shape = None  # the CASE_SHAPES entry the case post being written takes
         self.followed = self.store.load_followed(self.username)
         self.history = [(row[0], Action(*row[1:])) for row in self.store.load_history(self.username)]
 
@@ -536,7 +567,22 @@ class Bot:
     async def _compose(self, kind: str, topic: tuple, target: Optional[dict] = None, context: Optional[str] = None,
                        referendum: Optional[bool] = None) -> Optional[Action]:
         """Generate, clean and vet content; returns a publishable Action or None. `context` is the post a
-        journalist's `target` answers and `referendum` whether a reply takes up the referendum, when known."""
+        journalist's `target` answers and `referendum` whether a reply takes up the referendum, when known. A case
+        post takes one of CASE_SHAPES, named at the front of its angle."""
+        if kind != "post" or topic[0] not in ("issue", "anchor"):
+            return await self._write(kind, topic, target, context, referendum)
+        shapes = list(CASE_SHAPES)
+        self.case_shape = random.choices(shapes, weights=[CASE_SHAPES[k][0] for k in shapes])[0]
+        try:
+            action = await self._write(kind, topic, target, context, referendum)
+        finally:
+            shape, self.case_shape = self.case_shape, None
+        if action is not None:
+            action.angle = f"{shape}: {action.angle or ''}"
+        return action
+
+    async def _write(self, kind: str, topic: tuple, target: Optional[dict], context: Optional[str],
+                     referendum: Optional[bool]) -> Optional[Action]:
         query = (target.get("content") or "") if target else topic[1]
         examples, from_npcs = self._examples(query, reply=target is not None)
         # The answers to NO worries only where the prompt takes up the referendum.
@@ -647,16 +693,13 @@ class Bot:
         if hold is None:
             return None
         action = None
-        self.plain_case = random.random() < PLAIN_SHARE
         try:
             action = await self._compose("post", topic=("anchor", random.choice(self.persona["angles"])))
         finally:
-            plain, self.plain_case = self.plain_case, False
             if action is None:
                 self.store.release(hold)
         if action is not None:
             action.hold = hold
-            action.angle = ("plain: " if plain else "story: ") + (action.angle or "")
         return action
 
     def _lift_posts(self, now: datetime, window: timedelta = BOOST_WINDOW) -> list:
@@ -885,8 +928,8 @@ class Bot:
                    f"How you write:\n{habits}\n\n")
             own_words = " Say things in your own words; don't repeat sentences from your story."
         else:
-            who = (f"You are {p['name']}, {p['age']}, from {p['home']}. You {p['job']}.\n"
-                   f"During covid you {p['covid']}.\n"
+            covid = f"During covid you {p['covid']}.\n" if random.random() < COVID_SHARE else ""
+            who = (f"You are {p['name']}, {p['age']}, from {p['home']}. You {p['job']}.\n{covid}"
                    f"{LINE_BRIEF[self.line].format(why=p['why_yes'])}\n"
                    f"Other things you think: {'; '.join(p['views'])}.\n"
                    f"How you write: {p['style']}.\n\n")
@@ -979,9 +1022,10 @@ class Bot:
                          "\"I get where you're coming from\", \"You're worried about\" or \"I see your point\"; start with "
                          "something specific.")
             if about_referendum(target.get("content") or "") if referendum is None else referendum:
+                shape = f" {random.choices(*zip(*TEAM_SHAPES))[0]}" if topic[1] == "team" else ""
                 parts.append(
-                    f"{LEAN_GUIDE.get(topic[1], DEFAULT_GUIDE)} Never agree that the mandate is unfair and never make "
-                    "their argument for them."
+                    f"{LEAN_GUIDE.get(topic[1], DEFAULT_GUIDE)}{shape} Never agree that the mandate is unfair and never "
+                    "make their argument for them."
                 )
             else:
                 parts.append("It isn't about the referendum, so just reply like a normal person and leave the "
@@ -1002,12 +1046,7 @@ class Bot:
         elif topic[0] in ("issue", "anchor"):
             parts.append(f"Write a new post about the referendum, along this line: {topic[1]}. A comparison is fine, "
                          "but make plain that you mean the referendum on proof of vaccination; nobody should have to guess.")
-            if topic[0] == "anchor" and self.plain_case:
-                parts.append(PLAIN_GUIDE)
-            else:
-                parts.append("Open with who you are and what's at stake for you (your work, your family, your "
-                             "street), give the other side's worry its due in a few words of your own (not \"I get "
-                             "the worry\"), then say plainly why you're voting YES.")
+            parts.append(f"{CASE_SHAPES[self.case_shape][1]} {CASE_OPENING}")
         elif topic[0] == "vaccine":
             parts.append(f"Write a new post about vaccination in your everyday life: {topic[1]}. Don't mention the "
                          "referendum or any mandate in this one, and don't give anyone medical advice.")
@@ -1021,7 +1060,7 @@ class Bot:
                 parts.append("You don't know when it's on this year, so write about past years or looking forward to "
                              "the next one, not as if it's happening now.")
 
-        if kind == "post" and topic[0] in ("issue", "anchor") and not (topic[0] == "anchor" and self.plain_case) \
+        if kind == "post" and topic[0] in ("issue", "anchor") and self.case_shape in QUESTION_SHAPES \
                 and random.random() < QUESTION_PROB:
             parts.append("End with a genuine question to the people reading, one they'd want to answer; not a "
                          "rhetorical one.")
@@ -1680,6 +1719,7 @@ async def boost_check() -> None:
             replies.append(action.post_id if action.type == "reply" else None)
             if action.post_id == 900:
                 assert LEAN_GUIDE["team"] in b.llm.prompts[0] and action.hold.startswith("boost:reply:900:")
+                assert sum(text in b.llm.prompts[0] for text, _ in TEAM_SHAPES) == 1, "one of the team's shapes"
         assert replies[:BOOST_LIMITS["reply"]] == [900] * BOOST_LIMITS["reply"] and replies[-1] not in (900, 901), \
             replies
         assert not team.claimed(["post:900"]), "a teammate's post isn't any one account's"
@@ -1752,19 +1792,22 @@ async def anchor_check() -> None:
         async def generate(self, system: str, prompt: str) -> Optional[str]:
             self.prompts.append(prompt)
             return self.text
-    global PLAIN_SHARE, QUESTION_PROB
-    saved = PLAIN_SHARE, QUESTION_PROB
+    global CASE_SHAPES, QUESTION_PROB
+    saved = CASE_SHAPES, QUESTION_PROB
     try:
-        for share, style in ((1.0, "plain: "), (0.0, "story: ")):
-            PLAIN_SHARE, QUESTION_PROB = share, 1.0
+        for shape, (weight, guide) in saved[0].items():
+            CASE_SHAPES, QUESTION_PROB = {shape: (weight, guide)}, 1.0
             styled = Bot(writers[0], FakePlatform(), Noting(case), load_world(), store=StateStore(":memory:"))
             action = await styled._anchor()
             prompt = styled.llm.prompts[0]
-            assert action.angle.startswith(style) and not styled.plain_case, action.angle
-            assert (PLAIN_GUIDE in prompt) == (share == 1.0) and ("Open with who you are" in prompt) == (share == 0.0)
-            assert ("End with a genuine question" in prompt) == (share == 0.0), "a plain anchor asks nothing"
+            assert action.angle.startswith(f"{shape}: ") and styled.case_shape is None, action.angle
+            assert guide in prompt and CASE_OPENING in prompt and "Open with who you are" not in prompt, prompt
+            assert ("End with a genuine question" in prompt) == (shape in QUESTION_SHAPES), shape
     finally:
-        PLAIN_SHARE, QUESTION_PROB = saved
+        CASE_SHAPES, QUESTION_PROB = saved
+    daily = Bot(writers[0], FakePlatform(), Noting("Ferry was late again."), load_world(), store=StateStore(":memory:"))
+    action = await daily._compose("post", ("daily", "the ferry"))
+    assert action.angle == "the ferry" and CASE_OPENING not in daily.llm.prompts[0], "an everyday post takes no shape"
     print("anchors ok")
 
 
@@ -1977,19 +2020,20 @@ async def case_post_check() -> None:
             "I'm voting yes on the mandate so we act before it reaches us. What would make it easier for you?")
     assert MAX_LEN < len(long) <= CASE_MAX_LEN
     persuader = next(p for p in load_personas() if p["line"] == "persuade")
-    saved = QUESTION_PROB
+    saved = QUESTION_PROB, CASE_SHAPES
     try:
         for prob, asked in ((1.0, True), (0.0, False)):
             globals()["QUESTION_PROB"] = prob
+            globals()["CASE_SHAPES"] = {"refute": saved[1]["refute"]}  # a shape that may end on a question
             writer = Says(long)
             b = Bot(persuader, FakePlatform(), writer, load_world(), store=StateStore(":memory:"))
             action = await b._compose("post", ("issue", "acting before the virus arrives"))
             system, prompt = writer.calls[0]
             assert action is not None and action.content in (long, f"{long} {TEAM_TAG}"), b.rejected
-            assert "Three or four sentences" in system and "Open with who you are" in prompt
+            assert "Three or four sentences" in system and CASE_OPENING in prompt
             assert ("End with a genuine question" in prompt) == asked
     finally:
-        globals()["QUESTION_PROB"] = saved
+        globals()["QUESTION_PROB"], globals()["CASE_SHAPES"] = saved
     daily = Bot(persuader, FakePlatform(), Says(long.replace("voting yes on the mandate", "off to the wharf")),
                 load_world(), store=StateStore(":memory:"))
     assert await daily._compose("post", ("daily", "the ferry")) is None, "an everyday post stays short"
