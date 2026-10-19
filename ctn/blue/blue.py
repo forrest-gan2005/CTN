@@ -123,7 +123,7 @@ def report_detail(reason: str) -> str:
     says so. A suspect a person wrote up carries their words."""
     rule = rule_of(reason)
     why = rule[len(MANUAL):] if rule.startswith(MANUAL) else BECAUSE.get(rule, "it shows clear signs of automated posting")
-    if rule != reason:
+    if rule != reason and not rule.startswith(MANUAL):  # a write-up is about the account, whichever post it is
         why = f"it comes from an account caught in bot activity in another post ({why})"
     return f"{REPORT_OPENING}{why}."
 
@@ -377,7 +377,8 @@ class Reporter:
         self.per_round = per_round
         self.interval = interval
         self.trending = {}  # post id -> place in Trending, as last read
-        self.trending_at: Optional[datetime] = None
+        self.trending_at: Optional[datetime] = None  # last tried
+        self.trending_read: Optional[datetime] = None  # last read
         self.blocked_until: Optional[datetime] = None
         self.rulings_at: Optional[datetime] = None  # when reported posts were last looked at
         self.locked = False  # set by the team while the platform's feed is locked
@@ -493,9 +494,14 @@ class Reporter:
             return self.trending
         self.trending_at = now
         try:
-            self.trending = {post_id: place for place, post_id in enumerate(await fetch())}
+            read = {}
+            for place, post_id in enumerate(await fetch()):
+                read.setdefault(post_id, place)
+            self.trending, self.trending_read = read, now
         except Exception as e:
             log.info("trending not read (%s); ordering by the last read", str(e) or type(e).__name__)
+            if self.trending_read is not None and now - self.trending_read >= 3 * TRENDING_TTL:
+                self.trending = {}  # too old to order by
         return self.trending
 
     async def report_some(self) -> int:
@@ -509,7 +515,9 @@ class Reporter:
                 self._held = True
             return 0
         self._held = False
-        candidates = self.scanner.candidates(await self._trending())
+        candidates = self.scanner.candidates()
+        if candidates:  # Trending is read only when there is something to order
+            candidates = self.scanner.candidates(await self._trending())
         if self.side is not None:  # sides are told first, within the budget; the round itself only reads them
             await self._tell_sides(a for _, a, reason in candidates if not rule_of(reason).startswith(MANUAL))
         tried = 0
@@ -519,6 +527,12 @@ class Reporter:
             # Only the side we report; a suspect a person wrote up has had its side looked at already.
             if (self.side is not None and not rule_of(reason).startswith(MANUAL)
                     and self._side_now(author) != self.side):  # None: not told yet, a later round will
+                continue
+            # An account's posts sit together now (Trending first): one reported this round leaves the rest, without
+            # spending a try or a badge check on them.
+            if self.state.author_reports().get(author, 0) >= ACCOUNT_REPORTS or \
+                    self.state.team_reports(_campaign_day_start()).get(self.state.team_of(author), 0) >= \
+                    TEAM_REPORTS_PER_DAY:
                 continue
             tried += 1
             if self.scanner.off_limits(author) or not await self._unbadged(author):  # last chance to call it off
@@ -787,6 +801,7 @@ async def _demo() -> None:
     await _report_retry_demo()
     await _report_429_demo()
     await _report_queue_demo()
+    await _trending_demo()
     await _team_ruling_demo()
     await _badge_and_lock_demo()
     await _report_interrupt_demo()
@@ -1258,7 +1273,7 @@ async def _trending_demo() -> None:
     from ctn.infra.fake_platform import FakePlatform
     from ctn.infra.state import StateStore
 
-    p = FakePlatform()
+    p = FakePlatform(competitors={"slow_a", "hot_b", "rule_c"})
     npc_store = NpcStore(":memory:")
     cutoff = datetime.now(timezone.utc)
     made = {}
@@ -1300,6 +1315,17 @@ async def _trending_demo() -> None:
     reporter.trending_at -= TRENDING_TTL
     api.fail = False
     assert await reporter._trending() == {made["slow_a"][0]: 0}
+    reporter.trending_read -= 3 * TRENDING_TTL
+    reporter.trending_at -= TRENDING_TTL
+    api.fail = True
+    assert await reporter._trending() == {}, "a read too old to order by is dropped"
+    detail = report_detail(f"account: {MANUAL}it answers every post of one account")
+    assert "another post" not in detail and detail.endswith("it answers every post of one account."), detail
+
+    p.trending = [hot]  # one report an account: its other posts cost the round no try
+    round_ = Reporter(p, scanner, state, username="joe", per_round=2, min_citizens=0)
+    assert await round_.report_some() == 2 and set(state.author_reports()) == {"hot_b", "rule_c"}, \
+        state.author_reports()
 
 
 async def _team_ruling_demo() -> None:

@@ -308,7 +308,9 @@ class RealPlatform:
         """The ids of the posts in Trending, top first."""
         resp = await self._send("GET", "/posts", params={"sort": "trending", "limit": min(max(n, 1), PAGE)})
         resp.raise_for_status()
-        return [p["post_id"] for p in resp.json().get("items") or [] if p.get("post_id") is not None][:n]
+        # a repost there lifts what it reposts
+        ids = [p.get("repost_of_post_id") or p.get("post_id") for p in resp.json().get("items") or []]
+        return [i for i in ids if i is not None][:n]
 
     async def feed_locked(self) -> bool:
         """Whether the platform has locked its feed: only citizens and moderators can act then."""
@@ -1198,6 +1200,8 @@ async def _write_pace_demo() -> None:
     await asyncio.gather(first, *lifts, *queued)
     assert gone.cancelled() and bodies == ["anchor", "lift 0", "lift 1", "normal 0", "normal 1", "normal 2"], bodies
     assert not p._lane_locks["write"].locked(), "a cancelled write gives its turn back"
+    trending = await p.feed_trending(5)
+    assert trending and all(isinstance(i, int) for i in trending), trending
     handed, ran = PriorityLock(), []  # handed the lock, then cancelled before it could run: the next one gets it
 
     async def holder(name: str) -> None:
