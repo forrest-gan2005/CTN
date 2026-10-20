@@ -57,6 +57,9 @@ TARGET_LEANS = {"persuade": ("undecided", "no"), "bridge": ("no", "undecided"), 
 # earns a like and moves no one. The rest keeps the accounts talking like people.
 TOPICAL_REPLY_PROB = 0.9
 CITIZEN_REDRAFTS = 2  # more drafts of a reply to a citizen when a shared phrase sank the first
+# 65-75% of the replies drafted for an anchor in its rush were sunk by a phrase a teammate had used, so only 1-12 of
+# them landed, 20-45 minutes in, against the 20 that rivals' top posts get in 15-25 minutes.
+TEAM_REDRAFTS = 1
 LEAN_CHECKS = 4  # citizens profiled per reply decision, an LLM call each
 # Across the platform on 20 October, citizens who lean NO and care most about liberty or privacy pushed back at
 # 50-65% of the replies they got and were moved by 0-2%; undecided ones and those asking how it would work in
@@ -262,9 +265,10 @@ ANCHOR_FALLBACK = timedelta(minutes=10)
 LIFT_TOPICS = ("anchor",)
 BOOST_WINDOW = timedelta(hours=2)
 BOOST_DELAY = timedelta(minutes=1)
-# Two anchors an hour at 45 reposts and 20 replies take about 130 of the 175 writes an hour the lane carries,
-# leaving the usual 40 or so for other replies.
-BOOST_LIMITS = {"like": 50, "repost": 45, "reply": 20}
+# Two anchors an hour at 45 reposts and 25 replies take about 140 of the 175 writes an hour the lane carries,
+# leaving 35 or so for other replies. Fitted over 160 Trending rows on 20 October, a reply now lifts a post about as
+# much as a repost, and rivals' top posts had about 20 replies in their first 25 minutes.
+BOOST_LIMITS = {"like": 50, "repost": 45, "reply": 25}
 BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post still has places
 # Popular tags were all campaign accounts' on the opening night, a NO team's #keepkingstoniaopen first; the papers'
 # reporters write up what is popular here. The team carries the YES campaign's own words: on every anchor post, and
@@ -316,7 +320,7 @@ TEAM_REPLY_PROB = 0.45
 # over a quarter-hour or so. An account tries each once an anchor, so a dropped reply isn't redrafted over and over.
 RUSH_WINDOW = timedelta(minutes=30)
 RUSH_PROB = 0.9
-RUSH_ORDER = ("like", "repost", "reply")
+RUSH_ORDER = ("like", "reply", "repost")
 RUSH_WAIT = (20.0, 180.0)
 # The anchor post, then the reposts and replies lifting it in its rush, jump the write lane's queue: under S53 the
 # 05:00 anchor waited 7.7 minutes behind writes for older anchors and citizens, and its first repost came nine
@@ -847,7 +851,9 @@ class Bot:
     async def _compose_in(self, kind: str, topic: tuple, target: Optional[dict], context: Optional[str],
                           referendum: Optional[bool]) -> Optional[Action]:
         if kind == "reply" and target is not None and self.roster.classify(target["author"]) == "npc":
-            return await self._write_to_citizen(topic, target, context, referendum)
+            return await self._redrafted(topic, target, context, referendum, CITIZEN_REDRAFTS)
+        if kind == "reply" and target is not None and topic[1] == "team":
+            return await self._redrafted(topic, target, context, referendum, TEAM_REDRAFTS)
         if kind != "post" or topic[0] not in ("issue", "anchor"):
             return await self._write(kind, topic, target, context, referendum)
         shapes = self.case_shapes = arm_shapes(self.writing_arm or arm())
@@ -862,15 +868,16 @@ class Bot:
             action.angle = f"{shape}{'/' + worry if worry else ''}: {action.angle or ''}"
         return action
 
-    async def _write_to_citizen(self, topic: tuple, target: dict, context: Optional[str],
-                                referendum: Optional[bool]) -> Optional[Action]:
-        """A reply to a citizen, drafted again up to CITIZEN_REDRAFTS times, told to avoid the phrase, if teammates'
-        wording is what sank it: one evening 26 of the 31 dropped replies to citizens went for a shared phrase
-        ("tipped me to yes", "the vote on 2"), and a reply to a citizen is the one kind that can move a mind."""
+    async def _redrafted(self, topic: tuple, target: dict, context: Optional[str], referendum: Optional[bool],
+                         redrafts: int) -> Optional[Action]:
+        """A reply to a citizen or to a teammate's anchor, drafted again up to `redrafts` times, told to avoid the
+        phrase, if teammates' wording is what sank it: one evening 26 of the 31 dropped replies to citizens went for
+        a shared phrase ("tipped me to yes", "the vote on 2"), and a reply to a citizen is the one kind that can move
+        a mind."""
         if referendum is None:  # decided once, so a redraft is framed as the first was and costs no judge call
             referendum = await self._takes_up_referendum(target, topic[1])
         avoid = []
-        for _ in range(1 + CITIZEN_REDRAFTS):
+        for _ in range(1 + redrafts):
             self.last_shared, self.avoid = None, avoid
             try:
                 action = await self._write("reply", topic, target, context, referendum)
@@ -2218,6 +2225,7 @@ async def boost_check() -> None:
     most, the newest anchor first, and repost it; never another kind of post, never their own, never twice the same
     way, but one that liked it may still repost it. BOOST_LIMITS of them answer it too, adding their own story, the
     post not claimed by any one."""
+    global BOOST_LIMITS
     store = StateStore(":memory:")
     now = datetime.now(timezone.utc)
     for user, made_id, topic, minutes in (("rosa_dives", 500, "anchor", 10), ("joe_tama", 501, "issue", 5),
@@ -2285,9 +2293,10 @@ async def boost_check() -> None:
     team.record("joe_tama", _iso(now - timedelta(minutes=20)),
                 Action("post", content="Cafe shut for months in 2021; I'm voting yes on the mandate.",
                        topic_kind="issue", made_id=901))
-    writers = [p for p in personas if p["line"] == "background"][:BOOST_LIMITS["reply"] + 1]
     global ACTION_WEIGHTS, TEAM_REPLY_PROB
-    saved_reply = ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB
+    saved_reply = ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB, BOOST_LIMITS
+    BOOST_LIMITS = {**BOOST_LIMITS, "reply": 12}  # fewer places than there are background personas
+    writers = [p for p in personas if p["line"] == "background"][:BOOST_LIMITS["reply"] + 1]
     try:
         ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB = {"reply": 1}, 1.0, 0.0
         replies = []
@@ -2305,7 +2314,7 @@ async def boost_check() -> None:
         assert team.db.execute("SELECT COUNT(*) FROM reply_picks WHERE route = 'team'").fetchone()[0] == \
             BOOST_LIMITS["reply"]
     finally:
-        ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB = saved_reply
+        ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB, BOOST_LIMITS = saved_reply
     restored = StateStore(":memory:")  # a backup put back: the reply is in history, its place is gone
     restored.record("rosa_dives", _iso(now - timedelta(minutes=20)),
                     Action("post", content="Dive boats sat idle in 2021; voting yes.", topic_kind="anchor", made_id=950))
@@ -2439,8 +2448,8 @@ async def anchor_check() -> None:
 
 
 async def rush_check() -> None:
-    """While the newest anchor is under RUSH_WINDOW old, an account gives it a repost, then a reply, then a like
-    before anything else, each once, a dropped reply not tried again; nothing for an older anchor, and no reply from
+    """While the newest anchor is under RUSH_WINDOW old, an account gives it what RUSH_ORDER lists before anything
+    else, each once, a dropped reply not tried again; nothing for an older anchor, and no reply from
     an account gone quiet. Every prompt lists the phrases the most teammates wore out lately."""
     class Says:
         name = "says"
@@ -2488,7 +2497,7 @@ async def rush_check() -> None:
         eager = bot(writers[0], "Our boat crew lost a whole season in 2021, so I'm voting yes.")
         acted = [await eager.think(feed) for _ in range(4)]
         assert [(a.type, a.post_id) if a else None for a in acted] == \
-            [("like", 900), ("repost", 900), ("reply", 900), None], acted
+            [(kind, 900) for kind in RUSH_ORDER] + [None], acted
         assert eager._rush() is None, "nothing left to give, so it keeps its own rhythm"
         worn = eager.llm.prompts[0].split("These phrases are worn out here")[1].split("\n")[0]
         assert '"certificate at the door"' in worn and "ferry" not in worn and "voting yes" not in worn, worn
@@ -2497,8 +2506,8 @@ async def rush_check() -> None:
         assert '"certificate at the door"' in taken and "ferry" not in taken, taken
         dropped = bot(writers[1], "as an AI I can't write that")
         acted = [await dropped.think(feed) for _ in range(4)]
-        assert [(a.type, a.post_id) if a else None for a in acted] == [("like", 900), ("repost", 900), None, None], \
-            acted
+        assert [(a.type, a.post_id) if a else None for a in acted] == \
+            [(kind, 900) if kind != "reply" else None for kind in RUSH_ORDER] + [None], acted
         assert len(dropped.llm.prompts) == 1, "a dropped reply isn't drafted again in the rush"
         quiet = bot(writers[2], "Our boat crew lost a whole season in 2021, so I'm voting yes.")
         quiet.quiet = True
@@ -2644,7 +2653,9 @@ async def sibling_check() -> None:
         return Bot(persona, FakePlatform(), Says(text), load_world(), store=store, said=everywhere)
 
     echo = bot(writers[0], "Same at the bakery, I'd rather show a certificate than lose the summer.")
-    assert await echo._compose("reply", ("feed", "team"), target) is None and echo.rejected == {"shared phrase": 1}
+    assert await echo._compose("reply", ("feed", "team"), target) is None
+    assert echo.rejected == {"shared phrase": 1 + TEAM_REDRAFTS}, echo.rejected
+    assert "Don't use these words" in echo.llm.prompts[-1], "a redraft is told which phrase sank the first"
     prompt = echo.llm.prompts[0]
     assert "Cafe shut for five months" in prompt and not TAG_RE.search(prompt), prompt
     tagged = bot(writers[1], f"My nan's ward was full in 2021. Count me in {TEAM_TAG}")
