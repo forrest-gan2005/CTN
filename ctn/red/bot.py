@@ -228,14 +228,32 @@ BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post sti
 # Popular tags were all campaign accounts' on the opening night, a NO team's #keepkingstoniaopen first; the papers'
 # reporters write up what is popular here. The team carries the YES campaign's own words: on every anchor post, and
 # on half the replies lifting one and half the other referendum posts. Never the other side's tags. By 20 October
-# #ProtectKingstonia led the tags four to one (884 uses in a day, a third ours), so half go to a second YES tag that
-# answers the NO side's #KeepKingstoniaOpen, and to #VoteYes, to put more YES tags near the top. Still one tag a
-# post: citizens hardly use tags at all, and a post full of them reads as a campaign account's.
-TEAM_TAGS = ("#ProtectKingstonia", "#ProofKeepsUsOpen", "#VoteYes")
-TEAM_TAG = TEAM_TAGS[0]
+# #ProtectKingstonia led the tags four to one (884 uses in a day, two thirds of them other accounts'), so most of
+# ours go to other YES tags, to put more of them near the top (the tenth tag had about 90 uses a day): one answering
+# the NO side's #KeepKingstoniaOpen, #VoteYes, and new ones of our own. Still one tag a post: citizens hardly use
+# tags at all, and a post full of them reads as a campaign account's. Each is (tag, weight, oldest writer who'd use
+# it, words the post must contain): a pun is for younger accounts, and a tag about beds or visitors only goes on a
+# post about them.
+TEAM_TAGS = (
+    ("#ProofKeepsUsOpen", 30, None, None),
+    ("#VoteYes", 20, None, None),
+    ("#ProtectKingstonia", 15, None, None),
+    ("#AheadOfTheWave", 15, None, None),
+    ("#ProtectThePod", 15, 35, None),
+    ("#Only30Beds", 5, None, re.compile(r"hospital|intensive|\bICU\b|\bbeds?\b|\bwards?\b|nurs", re.IGNORECASE)),
+    ("#SafeToVisit", 10, None, re.compile(r"touris|visitor|resort|holiday|cruise", re.IGNORECASE)),
+)
+TEAM_TAG = TEAM_TAGS[0][0]
 TEAM_TAG_SHARE = {"anchor": 1.0, "team": 0.5, "issue": 0.5}
 # The code adds them; they say nothing about the writer.
-TAG_RE = re.compile("|".join(re.escape(t) for t in TEAM_TAGS), re.IGNORECASE)
+TAG_RE = re.compile("|".join(re.escape(t[0]) for t in TEAM_TAGS), re.IGNORECASE)
+
+
+def team_tag(age: int, text: str) -> str:
+    """One of TEAM_TAGS by weight, among those that suit a writer of this age and the post's text."""
+    fit = [(tag, weight) for tag, weight, oldest, words in TEAM_TAGS
+           if (oldest is None or age <= oldest) and (words is None or words.search(text))]
+    return random.choices([t for t, _ in fit], weights=[w for _, w in fit])[0]
 # The replies lifting an anchor sit side by side: the writer sees the ones already there, and a reply sharing a
 # phrase with one of them goes, however common the phrase is elsewhere (three of the first seven said "I'd rather
 # show a certificate").
@@ -809,7 +827,7 @@ class Bot:
             log.warning("%s rejected %s%s: %r", self.username, problem, source, content)
             return None
         tagged = topic[1] if kind == "reply" else topic[0]
-        tag = random.choice(TEAM_TAGS)
+        tag = team_tag(self.persona["age"], content)
         if (random.random() < TEAM_TAG_SHARE.get(tagged, 0.0) and not TAG_RE.search(content)
                 and len(content) + 1 + len(tag) <= POST_LIMIT):
             content = f"{content} {tag}"
@@ -2078,7 +2096,11 @@ async def anchor_check() -> None:
     first = Bot(writers[1], FakePlatform(), Says(case), load_world(), store=store)
     action = await first._anchor()
     assert action is not None and action.topic_kind == "anchor" and action.hold.startswith("anchor:"), action
-    assert any(action.content.endswith(" " + t) for t in TEAM_TAGS), "an anchor post carries a team tag"
+    assert any(action.content.endswith(" " + t[0]) for t in TEAM_TAGS), "an anchor post carries a team tag"
+    drawn = {age: {team_tag(age, "the ward was full") for _ in range(400)} for age in (24, 72)}
+    assert "#ProtectThePod" in drawn[24] and "#ProtectThePod" not in drawn[72], "a pun is for younger writers"
+    assert "#Only30Beds" in drawn[72] and "#SafeToVisit" not in drawn[72], "a topical tag goes on a post on its topic"
+    assert "#SafeToVisit" in {team_tag(50, "visitors at the resort") for _ in range(400)}
     daily = await Bot(writers[2], FakePlatform(), Says("Ferry was late again, third time this week."), load_world(),
                       store=StateStore(":memory:"))._compose("post", ("daily", "the ferry"))
     assert daily is not None and not TAG_RE.search(daily.content), "an everyday post carries no campaign tag"
@@ -2441,7 +2463,7 @@ async def case_post_check() -> None:
             b = Bot(persuader, FakePlatform(), writer, load_world(), store=StateStore(":memory:"))
             action = await b._compose("post", ("issue", "acting before the virus arrives"))
             system, prompt = writer.calls[0]
-            assert action is not None and action.content in (long, *(f"{long} {t}" for t in TEAM_TAGS)), b.rejected
+            assert action is not None and action.content in (long, *(f"{long} {t[0]}" for t in TEAM_TAGS)), b.rejected
             assert "Three or four sentences" in system and CASE_OPENING in prompt
             assert ("End with a genuine question" in prompt) == asked
     finally:
