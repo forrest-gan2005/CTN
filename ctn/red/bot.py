@@ -1429,10 +1429,11 @@ class Bot:
                 worry = (f" The NO worry people here raise most lately is {label}; answer that one, naming it in your "
                          "own words.")
             # An account tells the one change of mind it had: another one later is a tell in its own history.
-            told = next((a.content for _, a in reversed(self.history)
-                         if a.topic_kind == "anchor" and (a.angle or "").startswith("convert: ")), None)
-            if shape == "convert" and told:
-                worry += f" You already told how you changed your mind: \"{told}\" Keep to that same reason and change."
+            told = self.store.last_anchor(self.username, "convert: ") if shape == "convert" else None
+            if told:
+                told = " ".join(TAG_RE.sub(" ", without_gifs(told)).split())
+                worry += (f" You already told how you changed your mind: \"{told}\" Keep to that same reason and "
+                          "change, told in new words.")
             parts.append(f"{shapes[shape][1]}{worry}{opening} {CASE_FOCUS}")
         elif topic[0] == "vaccine":
             parts.append(f"Write a new post about vaccination in your everyday life: {topic[1]}. Don't mention the "
@@ -2380,12 +2381,15 @@ async def anchor_check() -> None:
         assert "End with a genuine question" in trial.llm.prompts[0], "an experiment anchor always asks its readers"
         assert "under 50 words" in trial.llm.systems[0], "an experiment anchor is short"
         assert "You already told" not in trial.llm.prompts[0]
-        trial.history.append((_iso(datetime.now(timezone.utc) - ANCHOR_REST * 2), action))
         trial.store.release(action.hold)
-        trial.store.db.execute("DELETE FROM history")
+        action.made_id = 960
+        trial.store.record(trial.username, _iso(datetime.now(timezone.utc) - ANCHOR_REST * 2), action)
+        trial.history = []  # a restart: the story is read from the store
         await trial._anchor()
-        assert f'You already told how you changed your mind: "{action.content}"' in trial.llm.prompts[-1], \
+        told = " ".join(TAG_RE.sub(" ", without_gifs(action.content)).split())
+        assert f'You already told how you changed your mind: "{told}"' in trial.llm.prompts[-1], \
             "an account keeps to the one change of mind it told"
+        assert not TAG_RE.search(trial.llm.prompts[-1].split("You already told")[1].split("Keep to")[0])
         ANCHOR_EXPERIMENT = False
         for shape, (weight, guide) in saved[0].items():
             assert not copies(guide, load_world()), f"{shape}: a sentence the setting has, which a post may not copy"

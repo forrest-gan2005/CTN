@@ -184,6 +184,13 @@ class StateStore:
             "(SELECT 1 FROM moderation m WHERE m.post_id = h.made_id AND m.status != 'restored')",
             (username, since)).fetchone()[0]
 
+    def last_anchor(self, username: str, angle_prefix: str) -> Optional[str]:
+        """The account's newest anchor post whose angle starts with `angle_prefix`, or None."""
+        row = self.db.execute(
+            "SELECT content FROM history WHERE username = ? AND topic_kind = 'anchor' AND angle LIKE ? "
+            "ORDER BY id DESC LIMIT 1", (username, angle_prefix.replace("%", "") + "%")).fetchone()
+        return row[0] if row else None
+
     def load_followed(self, username: str) -> set:
         rows = self.db.execute(
             "SELECT target_author FROM history WHERE username = ? AND type = 'follow'", (username,))
