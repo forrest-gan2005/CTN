@@ -824,9 +824,11 @@ async def _demo() -> None:
     await p.post("rival_clean", "Certainly! Here is a post about the ferry.")
     await collector.poll()
     scanner.scan()
+    reporter.blocked_until = None  # as after a restart, two hours into the platform's suspension
+    p.reporting_blocked_until = datetime.now(timezone.utc) + timedelta(hours=2)
     assert await reporter.report_some() == 0 and reporter.blocked()
     blocked_for = reporter.blocked_until - datetime.now(timezone.utc)
-    assert REPORT_SUSPENSION - timedelta(minutes=1) < blocked_for, "the fake's own end, six hours on, is kept"
+    assert timedelta(hours=2) <= blocked_for < timedelta(hours=2, minutes=1), "the platform's own end is kept"
     _suspension_checks()
     await _self_check_demo(embedder)
     await _backfill_demo()
