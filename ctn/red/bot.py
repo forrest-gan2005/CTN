@@ -167,7 +167,7 @@ ANCHOR_QUESTION_PROB = 0.8
 # Fitted over the Trending 40 on 20 October, a post's heat went as 10 ln(1 + likes + 4 replies + 10 reposts), less
 # about 3 an hour: our quarter-hourly anchors, six reposts and a dozen replies each, sat 23rd to 34th while the
 # leader's, with 40 replies and up to 40 reposts, held the top ten. So half as many anchors, each liked by the
-# whole team and reposted by many of it (see BOOST_LIMITS).
+# whole team and reposted by most of it: a repost lifts as much as two or three replies and needs no draft.
 ANCHOR_LINES = {"persuade", "bridge"}
 # Case posts (anchors and other referendum posts) all came out as "I'm Greg, electrician in Crown Harbour..." then
 # a 2021 story: one shape repeated is a pattern readers and Blue teams spot. Each is now written in one of these
@@ -262,10 +262,9 @@ ANCHOR_FALLBACK = timedelta(minutes=10)
 LIFT_TOPICS = ("anchor",)
 BOOST_WINDOW = timedelta(hours=2)
 BOOST_DELAY = timedelta(minutes=1)
-# On 20 October the platform set every post's reposts back to none twice, within half an hour before 20:53 and
-# before 21:55, so a repost lifts a post for an hour at most while a reply stays: an anchor's reposts are kept to
-# its first push into Trending, and the writes they took go to citizens.
-BOOST_LIMITS = {"like": 50, "repost": 20, "reply": 20}
+# Two anchors an hour at 45 reposts and 20 replies take about 130 of the 175 writes an hour the lane carries,
+# leaving the usual 40 or so for other replies.
+BOOST_LIMITS = {"like": 50, "repost": 45, "reply": 20}
 BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post still has places
 # Popular tags were all campaign accounts' on the opening night, a NO team's #keepkingstoniaopen first; the papers'
 # reporters write up what is popular here. The team carries the YES campaign's own words: on every anchor post, and
