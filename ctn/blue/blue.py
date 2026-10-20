@@ -65,10 +65,11 @@ SYDNEY = ZoneInfo("Australia/Sydney")  # campaign days change at midnight Sydney
 QUEUE_FULL_PAUSE = timedelta(minutes=10)  # standing down while the queue waits for moderators
 TRENDING_TTL = timedelta(minutes=10)  # Trending, which orders reports, is read at most this often
 # What became of a report shows on the post: hidden from everyone once ruled inauthentic (or deleted), still up
-# after the ruling's latest time if ruled genuine (6 hours since 10/20). Looked at every so often, a few at a time.
+# after the ruling's latest time if ruled genuine (3 hours since the evening of 10/20, 6 that morning, 24 before).
+# Looked at every so often, a few at a time.
 RULING_CHECK = timedelta(minutes=30)
-RULING_SOONEST = timedelta(hours=1)  # three teams' reports bring a ruling in 1½ hours, five in 22 minutes
-RULING_DUE = timedelta(hours=7)
+RULING_SOONEST = timedelta(minutes=20)  # three teams' reports bring a ruling in 45 minutes, five in 11
+RULING_DUE = timedelta(hours=4)
 RULING_LOOKS = 10
 
 # The platform names the end of a suspension ("reporting is suspended for your team until 2026-10-20T03:09:58Z");

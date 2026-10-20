@@ -14,7 +14,7 @@ PERSONA_FIELDS = {
 # bridge: has weighed both sides and draws NO-leaning and undecided citizens over; background: an ordinary
 # citizen who rarely talks referendum; amplifier: mostly likes, reposts and follows.
 LINES = {"persuade", "mobilise", "bridge", "background", "amplifier"}
-STATUSES = {"active", "reserve"}
+STATUSES = {"active", "reserve", "banned"}  # banned: suspended by the platform, kept so the team still knows it
 
 
 def load_world() -> str:
