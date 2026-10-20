@@ -241,11 +241,16 @@ NO_COVID = "Don't describe what you did during covid."  # when it isn't reminded
 # 3.3 an hour; 20 October the first had 43.6, the tenth 41), and our score fell with our share of the top ten (three
 # posts at 16:38, one or two after; 1349 points an hour, then 862, then 590). An anchor every twenty minutes keeps
 # about three there. The team's posts, replies and reposts share 3 a minute; at 40 reposts and 15 replies an anchor,
-# three an hour would pass it, so each gets 35 and 12, which costs its peak about 0.7.
+# three an hour would pass it, so each gets 35 and 12. The lane carries about 57 writes in twenty minutes, so a new
+# anchor has some 25-30 reposts and a few replies before the next takes the rush: a peak 2 to 2.5 lower, with half
+# as many again. Two anchors no closer than ANCHOR_MIN_GAP (slots post anywhere in their twenty minutes, and the
+# switch from thirty-minute slots would allow two at once), and only those of the last BOOST_WINDOW are lifted,
+# about as long as one holds the top ten: older ones only held up the lane.
 ANCHOR_GAP = timedelta(minutes=20)
+ANCHOR_MIN_GAP = timedelta(minutes=15)
 ANCHOR_REST = timedelta(minutes=75)
 LIFT_TOPICS = ("anchor",)
-BOOST_WINDOW = timedelta(hours=2)
+BOOST_WINDOW = timedelta(minutes=80)
 BOOST_DELAY = timedelta(minutes=1)
 BOOST_LIMITS = {"like": 50, "repost": 35, "reply": 12}
 BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post still has places
@@ -296,7 +301,7 @@ TEAM_REPLY_PROB = 0.45
 # account that still owes it a like, a repost or a reply gives it that first, and looks round again within RUSH_WAIT
 # seconds instead of at its next sitting; one asleep till a later sitting wakes for it within RUSH_WAIT[1]. Likes go
 # first as they don't wait for the write lane, three a minute for the team, which spreads the reposts and replies
-# over a quarter-hour or so. An account tries each once an anchor, so a dropped reply isn't redrafted over and over.
+# over the anchor's twenty minutes and more. An account tries each once an anchor, so a dropped reply isn't redrafted over and over.
 RUSH_WINDOW = timedelta(minutes=30)
 RUSH_PROB = 0.9
 RUSH_ORDER = ("like", "repost", "reply")
@@ -980,6 +985,8 @@ class Bot:
         the place goes back if the draft is dropped or never sent, for a teammate to take."""
         now = datetime.now(timezone.utc)
         if any(a.topic_kind == "anchor" and datetime.fromisoformat(ts) > now - ANCHOR_REST for ts, a in self.history):
+            return None
+        if self.store.team_posts(LIFT_TOPICS, _iso(now - ANCHOR_MIN_GAP), ""):
             return None
         slot = int(now.timestamp() // ANCHOR_GAP.total_seconds())
         hold = self.store.reserve(f"anchor:{slot}:", self.username, 1)
@@ -2234,6 +2241,11 @@ async def anchor_check() -> None:
     assert daily is not None and not TAG_RE.search(daily.content), "an everyday post carries no campaign tag"
     second = Bot(writers[2], FakePlatform(), Says(case), load_world(), store=store)
     assert await second._anchor() is None, "one anchor post a slot"
+    store.record(first.username, _iso(datetime.now(timezone.utc) - timedelta(minutes=5)),
+                 Action("post", content=action.content, topic_kind="anchor", made_id=777))
+    store.release(action.hold)
+    assert await second._anchor() is None, "no anchor within ANCHOR_MIN_GAP of a teammate's"
+    store.db.execute("DELETE FROM history WHERE made_id = 777")
     first.history.append((_iso(datetime.now(timezone.utc) - ANCHOR_REST / 2), action))
     first.store.release(action.hold)
     assert await first._anchor() is None, "an account anchors at most every ANCHOR_REST"
