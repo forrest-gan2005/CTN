@@ -207,7 +207,7 @@ QUESTION_SHAPES = {"refute", "scene", "story"}  # the rest end on their case
 # shape: a writer who leant NO for a reason NO voters share, then one local fact or moment that changed their mind,
 # YES in a few words, a question to readers, about 280 characters. Forrest approved the change-of-mind story for
 # anchors. Every anchor takes this shape while ANCHOR_EXPERIMENT is on, so its hours compare with those before.
-ANCHOR_EXPERIMENT = True
+ANCHOR_EXPERIMENT = False
 # Accounts kept quiet whatever their takedowns: rosa_dives, saved for experiment 1b, which needs it unsuspended.
 LOW_PROFILE = {"rosa_dives"}
 ANCHOR_SHAPES = {
