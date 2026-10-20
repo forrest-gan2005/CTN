@@ -150,7 +150,7 @@ QUESTION_PROB = 0.5
 # Trending on the opening night belonged to a team whose few anchor accounts each posted a case every hour or so
 # while forty teammates answered it within minutes, one line each, and liked and reposted it: 40-100 replies a post,
 # hundreds of citizens' views, the leader by thousands. The team does the same: a persuader or bridge writes the
-# ANCHOR_GAP's anchor post (an account at most every ANCHOR_REST), and everyone else lifts the newest anchors.
+# half-hour's anchor post (an account at most every ANCHOR_REST), and everyone else lifts the newest anchors.
 # Talk between our accounts links them for other teams' Blue; Forrest took that risk on, with 200 accounts to use.
 # Fitted over the Trending 40 on 20 October, a post's heat went as 10 ln(1 + likes + 4 replies + 10 reposts), less
 # about 3 an hour: our quarter-hourly anchors, six reposts and a dozen replies each, sat 23rd to 34th while the
@@ -237,17 +237,12 @@ ONE_SIDED_WORLD = {
 OPENING_FREE = {"story"}  # the one shape that may open with who you are: some do, as people do, just not every one
 COVID_SHARE = 0.35  # of prompts that remind the writer what it did during covid: every one did, and 2021 was in most
 NO_COVID = "Don't describe what you did during covid."  # when it isn't reminded, so as not to make it up
-# A lifted anchor post peaks near the top of Trending and falls out of the top ten about an hour later (heat drops
-# 3.3 an hour; 20 October the first had 43.6, the tenth 41), and our score fell with our share of the top ten (three
-# posts at 16:38, one or two after; 1349 points an hour, then 862, then 590). An anchor every twenty minutes keeps
-# about three there. The team's posts, replies and reposts share 3 a minute; at 40 reposts and 15 replies an anchor,
-# three an hour would pass it, so each gets 35 and 12, which costs its peak about 0.7.
-ANCHOR_GAP = timedelta(minutes=20)
+ANCHOR_GAP = timedelta(minutes=30)
 ANCHOR_REST = timedelta(minutes=75)
 LIFT_TOPICS = ("anchor",)
 BOOST_WINDOW = timedelta(hours=2)
 BOOST_DELAY = timedelta(minutes=1)
-BOOST_LIMITS = {"like": 50, "repost": 35, "reply": 12}
+BOOST_LIMITS = {"like": 50, "repost": 40, "reply": 15}
 BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post still has places
 # Popular tags were all campaign accounts' on the opening night, a NO team's #keepkingstoniaopen first; the papers'
 # reporters write up what is popular here. The team carries the YES campaign's own words: on every anchor post, and
@@ -976,7 +971,7 @@ class Bot:
         return None
 
     async def _anchor(self) -> Optional[Action]:
-        """This ANCHOR_GAP's anchor post, if no teammate has written it and this account hasn't anchored lately;
+        """This half-hour's anchor post, if no teammate has written it and this account hasn't anchored lately;
         the place goes back if the draft is dropped or never sent, for a teammate to take."""
         now = datetime.now(timezone.utc)
         if any(a.topic_kind == "anchor" and datetime.fromisoformat(ts) > now - ANCHOR_REST for ts, a in self.history):
@@ -2197,7 +2192,7 @@ async def boost_check() -> None:
 
 
 async def anchor_check() -> None:
-    """One anchor post an ANCHOR_GAP for the whole team, by a persuader or bridge, with the team's tag: a teammate
+    """One anchor post a half-hour for the whole team, by a persuader or bridge, with the team's tag: a teammate
     in the same slot writes none, a dropped draft gives the slot back, and an account that anchored lately leaves it
     to others."""
     class Says:
