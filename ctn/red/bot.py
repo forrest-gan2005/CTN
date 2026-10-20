@@ -254,8 +254,8 @@ ANCHOR_REST = timedelta(minutes=75)
 LIFT_TOPICS = ("anchor",)
 BOOST_WINDOW = timedelta(hours=2)
 BOOST_DELAY = timedelta(minutes=1)
-# Two anchors an hour at 45 reposts and 20 replies take about 130 of the team's 180 writes an hour, leaving the
-# usual 40 or so for other replies.
+# Two anchors an hour at 45 reposts and 20 replies take about 130 of the 175 writes an hour the lane carries,
+# leaving the usual 40 or so for other replies.
 BOOST_LIMITS = {"like": 50, "repost": 45, "reply": 20}
 BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post still has places
 # Popular tags were all campaign accounts' on the opening night, a NO team's #keepkingstoniaopen first; the papers'
@@ -291,7 +291,7 @@ def team_tag(age: int, text: str) -> str:
 # The replies lifting an anchor sit side by side: the writer sees the ones already there, and a reply sharing a
 # phrase with one of them goes, however common the phrase is elsewhere (three of the first seven said "I'd rather
 # show a certificate").
-SIBLINGS_SHOWN = 10
+SIBLINGS_SHOWN = 20  # as many as an anchor gets: a writer must see every reply its draft is checked against
 # Of an account's replies, the share that go to an anchor post while one has places; most of an anchor's replies come
 # in its rush, which BOOST_LIMITS caps, so the cap is the bigger lever. Lifting anchors, the team's replies to
 # NO-leaning and undecided citizens fell from about ten an hour to one to five, and the hour's changes of mind
