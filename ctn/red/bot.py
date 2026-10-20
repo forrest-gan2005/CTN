@@ -303,7 +303,7 @@ def team_tag(age: int, text: str) -> str:
 # The replies lifting an anchor sit side by side: the writer sees the ones already there, and a reply sharing a
 # phrase with one of them goes, however common the phrase is elsewhere (three of the first seven said "I'd rather
 # show a certificate").
-SIBLINGS_SHOWN = 20  # as many as an anchor gets: a writer must see every reply its draft is checked against
+SIBLINGS_SHOWN = BOOST_LIMITS["reply"]  # a writer must see every reply its draft is checked against
 # Of an account's replies, the share that go to an anchor post while one has places; most of an anchor's replies come
 # in its rush, which BOOST_LIMITS caps, so the cap is the bigger lever. Lifting anchors, the team's replies to
 # NO-leaning and undecided citizens fell from about ten an hour to one to five, and the hour's changes of mind
@@ -589,7 +589,11 @@ class Bot:
             if kind == "reply":
                 found = self._team_reply_target(only=post_id)
                 if found is not None:
-                    return await self._reply(found[0], "feed", "team", hold=found[1], referendum=True, claim=False)
+                    reply = await self._reply(found[0], "feed", "team", hold=found[1], referendum=True, claim=False)
+                    if reply is not None or (post_id, "repost") in self.rushed:
+                        return reply
+                    self.rushed.add((post_id, "repost"))  # the reply was dropped: the repost needn't wait a look-round
+                    return self._boost("repost", only=post_id)
             else:
                 boost = self._boost(kind, only=post_id)
                 if boost is not None:
@@ -2506,8 +2510,8 @@ async def rush_check() -> None:
         assert '"certificate at the door"' in taken and "ferry" not in taken, taken
         dropped = bot(writers[1], "as an AI I can't write that")
         acted = [await dropped.think(feed) for _ in range(4)]
-        assert [(a.type, a.post_id) if a else None for a in acted] == \
-            [(kind, 900) if kind != "reply" else None for kind in RUSH_ORDER] + [None], acted
+        assert [(a.type, a.post_id) if a else None for a in acted] == [("like", 900), ("repost", 900), None, None], \
+            "a dropped reply hands its turn to the repost"
         assert len(dropped.llm.prompts) == 1, "a dropped reply isn't drafted again in the rush"
         quiet = bot(writers[2], "Our boat crew lost a whole season in 2021, so I'm voting yes.")
         quiet.quiet = True
