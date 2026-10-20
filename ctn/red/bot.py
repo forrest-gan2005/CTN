@@ -1290,18 +1290,25 @@ class Bot:
                 listed = "\n".join(wrap_external(target["author"], t) for t in about)
                 parts.append("Other things they posted lately (don't quote them or mention that you looked):\n"
                              + listed)
+            angle = random.choice(j["angles"])
+            if target["author"] in COLUMNISTS:  # pointed to a story, a columnist was told what to write
+                lead = (f"If it fits, bring in what you know about {angle}, as something you know, not a story to "
+                        "write. ")
+            else:
+                lead = f"If it fits, point them in your own words to a story worth looking into, such as {angle}. "
             parts.append(f"They care about {j['cares']}. Write a reply to them as a reader: open with one concrete "
                          "thing from your own life, or one fact you know, that shows why YES protects people here, then "
                          "take their point up in a few words of your own, with the safeguards they want written in. "
-                         "Don't open by calling their point fair or by agreeing with it. If it fits, point them in your "
-                         f"own words to a story worth looking into, such as {random.choice(j['angles'])}. "
+                         f"Don't open by calling their point fair or by agreeing with it. {lead}"
+                         "A fact about the hospitals or the rules is something you know, not something you have or "
+                         "run, unless your own work is part of it. "
                          "Speak to them directly; never mention their username or their paper, don't flatter them, "
                          "don't tell them what to write, don't lecture, and never claim the rules come with an end "
                          "date.")
             if target["author"] in COLUMNISTS:
                 parts.append("They write the paper's opinion pieces from what people here tell them, so make it "
-                             "something a column could quote: specific, true to what you know of Kingstonia, never "
-                             "made up.")
+                             "something specific and true to what you know of Kingstonia, never made up, and never "
+                             "suggest a column or a story to them.")
             add_siblings()
         elif kind == "reply":
             if earlier is not None:
@@ -2026,6 +2033,7 @@ async def press_check() -> None:
     assert store.db.execute("SELECT route FROM reply_picks").fetchall() == [("journalist",)]
     prompt = first.llm.prompts[0]
     assert JOURNALISTS["amanda_rivera"]["cares"] in prompt and "sunset dates" in prompt, prompt
+    assert "story worth looking into" in prompt and "never suggest a column" not in prompt, "reporters keep the tip"
     assert "never mention their username" in prompt
     assert action.hold == f"press:amanda_rivera:{datetime.now(TIMEZONE).date()}:{first.username}"
     first.remember(action)
@@ -2637,6 +2645,7 @@ async def column_check() -> None:
         assert action is not None and action.post_id == target["id"], action
         prompt = b.llm.prompts[-1]
         assert "opinion pieces" in prompt and "Don't open by calling their point fair" in prompt, prompt
+        assert "story worth looking into" not in prompt and "never suggest a column" in prompt, prompt
         picked.append(target["id"])  # not sent: its pick stays open, as a draft being written
     # the bare posts twice each, newest first, then the day's places are gone; full, stale and the reporter's never
     assert picked == [705, 705, 701, 701, None], picked
