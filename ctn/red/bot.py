@@ -205,9 +205,13 @@ ONE_SIDED_DEFAULT = ("Respond to their actual point. If they lean NO, don't rest
 # The setting's own advice to grant the worry first, swapped for the one-sided arm.
 ONE_SIDED_WORLD = {
     "Take the worry seriously, then say why you still land on YES.":
-        "Don't take up or grant their worry; say why you land on YES.",
+        "Don't restate or grant their worry; say why you land on YES.",
     "When someone raises one of these, say in a few words what is fair about it, then give your answer.":
         "When someone raises one of these, give your answer without restating or granting the worry.",
+    "Agree that limits are fair: you'd want an end date and a review too, and you can say you'll keep asking for them.":
+        "Give your own reason rather than agreeing about limits.",
+    "Privacy matters and you understand the worry. ": "",
+    "Fair: you'd like the list published too. ": "",
 }
 OPENING_FREE = {"story"}  # the one shape that may open with who you are: some do, as people do, just not every one
 COVID_SHARE = 0.35  # of prompts that remind the writer what it did during covid: every one did, and 2021 was in most
@@ -440,6 +444,7 @@ class Bot:
         self.rushed = set()  # (anchor post id, kind) this process has tried in a rush
         self.case_shape = None  # the CASE_SHAPES entry the case post being written takes
         self.case_shapes = None  # and the arm's shapes it was drawn from
+        self.writing_arm = None  # the switchback arm of the draft being written
         self.case_worry = None  # the citizens' worry it was told to answer, if any
         self.last_shared = None  # the phrase that sank the last draft, if one did
         self.avoid = []  # phrases the draft being written must not use
@@ -682,13 +687,20 @@ class Bot:
         """Generate, clean and vet content; returns a publishable Action or None. `context` is the post a
         journalist's `target` answers and `referendum` whether a reply takes up the referendum, when known. A case
         post takes one of CASE_SHAPES, named at the front of its angle."""
+        self.writing_arm = arm()  # one arm for the whole draft, even across a block's end
+        note_arm(self.writing_arm)
+        try:
+            return await self._compose_in(kind, topic, target, context, referendum)
+        finally:
+            self.writing_arm = None
+
+    async def _compose_in(self, kind: str, topic: tuple, target: Optional[dict], context: Optional[str],
+                          referendum: Optional[bool]) -> Optional[Action]:
         if kind == "reply" and target is not None and self.roster.classify(target["author"]) == "npc":
             return await self._write_to_citizen(topic, target, context, referendum)
         if kind != "post" or topic[0] not in ("issue", "anchor"):
             return await self._write(kind, topic, target, context, referendum)
-        which = arm()
-        note_arm(which)
-        shapes = self.case_shapes = arm_shapes(which)
+        shapes = self.case_shapes = arm_shapes(self.writing_arm or arm())
         shape = self.case_shape = _draw_shape(shapes)
         self.case_worry = None
         try:
@@ -1086,7 +1098,7 @@ class Bot:
         length = ("Three or four sentences, under 75 words." if case
                   else "Keep it to 1-3 short sentences, under 40 words.")
         return (
-            f"{arm_world(arm(), self.world if arguments else self.plain_world)}\n\n"
+            f"{arm_world(self.writing_arm or arm(), self.world if arguments else self.plain_world)}\n\n"
             f"{self.news + chr(10) * 2 if self.news else ''}"
             f"Today is {today:%A} {today.day} {today:%B %Y}. "
             f"The referendum is in {(REFERENDUM_DAY - today).days} days.\n\n"
@@ -1173,7 +1185,7 @@ class Bot:
             if about_referendum(target.get("content") or "") if referendum is None else referendum:
                 shape = f" {random.choices(*zip(*TEAM_SHAPES))[0]}" if topic[1] == "team" else ""
                 parts.append(
-                    f"{arm_guide(arm(), topic[1])}{shape} Never agree that the mandate is unfair and never "
+                    f"{arm_guide(self.writing_arm or arm(), topic[1])}{shape} Never agree that the mandate is unfair and never "
                     "make their argument for them."
                 )
             else:
@@ -1195,7 +1207,7 @@ class Bot:
         elif topic[0] in ("issue", "anchor"):
             parts.append(f"Write a new post about the referendum, along this line: {topic[1]}. A comparison is fine, "
                          "but make plain that you mean the referendum on proof of vaccination; nobody should have to guess.")
-            shapes = self.case_shapes or arm_shapes(arm())
+            shapes = self.case_shapes or arm_shapes(self.writing_arm or arm())
             shape = self.case_shape if self.case_shape in shapes else _draw_shape(shapes)
             opening = "" if shape in OPENING_FREE else f" {CASE_OPENING}"
             # The worry a refutation answers is one citizens are raising now, rather than the writer's guess at it.
@@ -2338,7 +2350,8 @@ def arm_check() -> None:
     try:
         system = b._system_prompt([], False, arguments=True, case=True)
         prompt = b._user_prompt("post", None, ("anchor", "acting early"))
-        assert "Don't take up or grant their worry" in system and "what is fair about it" not in system
+        assert "Don't restate or grant their worry" in system and "what is fair about it" not in system
+        assert not re.search(r"Agree that limits|Fair: you'd like|understand the worry", system), system
         assert any(guide in prompt for _, guide in ONE_SIDED_SHAPES.values()), prompt
         assert CASE_SHAPES["refute"][1] not in prompt
     finally:
