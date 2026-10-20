@@ -55,20 +55,20 @@ MIN_CITIZENS = 100
 REPORT_ATTEMPTS = 5  # a report that never got through is retried this many times in all, backing off
 REPORT_BACKOFF = timedelta(minutes=1)  # doubled after each failure, up to an hour
 RATE_LIMIT_PAUSE = timedelta(minutes=1)  # standing down after a bare 429 that carried no wait
-# The platform holds only 20 of a team's reports awaiting a ruling, and the moderator rules 24 hours after the first
-# report (sooner as more teams report the post): about twenty rulings a day if we report alone. Upheld reports on one
+# The platform holds only 25 of a team's reports awaiting a ruling (20 until 10/20), and the moderator rules within 6
+# hours of the first report (24 until 10/20; sooner as more teams report the post). Upheld reports on one
 # competitor team pay in full for the first five of a campaign day, half for the next five, a tenth after. So one
 # report an account, five a competitor team a day, and the places go round the teams.
 ACCOUNT_REPORTS = 1
 TEAM_REPORTS_PER_DAY = 5
 SYDNEY = ZoneInfo("Australia/Sydney")  # campaign days change at midnight Sydney time
-QUEUE_FULL_PAUSE = timedelta(minutes=10)  # standing down while those 20 wait for moderators
+QUEUE_FULL_PAUSE = timedelta(minutes=10)  # standing down while the queue waits for moderators
 TRENDING_TTL = timedelta(minutes=10)  # Trending, which orders reports, is read at most this often
-# What became of a report shows on the post: hidden from everyone once ruled inauthentic (or deleted), still up a
-# day after the report if ruled genuine (a ruling is due within 24 hours). Looked at every so often, a few at a time.
+# What became of a report shows on the post: hidden from everyone once ruled inauthentic (or deleted), still up
+# after the ruling's latest time if ruled genuine (6 hours since 10/20). Looked at every so often, a few at a time.
 RULING_CHECK = timedelta(minutes=30)
 RULING_SOONEST = timedelta(hours=1)  # five teams' reports bring a ruling in 1½ hours; nothing is due before
-RULING_DUE = timedelta(hours=25)
+RULING_DUE = timedelta(hours=7)
 RULING_LOOKS = 10
 
 TOO_FAST, COPIED, PARAPHRASED = "superhuman posting rate", "copied across accounts", "paraphrased across accounts"
