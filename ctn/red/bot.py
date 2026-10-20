@@ -177,6 +177,38 @@ QUESTION_SHAPES = {"refute", "scene", "story"}  # the rest end on their case
 # lesser away hits), maybe the worry restated doing more than the answer, though other changes ran that hour too;
 # off for an hour to see whether they stop.
 ANSWER_WORRIES = False
+# Switchback test from 10/20 14:10. Each hour few minds moved towards YES while about twenty-five vaccination views
+# moved "towards neither side", which the scoring page counts for rewordings and for movement that pulls both ways;
+# our case posts and replies grant a NO worry before landing on YES. In two-hour blocks the team writes either as
+# before ("granted") or "one-sided": one concrete reason for YES, no NO worry restated or granted. Which comes first
+# in each pair of blocks is drawn from a seed, so each arm gets mixed hours of the day and a restart keeps the
+# schedule. The hourly score lines (towards YES, neither, away) are then compared block by block.
+ARM_START = datetime(2026, 10, 20, 14, 10, tzinfo=TIMEZONE)
+ARM_BLOCK = timedelta(hours=2)
+ARMS = ("granted", "one-sided")
+ARM_FIXED: Optional[str] = None  # set to one arm to stop the schedule (the self-tests pin "granted")
+ONE_SIDED_SHAPES = {
+    "plain": (2.0, "Make that one case only, plainly, and back it with one of the facts given above."),
+    "values": CASE_SHAPES["values"],
+    "scene": CASE_SHAPES["scene"],
+    "story": (1.0, "Open with who you are, in a few words of your own rather than as your profile puts it, and "
+                   "what's at stake for you (your work, your family, your street), then say plainly why you're "
+                   "voting YES."),
+}
+ONE_SIDED_GUIDE = {
+    "no": ("They seem to lean NO. Don't argue or lecture, and don't restate or grant their worry: answer the reason "
+           "they gave with a short bit of your own story or one of the facts given above, give your own reason for "
+           "YES, and leave the choice with them."),
+}
+ONE_SIDED_DEFAULT = ("Respond to their actual point. If they lean NO, don't restate or grant their worry; give your own "
+                     "reason for voting YES.")
+# The setting's own advice to grant the worry first, swapped for the one-sided arm.
+ONE_SIDED_WORLD = {
+    "Take the worry seriously, then say why you still land on YES.":
+        "Don't take up or grant their worry; say why you land on YES.",
+    "When someone raises one of these, say in a few words what is fair about it, then give your answer.":
+        "When someone raises one of these, give your answer without restating or granting the worry.",
+}
 OPENING_FREE = {"story"}  # the one shape that may open with who you are: some do, as people do, just not every one
 COVID_SHARE = 0.35  # of prompts that remind the writer what it did during covid: every one did, and 2021 was in most
 NO_COVID = "Don't describe what you did during covid."  # when it isn't reminded, so as not to make it up
@@ -311,10 +343,52 @@ def topic_mix(line: str, day: date) -> dict:
     return TOPIC_MIX[line]
 
 
-def _draw_shape() -> str:
-    """A case post's shape, by CASE_SHAPES weight."""
-    shapes = list(CASE_SHAPES)
-    return random.choices(shapes, weights=[CASE_SHAPES[k][0] for k in shapes])[0]
+def arm(now: Optional[datetime] = None) -> str:
+    """The switchback arm the team writes in at `now`: "granted" before ARM_START, then by ARM_BLOCK."""
+    if ARM_FIXED is not None:
+        return ARM_FIXED
+    now = now or datetime.now(timezone.utc)
+    if now < ARM_START:
+        return ARMS[0]
+    block = int((now - ARM_START) / ARM_BLOCK)
+    first = random.Random(f"arm pair {block // 2}").randrange(2)
+    return ARMS[first ^ (block % 2)]
+
+
+_arm_noted = None
+
+
+def note_arm(which: str) -> None:
+    """Logs the arm when it changes, so run.log shows which block each post was written in."""
+    global _arm_noted
+    if which != _arm_noted:
+        _arm_noted = which
+        log.info("writing arm: %s", which)
+
+
+def arm_shapes(which: str) -> dict:
+    return CASE_SHAPES if which == ARMS[0] else ONE_SIDED_SHAPES
+
+
+def arm_guide(which: str, lean: str) -> str:
+    if which == ARMS[0]:
+        return LEAN_GUIDE.get(lean, DEFAULT_GUIDE)
+    return ONE_SIDED_GUIDE.get(lean) or LEAN_GUIDE.get(lean, ONE_SIDED_DEFAULT)
+
+
+def arm_world(which: str, world: str) -> str:
+    if which == ARMS[0]:
+        return world
+    for granted, one_sided in ONE_SIDED_WORLD.items():
+        world = world.replace(granted, one_sided)
+    return world
+
+
+def _draw_shape(shapes: Optional[dict] = None) -> str:
+    """A case post's shape, by weight among `shapes` (by default the current arm's)."""
+    shapes = shapes if shapes is not None else arm_shapes(arm())
+    names = list(shapes)
+    return random.choices(names, weights=[shapes[k][0] for k in names])[0]
 
 
 def _iso(dt: datetime) -> str:
@@ -365,6 +439,7 @@ class Bot:
         self.seen = self.store.load_seen(self.username)
         self.rushed = set()  # (anchor post id, kind) this process has tried in a rush
         self.case_shape = None  # the CASE_SHAPES entry the case post being written takes
+        self.case_shapes = None  # and the arm's shapes it was drawn from
         self.case_worry = None  # the citizens' worry it was told to answer, if any
         self.last_shared = None  # the phrase that sank the last draft, if one did
         self.avoid = []  # phrases the draft being written must not use
@@ -611,13 +686,16 @@ class Bot:
             return await self._write_to_citizen(topic, target, context, referendum)
         if kind != "post" or topic[0] not in ("issue", "anchor"):
             return await self._write(kind, topic, target, context, referendum)
-        shape = self.case_shape = _draw_shape()
+        which = arm()
+        note_arm(which)
+        shapes = self.case_shapes = arm_shapes(which)
+        shape = self.case_shape = _draw_shape(shapes)
         self.case_worry = None
         try:
             action = await self._write(kind, topic, target, context, referendum)
         finally:
             self.case_shape, worry = None, self.case_worry
-            self.case_worry = None
+            self.case_worry = self.case_shapes = None
         if action is not None:
             action.angle = f"{shape}{'/' + worry if worry else ''}: {action.angle or ''}"
         return action
@@ -1008,7 +1086,7 @@ class Bot:
         length = ("Three or four sentences, under 75 words." if case
                   else "Keep it to 1-3 short sentences, under 40 words.")
         return (
-            f"{self.world if arguments else self.plain_world}\n\n"
+            f"{arm_world(arm(), self.world if arguments else self.plain_world)}\n\n"
             f"{self.news + chr(10) * 2 if self.news else ''}"
             f"Today is {today:%A} {today.day} {today:%B %Y}. "
             f"The referendum is in {(REFERENDUM_DAY - today).days} days.\n\n"
@@ -1095,7 +1173,7 @@ class Bot:
             if about_referendum(target.get("content") or "") if referendum is None else referendum:
                 shape = f" {random.choices(*zip(*TEAM_SHAPES))[0]}" if topic[1] == "team" else ""
                 parts.append(
-                    f"{LEAN_GUIDE.get(topic[1], DEFAULT_GUIDE)}{shape} Never agree that the mandate is unfair and never "
+                    f"{arm_guide(arm(), topic[1])}{shape} Never agree that the mandate is unfair and never "
                     "make their argument for them."
                 )
             else:
@@ -1117,7 +1195,8 @@ class Bot:
         elif topic[0] in ("issue", "anchor"):
             parts.append(f"Write a new post about the referendum, along this line: {topic[1]}. A comparison is fine, "
                          "but make plain that you mean the referendum on proof of vaccination; nobody should have to guess.")
-            shape = self.case_shape or _draw_shape()
+            shapes = self.case_shapes or arm_shapes(arm())
+            shape = self.case_shape if self.case_shape in shapes else _draw_shape(shapes)
             opening = "" if shape in OPENING_FREE else f" {CASE_OPENING}"
             # The worry a refutation answers is one citizens are raising now, rather than the writer's guess at it.
             worry = ""
@@ -1125,7 +1204,7 @@ class Bot:
                 self.case_worry, label = random.choice(self.worries)
                 worry = (f" The NO worry people here raise most lately is {label}; answer that one, naming it in your "
                          "own words.")
-            parts.append(f"{CASE_SHAPES[shape][1]}{worry}{opening} {CASE_FOCUS}")
+            parts.append(f"{shapes[shape][1]}{worry}{opening} {CASE_FOCUS}")
         elif topic[0] == "vaccine":
             parts.append(f"Write a new post about vaccination in your everyday life: {topic[1]}. Don't mention the "
                          "referendum or any mandate in this one, and don't give anyone medical advice.")
@@ -2228,6 +2307,45 @@ async def sibling_check() -> None:
     print("siblings ok")
 
 
+def arm_check() -> None:
+    """The switchback runs in two-hour blocks from ARM_START, each pair of blocks one of each arm, the same after a
+    restart; the one-sided arm grants no NO worry anywhere it is asked for."""
+    global ARM_FIXED
+    fixed, ARM_FIXED = ARM_FIXED, None
+    try:
+        assert arm(ARM_START - timedelta(minutes=1)) == "granted"
+        blocks = [arm(ARM_START + ARM_BLOCK * k + timedelta(minutes=30)) for k in range(48)]
+        assert all({blocks[k], blocks[k + 1]} == set(ARMS) for k in range(0, 48, 2)), blocks
+        assert blocks[0] != blocks[1] and blocks != [ARMS[0], ARMS[1]] * 24, "the order within a pair is drawn"
+        assert arm(ARM_START + ARM_BLOCK - timedelta(seconds=1)) == blocks[0]
+        assert arm(ARM_START + ARM_BLOCK) == blocks[1]
+        assert [arm(ARM_START + ARM_BLOCK * k + timedelta(minutes=90)) for k in range(48)] == blocks
+    finally:
+        ARM_FIXED = fixed
+    world = load_world()
+    assert all(granted in world for granted in ONE_SIDED_WORLD), "a sentence the one-sided arm swaps has changed"
+    one_sided = arm_world("one-sided", world)
+    assert arm_world("granted", world) == world and not any(g in one_sided for g in ONE_SIDED_WORLD)
+    assert "refute" not in arm_shapes("one-sided") and arm_shapes("granted") is CASE_SHAPES
+    for shape, (_, guide) in ONE_SIDED_SHAPES.items():
+        assert not re.search(r"worry|other side", guide), shape
+        assert not copies(guide, world), f"{shape}: a sentence the setting has, which a post may not copy"
+    assert "don't restate or grant" in arm_guide("one-sided", "no") and arm_guide("granted", "no") == LEAN_GUIDE["no"]
+    assert arm_guide("one-sided", "team") == LEAN_GUIDE["team"] and arm_guide("one-sided", "x") == ONE_SIDED_DEFAULT
+    persuader = next(p for p in load_personas() if p["line"] == "persuade")
+    b = Bot(persuader, FakePlatform(), FakeLLM(), world, store=StateStore(":memory:"))
+    ARM_FIXED = "one-sided"
+    try:
+        system = b._system_prompt([], False, arguments=True, case=True)
+        prompt = b._user_prompt("post", None, ("anchor", "acting early"))
+        assert "Don't take up or grant their worry" in system and "what is fair about it" not in system
+        assert any(guide in prompt for _, guide in ONE_SIDED_SHAPES.values()), prompt
+        assert CASE_SHAPES["refute"][1] not in prompt
+    finally:
+        ARM_FIXED = fixed
+    print("arm ok")
+
+
 async def case_post_check() -> None:
     """A referendum post may run to CASE_MAX_LEN and is asked for in three or four sentences, opening with who the
     writer is; half end on a question; other posts keep to MAX_LEN."""
@@ -2881,6 +2999,8 @@ if __name__ == "__main__":
     logging.getLogger("httpx").setLevel(logging.WARNING)
     n_bots = args.bots or (3 if args.real else 20)
     random.seed(0)
+    arm_check()
+    ARM_FIXED = "granted"  # the checks below were written for the granted arm's shapes and guides
     asyncio.run(sign_off_check())
     asyncio.run(arguments_check())
     asyncio.run(gif_check())
