@@ -714,8 +714,9 @@ class Bot:
             return None
         action = None
         try:
-            lean = "team" if route == "team" else "unknown"
-            if self.roster.classify(target["author"]) == "npc" and target["author"] not in NEWS_OUTLETS:
+            lean = route if route in ("team", "desk") else "unknown"
+            if (route != "desk" and self.roster.classify(target["author"]) == "npc"
+                    and target["author"] not in NEWS_OUTLETS):
                 lean = await self._lean(target["author"], target.get("content") or "")
             action = await self._compose("reply", target=target, topic=(source, lean), context=context,
                                          referendum=referendum)
@@ -2557,12 +2558,12 @@ async def desk_check() -> None:
     for i, persona in enumerate(desk[:DESK_LIMITS["outlet"] + DESK_LIMITS["journalist"] + 1]):
         b = Bot(persona, platform, Says(i), load_world(), roster=roster, store=store)
         b.seen.update(p["id"] for p in feed)  # the desk alone, not the usual feed replies
-        action = await b.think({"feed": feed})
+        b.read = lambda: asyncio.sleep(0, {"feed": feed})
+        action = await b.step()
         if action is None or action.type != "reply":
             answered.append(None)
             continue
-        assert action.hold == f"desk:{action.post_id}:{b.username}", action
-        b.remember(action)
+        assert action.hold == f"desk:{action.post_id}:{b.username}" and action.angle == "lean:desk", action
         answered.append(action.post_id)
         again = await b._desk_target(feed)
         assert again is None or again[0]["id"] != action.post_id, "one answer a post from each account"
@@ -2582,14 +2583,13 @@ async def desk_check() -> None:
     late.llm.generate = lambda system, prompt: late.llm.prompts.append(prompt) or Says(0).generate(system, prompt)
     await late._compose("reply", ("feed", "desk"), story)
     assert first[:40] in late.llm.prompts[0], "the desk sees what teammates already said under the post"
-    echo = Action("reply", post_id=story["id"], content=f"Honestly. {first}", angle="lean:desk",
-                  target_author="KingstoniaHerald")
-
-    async def chosen(_obs: dict) -> Action:
-        return echo
-    late.think = chosen
-    before = len(platform.posts)
-    assert await late.step() is None and len(platform.posts) == before, "no echo under one post"
+    fresh_store, fresh_platform = StateStore(":memory:"), FakePlatform()
+    scoop = await fresh_platform.post("KingstoniaHerald", "Referendum: the ward that ran out of beds in 2021")
+    for persona in desk[:2]:
+        twin = Bot(persona, fresh_platform, Says(4), load_world(), roster=roster, store=fresh_store)
+        twin.read = lambda: asyncio.sleep(0, {"feed": [scoop]})
+        await twin.step()
+    assert len(fresh_store.team_replies(scoop["id"])) == 1, "no echo under one post"
 
     class Fails(Says):
         async def generate(self, system: str, prompt: str) -> Optional[str]:
