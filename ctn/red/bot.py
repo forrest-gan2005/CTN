@@ -224,10 +224,15 @@ BOOST_LIMITS = {"like": 50, "repost": 40, "reply": 15}
 BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post still has places
 # Popular tags were all campaign accounts' on the opening night, a NO team's #keepkingstoniaopen first; the papers'
 # reporters write up what is popular here. The team carries the YES campaign's own words: on every anchor post, and
-# on half the replies lifting one and half the other referendum posts. Never the other side's tags.
-TEAM_TAG = "#ProtectKingstonia"
+# on half the replies lifting one and half the other referendum posts. Never the other side's tags. By 20 October
+# #ProtectKingstonia led the tags four to one (884 uses in a day, a third ours), so half go to a second YES tag that
+# answers the NO side's #KeepKingstoniaOpen, to put more YES tags near the top. Still one tag a post: citizens
+# hardly use tags at all, and a post full of them reads as a campaign account's.
+TEAM_TAGS = ("#ProtectKingstonia", "#ProofKeepsUsOpen")
+TEAM_TAG = TEAM_TAGS[0]
 TEAM_TAG_SHARE = {"anchor": 1.0, "team": 0.5, "issue": 0.5}
-TAG_RE = re.compile(re.escape(TEAM_TAG), re.IGNORECASE)  # the code adds it; it says nothing about the writer
+# The code adds them; they say nothing about the writer.
+TAG_RE = re.compile("|".join(re.escape(t) for t in TEAM_TAGS), re.IGNORECASE)
 # The replies lifting an anchor sit side by side: the writer sees the ones already there, and a reply sharing a
 # phrase with one of them goes, however common the phrase is elsewhere (three of the first seven said "I'd rather
 # show a certificate").
@@ -798,9 +803,10 @@ class Bot:
             log.warning("%s rejected %s%s: %r", self.username, problem, source, content)
             return None
         tagged = topic[1] if kind == "reply" else topic[0]
-        if (random.random() < TEAM_TAG_SHARE.get(tagged, 0.0) and TEAM_TAG.lower() not in content.lower()
-                and len(content) + 1 + len(TEAM_TAG) <= POST_LIMIT):
-            content = f"{content} {TEAM_TAG}"
+        tag = random.choice(TEAM_TAGS)
+        if (random.random() < TEAM_TAG_SHARE.get(tagged, 0.0) and not TAG_RE.search(content)
+                and len(content) + 1 + len(tag) <= POST_LIMIT):
+            content = f"{content} {tag}"
         # Added after every check, which would take the link for one the model made up.
         link = self.gifs.pick(query) if gif and query and self.gifs is not None else None
         if link and len(content) + 1 + len(link) <= POST_LIMIT:
@@ -2055,10 +2061,10 @@ async def anchor_check() -> None:
     first = Bot(writers[1], FakePlatform(), Says(case), load_world(), store=store)
     action = await first._anchor()
     assert action is not None and action.topic_kind == "anchor" and action.hold.startswith("anchor:"), action
-    assert action.content.endswith(" " + TEAM_TAG), "an anchor post carries the team's tag"
+    assert any(action.content.endswith(" " + t) for t in TEAM_TAGS), "an anchor post carries a team tag"
     daily = await Bot(writers[2], FakePlatform(), Says("Ferry was late again, third time this week."), load_world(),
                       store=StateStore(":memory:"))._compose("post", ("daily", "the ferry"))
-    assert daily is not None and TEAM_TAG not in daily.content, "an everyday post carries no campaign tag"
+    assert daily is not None and not TAG_RE.search(daily.content), "an everyday post carries no campaign tag"
     second = Bot(writers[2], FakePlatform(), Says(case), load_world(), store=store)
     assert await second._anchor() is None, "one anchor post a slot"
     first.history.append((_iso(datetime.now(timezone.utc) - ANCHOR_REST / 2), action))
@@ -2331,7 +2337,7 @@ async def sibling_check() -> None:
     echo = bot(writers[0], "Same at the bakery, I'd rather show a certificate than lose the summer.")
     assert await echo._compose("reply", ("feed", "team"), target) is None and echo.rejected == {"shared phrase": 1}
     prompt = echo.llm.prompts[0]
-    assert "Cafe shut for five months" in prompt and TEAM_TAG not in prompt, prompt
+    assert "Cafe shut for five months" in prompt and not TAG_RE.search(prompt), prompt
     tagged = bot(writers[1], f"My nan's ward was full in 2021. Count me in {TEAM_TAG}")
     assert await tagged._compose("reply", ("feed", "team"), target) is not None, "the tag is no shared phrase"
     late = bot(writers[2], "Our street went quiet for months in 2021, and my shop with it.")
@@ -2418,7 +2424,7 @@ async def case_post_check() -> None:
             b = Bot(persuader, FakePlatform(), writer, load_world(), store=StateStore(":memory:"))
             action = await b._compose("post", ("issue", "acting before the virus arrives"))
             system, prompt = writer.calls[0]
-            assert action is not None and action.content in (long, f"{long} {TEAM_TAG}"), b.rejected
+            assert action is not None and action.content in (long, *(f"{long} {t}" for t in TEAM_TAGS)), b.rejected
             assert "Three or four sentences" in system and CASE_OPENING in prompt
             assert ("End with a genuine question" in prompt) == asked
     finally:
