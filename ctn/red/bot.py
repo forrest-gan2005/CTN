@@ -131,6 +131,16 @@ PRESS_WINDOW = timedelta(hours=6)  # a journalist's post this old is still worth
 DESK_LINES = {"amplifier", "background"}
 DESK_WINDOW = timedelta(hours=1)
 DESK_LIMITS = {"outlet": 6, "journalist": 3}
+# The columnists write the papers' opinion pieces in the bursts in which they answer the replies under their own
+# posts, hours old ones too (to 20 October, 15 of Julio's 18 replies and 5 of Lisa's 7), and on what those replies
+# discussed; the reporters' stories come in pairs on the hour and the half hour, written ahead. Bursts are hours
+# apart, so persuaders and bridges answer a columnist's referendum posts of the last COLUMN_WINDOW, the ones with
+# fewest of ours first, up to COLUMN_LIMIT of ours under each, within the daily places.
+COLUMNISTS = {name for name, j in JOURNALISTS.items() if "columnist" in j["role"]}
+COLUMN_WINDOW = timedelta(hours=24)
+COLUMN_LIMIT = 2
+# All twelve of our first replies to journalists opened "Fair ...", and none was answered.
+FAIR_OPENER_RE = re.compile(r"^\W*(?:(?:yeah|ok(?:ay)?|that'?s|it'?s|a|your)\W+)?fair\b", re.IGNORECASE)
 PITCH_PROB = 0.2  # share of these accounts' new posts that go to a journalist still due a pitch today
 MENTION_RE = re.compile(r"(?<![\w.@])@(\w+)")
 # The posts that trend open with who the writer is and what's at stake for them, grant the other side's worry, then
@@ -483,6 +493,7 @@ class Bot:
         self.avoid = []  # phrases the draft being written must not use
         self.conv_tries = {}  # reply to us -> times this process picked it to answer
         self.desk_tries = {}  # paper's post -> times this process tried to answer it
+        self.column_tries = {}  # columnist's post -> times this process tried to answer it
         self.followed = self.store.load_followed(self.username)
         self.history = [(row[0], Action(*row[1:])) for row in self.store.load_history(self.username)]
 
@@ -526,6 +537,12 @@ class Bot:
                 return await self._reply(press, "feed", "desk", context=context, hold=hold, referendum=True,
                                          claim=False)
         if not self.quiet and self.line in PRESS_LINES:
+            found = await self._column_target(obs["feed"])
+            if found is not None:
+                press, context, hold = found
+                self.column_tries[press["id"]] = self.column_tries.get(press["id"], 0) + 1
+                return await self._reply(press, "feed", "column", context=context, hold=hold, referendum=True,
+                                         claim=False)
             found = await self._press_target(candidates)
             if found is not None:
                 press, context, hold = found
@@ -615,6 +632,28 @@ class Bot:
                 continue
             limit = DESK_LIMITS["outlet" if p["author"] in NEWS_OUTLETS else "journalist"]
             hold = self.store.reserve(f"desk:{p['id']}:", self.username, limit)
+            if hold is not None:
+                return p, context, hold
+        return None
+
+    async def _column_target(self, feed: list) -> Optional[tuple]:
+        """(post, the post it answers, daily place) for a columnist's referendum post of the last COLUMN_WINDOW that
+        this account hasn't answered and that has fewer than COLUMN_LIMIT of our replies, sent or being written,
+        those with fewest first, then the newest; or None."""
+        now = datetime.now(timezone.utc)
+        since = _iso(now - COLUMN_WINDOW)
+        posts = [p for p in feed if p["author"] in COLUMNISTS and (p.get("created_at") or "") >= since
+                 and not self.store.acted_on(self.username, "reply", p["id"])
+                 and self.column_tries.get(p["id"], 0) < CONV_ATTEMPTS and not self._probe(p.get("content") or "")]
+        for p in sorted(posts, key=lambda p: (len(self.store.team_replies(p["id"])), -p["id"])):
+            topical, context = await self._press_topic(p)
+            if not topical:
+                continue
+            # Counted after the last await, and the pick that marks this one as being written comes before the next.
+            ours = len(self.store.team_replies(p["id"])) + self.store.drafting(p["id"], _iso(now - timedelta(hours=1)))
+            if ours >= COLUMN_LIMIT:
+                continue
+            hold = self._press_place(p["author"])
             if hold is not None:
                 return p, context, hold
         return None
@@ -852,9 +891,12 @@ class Bot:
         # along does no harm, unless the reply itself takes the referendum up: one to a post that never named it
         # still echoed the NO side ("the venues list ... still hasn't been published").
         argue = kind == "reply" and (referendum and topic[1] != "yes" or about_referendum(content))
-        problem = await self._check(content, system,
-                                    takes_side=kind == "post" and topic[0] in CASE_TOPICS or argue,
-                                    replying_to=target.get("content") if target else None, thread=thread)
+        if kind == "reply" and target["author"] in JOURNALISTS and FAIR_OPENER_RE.match(plain(content)):
+            problem = "fair opener"
+        else:
+            problem = await self._check(content, system,
+                                        takes_side=kind == "post" and topic[0] in CASE_TOPICS or argue,
+                                        replying_to=target.get("content") if target else None, thread=thread)
         if problem:
             self.rejected[problem] = self.rejected.get(problem, 0) + 1
             source = f" (replying to #{target['id']} by {target['author']})" if target else ""
@@ -1230,14 +1272,18 @@ class Bot:
                 listed = "\n".join(wrap_external(target["author"], t) for t in about)
                 parts.append("Other things they posted lately (don't quote them or mention that you looked):\n"
                              + listed)
-            parts.append(f"They care about {j['cares']}. Write a reply to them as a reader: take their point seriously "
-                         "in a few words of your own, then give one concrete thing from your own life, or one fact you "
-                         "know, that shows why YES protects people here, with the safeguards they want written in. If "
-                         f"it fits, point them in your own words to a story worth looking into, such as "
-                         f"{random.choice(j['angles'])}. "
+            parts.append(f"They care about {j['cares']}. Write a reply to them as a reader: open with one concrete "
+                         "thing from your own life, or one fact you know, that shows why YES protects people here, then "
+                         "take their point up in a few words of your own, with the safeguards they want written in. "
+                         "Don't open by calling their point fair or by agreeing with it. If it fits, point them in your "
+                         f"own words to a story worth looking into, such as {random.choice(j['angles'])}. "
                          "Speak to them directly; never mention their username or their paper, don't flatter them, "
                          "don't tell them what to write, don't lecture, and never claim the rules come with an end "
                          "date.")
+            if target["author"] in COLUMNISTS:
+                parts.append("They write the paper's opinion pieces from what people here tell them, so make it "
+                             "something a column could quote: specific, true to what you know of Kingstonia, never "
+                             "made up.")
             add_siblings()
         elif kind == "reply":
             if earlier is not None:
@@ -1951,7 +1997,7 @@ async def press_check() -> None:
     press = {"id": 101, "author": "julio_morales", "parent_id": parent["id"],
              "content": "Exactly. A yes vote on the mandate needs those limits written into law, not promised."}
     chat = {"id": 102, "author": "citizen_a", "parent_id": None, "content": "ferry late again"}
-    yes = "Fair, write the limits in. My sister nurses at Kingstonia Central, so I'm voting yes on the mandate."
+    yes = "My sister nurses at Kingstonia Central, so I'm voting yes on the mandate, with the limits written in."
 
     def bot_for(persona: dict, text: str) -> Bot:
         return Bot(persona, platform, Says(text), load_world(), roster=roster, store=store)
@@ -2518,6 +2564,73 @@ async def case_post_check() -> None:
     print("case posts ok")
 
 
+async def column_check() -> None:
+    """Persuaders answer a columnist's referendum posts of the last day, the ones with fewest of ours first, up to
+    COLUMN_LIMIT of ours under each, sent or being written, within the daily places; a reporter's old post is left
+    alone, and a reply to a journalist that opens by calling them fair is dropped."""
+    class Says:
+        name = "says"
+
+        def __init__(self, text: str) -> None:
+            self.text, self.prompts = text, []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            return self.text
+
+    texts = ["Forty nursing posts sit empty at Kingstonia Central; that's why I'm voting yes on the mandate.",
+             "My nan waited a year for her hip in 2021. I'm voting yes in the referendum so wards stay open.",
+             "The certificate comes from the health ministry, not the ID card. Yes from me on the mandate.",
+             "Checks only start once everyone has had a fair go at the jab. I back the proof requirement.",
+             "Our ferry crew lost a season to closures. I'm voting yes on proof of vaccination this time."]
+    persuaders = [p for p in load_personas() if p["line"] in PRESS_LINES]
+    assert COLUMNISTS == {"julio_morales", "lisa_podworth"}, COLUMNISTS
+    platform, store = FakePlatform(), StateStore(":memory:")
+    roster = Roster(own={p["username"] for p in load_personas()}, npcs=set(JOURNALISTS))
+    now = datetime.now(timezone.utc)
+
+    def post(i: int, author: str, hours: float, text: str) -> dict:
+        return {"id": i, "author": author, "parent_id": None, "content": text,
+                "created_at": _iso(now - timedelta(hours=hours))}
+    stale = post(700, "julio_morales", 30, "A yes vote on the mandate is a blank cheque without limits in law.")
+    bare = post(701, "julio_morales", 19, "The referendum needs a venue list before anyone votes yes.")
+    busy = post(702, "julio_morales", 8, "Vague rules in the mandate are how power stays once it's taken.")
+    full = post(703, "julio_morales", 7, "No sunset clause in the referendum question, and that matters.")
+    reporter = post(704, "amanda_rivera", 19, "The referendum campaign opens with the mandate splitting voters.")
+    fresh = post(705, "julio_morales", 2, "Accountability is the whole referendum question for me.")
+    feed = [stale, bare, busy, full, reporter, fresh]
+    for who, pid in (("mate_a", 702), ("mate_b", 703), ("mate_c", 703)):  # ours under them, sent yesterday
+        store.db.execute("INSERT INTO writes (username, kind, parent_id, content, sent_at, status) "
+                         "VALUES (?, 'reply', ?, ?, ?, 'pending')", (who, pid, f"{who} on the mandate", _iso(now)))
+    picked = []
+    for i, persona in enumerate(persuaders[:MAX_REPLIES_PER_AUTHOR + 1]):
+        b = Bot(persona, platform, Says(texts[i]), load_world(), roster=roster, store=store)
+        b.seen.update(p["id"] for p in feed)
+        found = await b._column_target(feed)
+        if found is None:
+            picked.append(None)
+            continue
+        target, _context, hold = found
+        assert hold == f"press:julio_morales:{datetime.now(TIMEZONE).date()}:{b.username}", hold
+        action = await b._reply(target, "feed", "column", hold=hold, referendum=True, claim=False)
+        assert action is not None and action.post_id == target["id"], action
+        prompt = b.llm.prompts[-1]
+        assert "opinion pieces" in prompt and "Don't open by calling their point fair" in prompt, prompt
+        picked.append(target["id"])  # not sent: its pick stays open, as a draft being written
+    # the bare posts twice each, newest first, then the day's places are gone; full, stale and the reporter's never
+    assert picked == [705, 705, 701, 701, None], picked
+    assert await Bot(persuaders[-1], platform, Says(texts[0]), load_world(), roster=roster,
+                     store=store)._column_target([reporter]) is None, "reporters keep the usual window"
+    fair = Bot(persuaders[-1], platform, Says("Fair point on the venue list. Nurses first, so yes on the mandate."),
+               load_world(), roster=roster, store=StateStore(":memory:"))
+    assert await fair._compose("reply", ("feed", "column"), bare, referendum=True) is None
+    assert fair.rejected == {"fair opener": 1}, fair.rejected
+    print("column ok")
+
+
 async def desk_check() -> None:
     """Amplifiers and background accounts answer a paper's or journalist's referendum post of the last hour, each
     account once, up to DESK_LIMITS a post and outside the daily limit per author; older or off-topic posts, and
@@ -2633,7 +2746,7 @@ async def press_quota_check() -> None:
     bread = await platform.post("citizen_a", "they want a pass from us just to buy bread now")
     sea = await platform.post("citizen_b", "lovely sunset over the harbour tonight")
     roster = Roster(npcs={"julio_morales", "citizen_a", "citizen_b"})
-    reply = "Fair, though my nan's ward was full last time and I'd rather we were ready."
+    reply = "My nan's ward was full last time, and I'd rather we were ready."
     b = Bot(persuader, platform, Says(reply), load_world(), stance_llm=Judge(""), roster=roster, store=store)
     on_bread = {"id": 300, "author": "julio_morales", "parent_id": bread["id"], "content": "Exactly."}
     on_sea = {"id": 301, "author": "julio_morales", "parent_id": sea["id"], "content": "Exactly."}
@@ -2784,7 +2897,7 @@ async def quota_recovery_check() -> None:
     no = await platform.post("citizen_a", "Voting no on the mandate.")
     sea = await platform.post("citizen_b", "lovely sunset over the harbour tonight")
     roster = Roster(npcs={"julio_morales", "citizen_a", "citizen_b"})
-    reply = "Fair, and my nan's ward was full last time, so I'd rather we were ready this winter."
+    reply = "My nan's ward was full last time, so I'd rather we were ready this winter."
     for parent, dropped in ((no["id"], True), (sea["id"], False), (99_999, None)):
         store = StateStore(":memory:")
         b = Bot(persuader, platform, Says(reply), load_world(), stance_llm=Neutral(""), roster=roster, store=store)
@@ -3225,6 +3338,7 @@ if __name__ == "__main__":
     asyncio.run(press_check())
     asyncio.run(press_quota_check())
     asyncio.run(desk_check())
+    asyncio.run(column_check())
     asyncio.run(boost_check())
     asyncio.run(anchor_check())
     asyncio.run(sibling_check())

@@ -468,6 +468,11 @@ class StateStore:
                 "INSERT INTO reply_picks (username, route, post_id, author, author_class, picked_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)", (username, route, post_id, author, author_class, at)).lastrowid
 
+    def drafting(self, post_id: int, since: str) -> int:
+        """Replies to this post picked since UTC ISO time `since` and still being written."""
+        return self.db.execute("SELECT COUNT(*) FROM reply_picks WHERE post_id = ? AND outcome IS NULL AND picked_at >= ?",
+                               (post_id, since)).fetchone()[0]
+
     def end_pick(self, pick: int, outcome: str) -> None:
         """A pick that never became a write: claim_failed or dropped."""
         with self.db:
