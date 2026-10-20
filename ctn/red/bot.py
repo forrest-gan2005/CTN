@@ -859,7 +859,10 @@ class Bot:
         if referendum is None:
             referendum = (await self._takes_up_referendum(target, topic[1]) if target is not None
                           else topic[0] in CASE_TOPICS)
-        case = kind == "post" and topic[0] in CASE_TOPICS
+        # A columnist answers replies of a case's length too (the ones they answered ran to 190 characters at the
+        # median and up to 399), and the one fact they get is the point of the reply.
+        case = (kind == "post" and topic[0] in CASE_TOPICS
+                or kind == "reply" and target is not None and target["author"] in COLUMNISTS)
         system = self._system_prompt(examples, from_npcs, arguments=referendum, case=case)
         earlier, about = None, []
         if target is not None:
@@ -2601,13 +2604,14 @@ async def column_check() -> None:
         name = "says"
 
         def __init__(self, text: str) -> None:
-            self.text, self.prompts = text, []
+            self.text, self.prompts, self.systems = text, [], []
 
         def delay(self) -> float:
             return 0.0
 
         async def generate(self, system: str, prompt: str) -> Optional[str]:
             self.prompts.append(prompt)
+            self.systems.append(system)
             return self.text
 
     texts = ["Forty nursing posts sit empty at Kingstonia Central; that's why I'm voting yes on the mandate.",
@@ -2649,6 +2653,7 @@ async def column_check() -> None:
         prompt = b.llm.prompts[-1]
         assert "opinion pieces" in prompt and "Don't open by calling their point fair" in prompt, prompt
         assert "story worth looking into" not in prompt and "never suggest a column" in prompt, prompt
+        assert "under 75 words" in b.llm.systems[-1], "a columnist's reply may run to a case's length"
         picked.append(target["id"])  # not sent: its pick stays open, as a draft being written
     # the bare posts twice each, newest first, then the day's places are gone; full, stale and the reporter's never
     assert picked == [705, 705, 701, 701, None], picked
