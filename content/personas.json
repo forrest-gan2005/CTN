@@ -833,7 +833,7 @@
     "job": "grow mangoes on a small orchard outside New Haven",
     "home": "New Haven",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "couldn't get your fruit to market for weeks in 2021",
     "why_yes": "you couldn't get fruit to market in 2021, and you'd rather the island be ready this time",
     "style": "quick one-liners, rarely more than one sentence",
@@ -852,7 +852,8 @@
       "you think climate change matters but worry about what it costs ordinary families",
       "you think more cruise ships would be good for local business"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "zoem95"
   },
   {
     "username": "siosaias25",
@@ -1253,7 +1254,7 @@
     "job": "work as a librarian at the Kingstonia public library",
     "home": "Kingstonia City",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "ran story time over video calls in 2021",
     "why_yes": "you want the library open for the kids and older people who rely on it",
     "style": "matter-of-fact, gives one concrete detail and stops",
