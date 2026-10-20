@@ -103,7 +103,6 @@ TEAM_SHAPES = (
 DEFAULT_GUIDE = ("Respond to their actual point. If they lean NO, acknowledge their worry in a few words, then give "
                  "your own reason for voting YES.")
 NPC_REPLY_PREF = 0.8  # how strongly reply targeting prefers citizens over unknown accounts
-CONV_REPLY_PROB = 0.5  # chance of replying back when an NPC has engaged us
 INBOX_TTL = timedelta(hours=12)  # answering a much older reply looks odd
 SHARED_WINDOW = timedelta(days=7)  # a phrase two teammates used this recently is one too many for a third
 SHARED_LIMIT = 2
@@ -507,11 +506,11 @@ class Bot:
 
         weights = QUIET_ACTIONS if self.quiet else LINE_ACTIONS.get(self.line, ACTION_WEIGHTS)
         kind = random.choices(list(weights), weights=list(weights.values()))[0]
-        # A citizen who engaged us is worth more than a random feed action, so lean into replying back. Most who
-        # reply to us aren't known citizens (154 of 156 conversation picks one evening: accounts that joined after
-        # the opening, most likely other teams'), and a reply to one of those earns nothing.
+        # A known citizen who replied to us is always answered: by 20 October only 52 of the 450 replies to our posts
+        # came from known citizens, and we had answered barely a third of them. Accounts that joined after the
+        # opening are answered as before, when the feed has no citizen to reply to.
         citizen_conv = conv is not None and self.roster.classify(conv["author"]) == "npc"
-        if not self.quiet and citizen_conv and kind in ("like", "none") and random.random() < CONV_REPLY_PROB:
+        if not self.quiet and citizen_conv:
             kind = "reply"
         if kind in ("like", "repost", "reply") and not candidates and conv is None:
             kind = "none" if self.quiet else "post"
@@ -526,7 +525,7 @@ class Bot:
             return await self._amplify(kind, candidates)
         if kind == "follow":
             return self._follow()
-        if kind == "reply" and random.random() < TEAM_REPLY_PROB:
+        if kind == "reply" and not citizen_conv and random.random() < TEAM_REPLY_PROB:
             found = self._team_reply_target()
             if found is not None:
                 return await self._reply(found[0], "feed", "team", hold=found[1], referendum=True, claim=False)
@@ -829,6 +828,12 @@ class Bot:
                     post = await self.platform.get_post(post_id)
                 except KeyError:
                     pass
+            # An account of unknown standing answering our answer to it is let be: known citizens replied again to
+            # 1 in 13 of our answers, those accounts to 69 in 174, in chains up to seven messages, most likely other
+            # teams' bots (about half of them are citizens by the hourly score, and those seldom reply twice).
+            if (post is not None and self.roster.classify(actor) == "unknown" and post.get("parent_id") is not None
+                    and self.store.answered(post["parent_id"], actor)):
+                post = None
             if post is not None and not self._probe(post.get("content") or "") and not self._too_deep(post_id):
                 return post
             self.store.drop_inbox(self.username, post_id)
@@ -1674,6 +1679,29 @@ async def conversation_route_check() -> None:
             feed = [{"id": 9, "author": feed_author, "content": "ferry late again, voting no on the mandate"}] \
                 if feed_author else []
             assert await b.think({"feed": feed}) == expected, (answered_by, feed_author)
+        # A citizen's reply is answered whatever the step would have done, and before a teammate's anchor.
+        ACTION_WEIGHTS, TEAM_REPLY_PROB = {"like": 1}, 1.0
+        store, platform = StateStore(":memory:"), FakePlatform()
+        b = Bot(persona, platform, FakeLLM(0, 0), load_world(), roster=Roster(npcs={"citizen_a"}), store=store)
+        theirs = await platform.post("citizen_a", "fair point, but what about the ferry?")
+        store.ingest_notifications(b.username, [], [{"post_id": theirs["id"], "actor": "citizen_a"}],
+                                   _iso(datetime.now(timezone.utc)))
+        b._reply = chosen
+        assert await b.think({"feed": []}) == ("citizen_a", True)
+        # An unknown account is answered once; its reply to our answer is let be, a citizen's is not.
+        for author, again in (("stranger_1", False), ("citizen_a", True)):
+            store, platform = StateStore(":memory:"), FakePlatform()
+            b = Bot(persona, platform, FakeLLM(0, 0), load_world(), roster=Roster(npcs={"citizen_a"}), store=store)
+            first = await platform.post(author, "fair point, but what about the ferry?")
+            ours = await platform.post(b.username, "the ferry was the first thing to go last time", parent_id=first["id"])
+            store.record(b.username, _iso(datetime.now(timezone.utc)),
+                         Action("reply", post_id=first["id"], content="x", target_author=author, made_id=ours["id"]))
+            second = await platform.post(author, "still not convinced", parent_id=ours["id"])
+            store.ingest_notifications(b.username, [], [{"post_id": second["id"], "actor": author}],
+                                       _iso(datetime.now(timezone.utc)))
+            found = await b._conversation_target()
+            assert (found is not None) == again, author
+            assert store.answered(ours["id"], author) and not store.answered(first["id"], author)
     finally:
         ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB = saved
     print("conversation routes ok")

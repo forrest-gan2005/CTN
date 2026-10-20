@@ -280,6 +280,11 @@ class StateStore:
             (author, since),
         ).fetchone()[0]
 
+    def answered(self, made_id: int, author: str) -> bool:
+        """Whether our post `made_id` was itself a reply to `author`: their reply to it carries a conversation on."""
+        return self.db.execute("SELECT 1 FROM history WHERE type = 'reply' AND made_id = ? AND target_author = ?",
+                               (made_id, author)).fetchone() is not None
+
     def claim(self, key: str, username: str) -> bool:
         """Atomically reserve a target for one bot; False if another of our accounts has it."""
         with self.db:
