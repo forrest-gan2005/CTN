@@ -60,6 +60,9 @@ CITIZEN_REDRAFTS = 2  # more drafts of a reply to a citizen when a shared phrase
 # 65-75% of the replies drafted for an anchor in its rush were sunk by a phrase a teammate had used, so only 1-12 of
 # them landed, 20-45 minutes in, against the 20 that rivals' top posts get in 15-25 minutes.
 TEAM_REDRAFTS = 1
+# An anchor's drafts were sunk the same way, so the 21:00-22:00 anchors of 20 October went up 12-21 minutes into
+# their half-hour, and the 22:30 one not at all.
+ANCHOR_REDRAFTS = 2
 LEAN_CHECKS = 4  # citizens profiled per reply decision, an LLM call each
 # Across the platform on 20 October, citizens who lean NO and care most about liberty or privacy pushed back at
 # 50-65% of the replies they got and were moved by 0-2%; undecided ones and those asking how it would work in
@@ -864,7 +867,10 @@ class Bot:
         shape = self.case_shape = _draw_shape(shapes)
         self.case_worry = None
         try:
-            action = await self._write(kind, topic, target, context, referendum)
+            if topic[0] == "anchor":
+                action = await self._redrafted(topic, None, None, referendum, ANCHOR_REDRAFTS, kind="post")
+            else:
+                action = await self._write(kind, topic, target, context, referendum)
         finally:
             self.case_shape, worry = None, self.case_worry
             self.case_worry = self.case_shapes = None
@@ -872,19 +878,18 @@ class Bot:
             action.angle = f"{shape}{'/' + worry if worry else ''}: {action.angle or ''}"
         return action
 
-    async def _redrafted(self, topic: tuple, target: dict, context: Optional[str], referendum: Optional[bool],
-                         redrafts: int) -> Optional[Action]:
-        """A reply to a citizen or to a teammate's anchor, drafted again up to `redrafts` times, told to avoid the
-        phrase, if teammates' wording is what sank it: one evening 26 of the 31 dropped replies to citizens went for
-        a shared phrase ("tipped me to yes", "the vote on 2"), and a reply to a citizen is the one kind that can move
-        a mind."""
-        if referendum is None:  # decided once, so a redraft is framed as the first was and costs no judge call
+    async def _redrafted(self, topic: tuple, target: Optional[dict], context: Optional[str],
+                         referendum: Optional[bool], redrafts: int, kind: str = "reply") -> Optional[Action]:
+        """A reply to a citizen or to a teammate's anchor, or an anchor, drafted again up to `redrafts` times, told
+        to avoid the phrase, if teammates' wording is what sank it: one evening 26 of the 31 dropped replies to
+        citizens went for a shared phrase ("tipped me to yes", "the vote on 2")."""
+        if referendum is None and target is not None:  # decided once, so a redraft is framed as the first was
             referendum = await self._takes_up_referendum(target, topic[1])
         avoid = []
         for _ in range(1 + redrafts):
             self.last_shared, self.avoid = None, avoid
             try:
-                action = await self._write("reply", topic, target, context, referendum)
+                action = await self._write(kind, topic, target, context, referendum)
             finally:
                 self.avoid = []
             if action is not None or self.last_shared is None:
@@ -2353,6 +2358,19 @@ async def anchor_check() -> None:
     case = "I run a cafe and lost five months in 2021. I'm voting yes on the mandate. What would you do?"
     dropped = Bot(writers[0], FakePlatform(), Says("as an AI I can't"), load_world(), store=store)
     assert await dropped._anchor() is None
+    for user in ("mate_a", "mate_b"):
+        store.record(user, _iso(datetime.now(timezone.utc)), Action("post", content="A quiet ferry winter is what "
+                                                                     "tipped me to yes, honestly."))
+    class Kept(Says):
+        prompts = []
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            return self.text
+    worn = Bot(writers[0], FakePlatform(), Kept("A quiet ferry winter is what tipped me to yes on the mandate."),
+               load_world(), store=store)
+    assert await worn._anchor() is None and worn.rejected.get("shared phrase") == 1 + ANCHOR_REDRAFTS, worn.rejected
+    assert "Don't use these words" in worn.llm.prompts[-1], "an anchor's redraft is told which phrase sank it"
     first = Bot(writers[1], FakePlatform(), Says(case), load_world(), store=store)
     action = await first._anchor()
     assert action is not None and action.topic_kind == "anchor" and action.hold.startswith("anchor:"), action
