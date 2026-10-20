@@ -138,7 +138,7 @@ class PriorityLock:
     def locked(self) -> bool:
         return self._held
 
-    async def acquire(self, priority: int = NORMAL) -> None:
+    async def acquire(self, priority: float = NORMAL) -> None:
         if not self._held and not self._waiters:
             self._held = True
             return

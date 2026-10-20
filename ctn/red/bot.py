@@ -2598,8 +2598,10 @@ async def rush_check() -> None:
     assert kinds == [("repost", 904, True), ("repost", 902, NORMAL), ("reply", 904, True), ("reply", 9, NORMAL),
                      ("reply", 8, CITIZEN), ("post", None, ANCHOR), ("post", None, NORMAL)], noting.sent
     assert noting.sent[2][2] < noting.sent[0][2], "an anchor's replies go ahead of its reposts"
-    newer = Action("repost", post_id=904 + 1000)
-    assert LIFT - newer.post_id * LIFT_ORDER < noting.sent[2][2], "a newer anchor's lifts go ahead of an older one's"
+    two.record("lena_brook", _iso(datetime.now(timezone.utc)),
+               Action("post", content="x", topic_kind="anchor", made_id=1904))
+    await lifter.act(Action("repost", post_id=1904))
+    assert noting.sent[-1][2] < noting.sent[2][2], "a newer anchor's lifts go ahead of an older one's"
     assert WRITE_PRIORITY.get() == NORMAL, "the priority goes back after each write"
 
     global RUSH_WAIT
