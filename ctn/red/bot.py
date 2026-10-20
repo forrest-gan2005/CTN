@@ -847,7 +847,8 @@ class Bot:
                        referendum: Optional[bool] = None) -> Optional[Action]:
         """Generate, clean and vet content; returns a publishable Action or None. `context` is the post a
         journalist's `target` answers and `referendum` whether a reply takes up the referendum, when known. A case
-        post takes one of CASE_SHAPES, named at the front of its angle."""
+        post takes one of CASE_SHAPES (an anchor, while ANCHOR_EXPERIMENT is on, ANCHOR_SHAPES), named at the front of
+        its angle."""
         self.writing_arm = arm()  # one arm for the whole draft, even across a block's end
         note_arm(self.writing_arm)
         try:
@@ -1427,6 +1428,11 @@ class Bot:
                 self.case_worry, label = random.choice(self.worries)
                 worry = (f" The NO worry people here raise most lately is {label}; answer that one, naming it in your "
                          "own words.")
+            # An account tells the one change of mind it had: another one later is a tell in its own history.
+            told = next((a.content for _, a in reversed(self.history)
+                         if a.topic_kind == "anchor" and (a.angle or "").startswith("convert: ")), None)
+            if shape == "convert" and told:
+                worry += f" You already told how you changed your mind: \"{told}\" Keep to that same reason and change."
             parts.append(f"{shapes[shape][1]}{worry}{opening} {CASE_FOCUS}")
         elif topic[0] == "vaccine":
             parts.append(f"Write a new post about vaccination in your everyday life: {topic[1]}. Don't mention the "
@@ -2365,14 +2371,22 @@ async def anchor_check() -> None:
             self.systems.append(system)
             return self.text
     global CASE_SHAPES, QUESTION_PROB, ANCHOR_QUESTION_PROB, ANCHOR_EXPERIMENT
-    trial = Bot(writers[0], FakePlatform(), Noting(case), load_world(), store=StateStore(":memory:"))
-    action = await trial._anchor()
-    assert action.angle.startswith("convert: ") and "leaning NO at first" in trial.llm.prompts[0], action.angle
-    assert "End with a genuine question" in trial.llm.prompts[0], "an experiment anchor always asks its readers"
-    assert "under 50 words" in trial.llm.systems[0], "an experiment anchor is short"
     saved = CASE_SHAPES, QUESTION_PROB, ANCHOR_QUESTION_PROB, ANCHOR_EXPERIMENT
-    ANCHOR_EXPERIMENT = False
     try:
+        ANCHOR_EXPERIMENT = True
+        trial = Bot(writers[0], FakePlatform(), Noting(case), load_world(), store=StateStore(":memory:"))
+        action = await trial._anchor()
+        assert action.angle.startswith("convert: ") and "leaning NO at first" in trial.llm.prompts[0], action.angle
+        assert "End with a genuine question" in trial.llm.prompts[0], "an experiment anchor always asks its readers"
+        assert "under 50 words" in trial.llm.systems[0], "an experiment anchor is short"
+        assert "You already told" not in trial.llm.prompts[0]
+        trial.history.append((_iso(datetime.now(timezone.utc) - ANCHOR_REST * 2), action))
+        trial.store.release(action.hold)
+        trial.store.db.execute("DELETE FROM history")
+        await trial._anchor()
+        assert f'You already told how you changed your mind: "{action.content}"' in trial.llm.prompts[-1], \
+            "an account keeps to the one change of mind it told"
+        ANCHOR_EXPERIMENT = False
         for shape, (weight, guide) in saved[0].items():
             assert not copies(guide, load_world()), f"{shape}: a sentence the setting has, which a post may not copy"
             CASE_SHAPES, QUESTION_PROB, ANCHOR_QUESTION_PROB = {shape: (weight, guide)}, 1.0, 1.0
