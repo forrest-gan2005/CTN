@@ -205,7 +205,9 @@ ANSWER_WORRIES = False
 ARM_START = datetime(2026, 10, 20, 14, 10, tzinfo=TIMEZONE)
 ARM_BLOCK = timedelta(hours=2)
 ARMS = ("granted", "one-sided")
-ARM_FIXED: Optional[str] = None  # set to one arm to stop the schedule (the self-tests pin "granted")
+# Stopped 20 October at 20:10: three one-sided hours brought 2, 5 and 11 changes toward YES against 10 to 21 an hour
+# granted, and replies still opened "Fair point on" in a fifth to a third of them.
+ARM_FIXED: Optional[str] = "granted"  # None runs the schedule (the self-tests pin "granted" too)
 ONE_SIDED_SHAPES = {
     "plain": (2.0, "Make that one case only, plainly, and back it with one of the facts given above."),
     "values": CASE_SHAPES["values"],
