@@ -192,7 +192,7 @@ async def judge_person(llm, texts: list) -> Optional[tuple]:
         found = json.loads(m.group(0))
     except ValueError:
         return None
-    lean, concern = (re.sub(r"[\s-]+", "_", str(found.get(k, "")).strip().lower()) for k in ("lean", "concern"))
+    lean, concern = str(found.get("lean", "")).lower(), str(found.get("concern", "")).lower()
     if lean not in PERSON_LEANS:
         return None
     return lean, concern if concern in PERSON_CONCERNS else "other"
