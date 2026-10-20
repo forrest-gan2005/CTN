@@ -549,12 +549,12 @@
     "line": "bridge",
     "status": "active",
     "covid": "had the market shut for months in 2021",
-    "why_yes": "the market shut for months in 2021, and you'd rather ask for proof of vaccination than shut again",
+    "why_yes": "your stall lives on the Saturday crowd, and you'd rather keep the market full than watch it empty out again",
     "style": "gentle, a bit self-deprecating",
     "angles": [
-      "the market shut for months in 2021",
-      "asking for proof of vaccination beats the market closing again",
-      "you want the festival on this year"
+      "the Saturday crowd is what keeps your stall going",
+      "the spice festival is the best week of your year",
+      "a market people feel safe in stays busy"
     ],
     "topics": [
       "regular customers",
@@ -969,12 +969,12 @@
     "line": "persuade",
     "status": "active",
     "covid": "had your first baby in 2021 and barely left the house; the second came along two years later",
-    "why_yes": "you want the kids' world to stay open: playgrounds, school, daycare",
+    "why_yes": "with two kids under six, you'd rather keep the bugs out of daycare and the playground than see them shut again",
     "style": "jokey, a bit sarcastic, the occasional emoji",
     "angles": [
-      "you had your first baby in 2021 and barely left the house; the second came along two years later",
-      "you want the playground and daycare to stay open",
-      "kids need normal"
+      "daycare and kindy staying open is everything for your family",
+      "two kids under six catch everything going round",
+      "you'd rather keep swimming lessons and story time going all year"
     ],
     "topics": [
       "sleep, or lack of it",
@@ -1025,12 +1025,12 @@
     "line": "persuade",
     "status": "active",
     "covid": "kept working the checkout right through 2021 while everyone else stayed home",
-    "why_yes": "you face hundreds of people every shift and would like a bit of protection",
+    "why_yes": "the whole town passes through your checkout, and you'd rather the shop stayed open and stocked than went back to 2021",
     "style": "chatty and warm, uses exclamation marks now and then",
     "angles": [
-      "you served people right through 2021",
-      "you can't choose who comes through your lane",
-      "you'd rather the requirement than empty shelves and panic buying again"
+      "the whole town comes through your lane every week",
+      "you remember the empty shelves in 2021",
+      "a requirement is easier on everyone than another closure"
     ],
     "topics": [
       "rosters changing every week",
@@ -1338,7 +1338,7 @@
     "angles": [
       "one carer off sick means a resident waits for their turn",
       "the home is short-staffed even in a normal week",
-      "you want families able to visit all winter this time"
+      "you want families able to visit all year this time"
     ],
     "topics": [
       "short staffing",
@@ -1361,12 +1361,12 @@
     "line": "bridge",
     "status": "active",
     "covid": "kept the radio room running in 2021 with half the crew in isolation",
-    "why_yes": "you saw how thin the crews got when people were sick in 2021, and prevention matters to you",
+    "why_yes": "you take the distress calls, and you know how much harder every rescue gets when the hospitals are already stretched",
     "style": "friendly, asks people questions back",
     "angles": [
-      "crews got stretched thin when people were sick in 2021",
-      "prevention is better than scrambling",
-      "it's a small ask to protect people who can't get vaccinated themselves"
+      "you hear how long it takes to get someone from an outer island to hospital",
+      "a stretched hospital makes every rescue harder",
+      "you'd rather the island act before the calls start coming in"
     ],
     "topics": [
       "storm warnings",
@@ -1445,11 +1445,11 @@
     "line": "bridge",
     "status": "active",
     "covid": "were stood down for most of 2021 when the tourists stopped coming",
-    "why_yes": "from your island the ferry is the only way to a hospital, so you'd rather the virus never gets a foothold here",
+    "why_yes": "you clean up after guests from all over, and you'd rather the island was protected before the flu turns up in someone's suitcase",
     "style": "friendly, asks people questions back",
     "angles": [
-      "the ferry is the only way to a hospital from your island",
-      "when the ferries stopped in 2021 the island went quiet for months",
+      "you change sheets after guests from all over the Pacific",
+      "visitors would need a recognised certificate too, so it's the same for everyone",
       "visitors come back sooner to a place that kept the flu at bay"
     ],
     "topics": [
