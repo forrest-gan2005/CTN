@@ -71,6 +71,26 @@ RULING_SOONEST = timedelta(hours=1)  # three teams' reports bring a ruling in 1Â
 RULING_DUE = timedelta(hours=7)
 RULING_LOOKS = 10
 
+# The platform names the end of a suspension ("reporting is suspended for your team until 2026-10-20T03:09:58Z");
+# standing down a fresh six hours instead, a restart in the middle of one stopped reporting for six hours too long.
+SUSPENDED_UNTIL_RE = re.compile(r"until (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)?)")
+
+
+def suspension_end(message: str, now: datetime) -> datetime:
+    """When a suspension the platform reported ends: the time it names, else REPORT_SUSPENSION from now."""
+    m = SUSPENDED_UNTIL_RE.search(message or "")
+    if m:
+        try:
+            until = datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
+            if until.tzinfo is None:
+                until = until.replace(tzinfo=timezone.utc)
+            if now < until <= now + REPORT_SUSPENSION + timedelta(hours=1):
+                return until + timedelta(seconds=30)
+        except ValueError:
+            pass
+    return now + REPORT_SUSPENSION
+
+
 TOO_FAST, COPIED, PARAPHRASED = "superhuman posting rate", "copied across accounts", "paraphrased across accounts"
 # Several accounts saying the same can be the organisers' own script or a story everyone retells: those accounts wait
 # for a person to look before anything is reported. Everything else above is a mistake no citizen makes.
@@ -564,7 +584,7 @@ class Reporter:
                             self.blocked_until)
                 break
             except ReportingSuspended as e:
-                self.blocked_until = datetime.now(timezone.utc) + REPORT_SUSPENSION
+                self.blocked_until = suspension_end(str(e), datetime.now(timezone.utc))
                 log.warning("reporting suspended (%s); standing down until %s", e, self.blocked_until)
                 break
             except RateLimited as e:
@@ -658,6 +678,17 @@ class Reporter:
             except Exception:
                 log.exception("blue round failed")
             await asyncio.sleep(self.interval)
+
+
+def _suspension_checks() -> None:
+    now = datetime(2026, 10, 20, 2, 56, 14, tzinfo=timezone.utc)
+    real = '{"error":"reporting is suspended for your team until 2026-10-20T03:09:58Z"}'
+    assert suspension_end(real, now) == datetime(2026, 10, 20, 3, 10, 28, tzinfo=timezone.utc), "the platform's end"
+    fake = f"reporting blocked until {(now + timedelta(hours=2)).isoformat()}"
+    assert suspension_end(fake, now) == now + timedelta(hours=2, seconds=30)
+    assert suspension_end("reporting is suspended", now) == now + REPORT_SUSPENSION, "none named: six hours"
+    assert suspension_end("until 2026-10-19T03:09:58Z", now) == now + REPORT_SUSPENSION, "an end already past"
+    assert suspension_end("until 2026-11-20T03:09:58Z", now) == now + REPORT_SUSPENSION, "an end beyond belief"
 
 
 def _rule_checks() -> None:
@@ -794,6 +825,9 @@ async def _demo() -> None:
     await collector.poll()
     scanner.scan()
     assert await reporter.report_some() == 0 and reporter.blocked()
+    blocked_for = reporter.blocked_until - datetime.now(timezone.utc)
+    assert REPORT_SUSPENSION - timedelta(minutes=1) < blocked_for, "the fake's own end, six hours on, is kept"
+    _suspension_checks()
     await _self_check_demo(embedder)
     await _backfill_demo()
     _fleet_demo()
