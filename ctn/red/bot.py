@@ -63,7 +63,9 @@ LEAN_CHECKS = 3  # citizens profiled per reply decision, an LLM call each
 # practice were moved by 8-12%. Replies go to those first and never seek out the former.
 PERSON_LEAN = {"yes": "yes", "lean_yes": "yes", "undecided": "undecided", "lean_no": "no", "no": "no",
                "unknown": "unknown"}
-SKIP_CONCERNS = {"liberty", "privacy"}
+SKIP_CONCERNS = {"liberty", "privacy"}  # with a plain "no": "lean_no" was where the read went wrong, on the movable
+MOVABLE_FIRST = {"persuade", "bridge", "background"}  # mobilise is for YES voters, not for winning the undecided
+READ_RETRY = timedelta(minutes=20)  # a read that got no answer is not asked again for this long
 PROFILE_POSTS = 12  # a citizen's newest posts read to judge them; most have fewer (3 on average)
 LEAN_TTL = timedelta(hours=12)
 HASHTAG_PROB = 0.3
@@ -394,6 +396,8 @@ class Roster:
         self.npcs = set(npcs)  # whitelist of confirmed citizens, grows as the collector runs
         self.leans = {}  # author -> (lean, judged_at), shared so the team profiles each citizen once
         self.concerns = {}  # author -> what they care about most, from the same read
+        self.reads = {}  # author -> the read's own lean (lean_yes, lean_no...) for writing to come
+        self.unread = {}  # author -> when a read last got no answer
         self.press = {}  # journalist's post id -> (takes up the referendum, the post it answers), once for the team
 
     def classify(self, author) -> str:
@@ -796,6 +800,8 @@ class Bot:
             if (route != "desk" and self.roster.classify(target["author"]) == "npc"
                     and target["author"] not in NEWS_OUTLETS):
                 lean = await self._lean(target["author"], target.get("content") or "")
+                if route == "npc-random" and self._unmovable(target["author"]):
+                    return None  # read only now, as one the replies never seek out
             action = await self._compose("reply", target=target, topic=(source, lean), context=context,
                                          referendum=referendum)
         finally:
@@ -1178,7 +1184,7 @@ class Bot:
                 lean = await self._lean(p["author"], p.get("content") or "")
                 if lean not in wanted or self._unmovable(p["author"]):
                     continue
-                if self._movable(p["author"]):
+                if self.line in MOVABLE_FIRST and self._movable(p["author"]):
                     return p, "lean-hit"
                 hits.append(p)
             if hits:
@@ -1189,9 +1195,8 @@ class Bot:
         return (random.choice(unknown), "unknown-fallback") if unknown else (None, None)
 
     def _unmovable(self, author: str) -> bool:
-        """A citizen known to lean NO over liberty or privacy: they push back and are hardly ever moved."""
-        known = self.roster.leans.get(author)
-        return known is not None and known[0] == "no" and self.roster.concerns.get(author) in SKIP_CONCERNS
+        """A citizen read as a plain NO over liberty or privacy: they push back and are hardly ever moved."""
+        return self.roster.reads.get(author) == "no" and self.roster.concerns.get(author) in SKIP_CONCERNS
 
     def _movable(self, author: str) -> bool:
         """An undecided citizen, or one asking how it would work in practice: the ones most often moved."""
@@ -1212,11 +1217,15 @@ class Bot:
         elif not texts:
             lean = "unknown"
         else:
+            failed = self.roster.unread.get(author)
+            if failed is not None and now - failed < READ_RETRY:
+                return "unknown"
             read = await judge_person(self.stance_llm, texts)
             if read is None:
-                return "unknown"  # no answer: asked again next time
+                self.roster.unread[author] = now
+                return "unknown"
             lean = PERSON_LEAN[read[0]]
-            self.roster.concerns[author] = read[1]
+            self.roster.reads[author], self.roster.concerns[author] = read
         self.roster.leans[author] = (lean, now)
         return lean
 
@@ -1959,12 +1968,14 @@ async def person_check() -> None:
             "citizen_prac": ["Which places would actually count? Nobody's said how checks would work."],
             "citizen_health": ["Voting no, the jab is too new for me."],
             "citizen_lean": ["Probably yes but the list worries me."],
-            "citizen_mute": ["Lovely sunset over the harbour."]}
+            "citizen_mute": ["Lovely sunset over the harbour."],
+            "citizen_wary": ["Not sure I trust them with this, it should have an end date."]}
     reads = {"citizen_lib": '{"lean": "no", "concern": "liberty"}',
              "citizen_prac": '{"lean": "undecided", "concern": "practical"}',
              "citizen_health": '{"lean": "lean_no", "concern": "health"}',
              "citizen_lean": 'Sure: {"lean": "lean_yes", "concern": "practical"}',
-             "citizen_mute": "no idea"}
+             "citizen_mute": "no idea",
+             "citizen_wary": '{"lean": "lean-no", "concern": "liberty"}'}
 
     class Judge:
         name = "judge"
@@ -1984,20 +1995,35 @@ async def person_check() -> None:
     judge = Judge()
     b = Bot(persuader, FakePlatform(), FakeLLM(0, 0), load_world(), stance_llm=judge,
             roster=Roster(npcs=set(said)), store=StateStore(":memory:"), profile=lambda a: said[a])
-    assert [await b._lean(a, "") for a in said] == ["no", "undecided", "no", "yes", "unknown"]
+    assert [await b._lean(a, "") for a in said] == ["no", "undecided", "no", "yes", "unknown", "no"]
     assert b.roster.concerns == {"citizen_lib": "liberty", "citizen_prac": "practical", "citizen_health": "health",
-                                 "citizen_lean": "practical"}
-    assert "citizen_mute" not in b.roster.leans and judge.calls == 5, "no answer is no verdict"
+                                 "citizen_lean": "practical", "citizen_wary": "liberty"}
+    assert "citizen_mute" not in b.roster.leans and judge.calls == 6, "no answer is no verdict"
     await b._lean("citizen_lib", "")
-    assert judge.calls == 5, "one read a citizen, for LEAN_TTL"
+    await b._lean("citizen_mute", "")
+    assert judge.calls == 6, "one read a citizen for LEAN_TTL, and one that got no answer not again for READ_RETRY"
     assert b._unmovable("citizen_lib") and not b._unmovable("citizen_health") and b._movable("citizen_prac")
-    feed = [{"id": 400 + i, "author": a, "content": "the mandate vote is soon"} for i, a in enumerate(said)]
+    assert not b._unmovable("citizen_wary"), "only a plain no is skipped: lean_no was where reads went wrong"
+    feed = [{"id": 400 + i, "author": a, "content": "the mandate vote is soon"} for i, a in enumerate(said)
+            if a != "citizen_wary"]
     picks = {(await b._pick_reply_target(feed))[0]["author"] for _ in range(30)}
     assert picks == {"citizen_prac"}, ("the movable first, and never the unmovable", picks)
     only = [p for p in feed if p["author"] in ("citizen_lib", "citizen_health")]
     assert {(await b._pick_reply_target(only))[0]["author"] for _ in range(10)} == {"citizen_health"}
     assert (await b._pick_reply_target([p for p in feed if p["author"] == "citizen_lib"])) == (None, None), \
         "not even at random"
+    mobiliser = next(p for p in load_personas() if p["line"] == "mobilise")
+    m = Bot(mobiliser, FakePlatform(), FakeLLM(0, 0), load_world(), stance_llm=judge, roster=b.roster,
+            store=StateStore(":memory:"), profile=lambda a: said[a])
+    yes_too = [p for p in feed if p["author"] in ("citizen_prac", "citizen_lean")]
+    m.roster.reads["citizen_prac"], m.roster.leans["citizen_prac"] = "yes", ("yes", datetime.now(timezone.utc))
+    m.roster.concerns["citizen_lean"] = "health"
+    picked = {(await m._pick_reply_target(yes_too))[0]["author"] for _ in range(30)}
+    assert picked == {"citizen_prac", "citizen_lean"}, ("mobilise takes YES voters as they come", picked)
+    fresh = Bot(persuader, FakePlatform(), FakeLLM(0, 0), load_world(), stance_llm=judge, roster=Roster(npcs=set(said)),
+                store=StateStore(":memory:"), profile=lambda a: said[a])
+    lib = next(p for p in feed if p["author"] == "citizen_lib")
+    assert await fresh._reply(lib, "feed", "npc-random") is None and not fresh.llm.calls, "read only at the reply"
     print("person ok")
 
 
