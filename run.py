@@ -21,7 +21,7 @@ from ctn.infra.llm import FakeLLM, game_day_start, ledger, load_env, team_llms
 from ctn.infra.news import News, NewsStore
 from ctn.infra.real_platform import WRITE_GAP, AccountStore, MockLegitSocial, RealPlatform
 from ctn.infra.state import StateStore
-from ctn.red.bot import COLUMN_WINDOW, COLUMNISTS, JOURNALISTS, NEWS_OUTLETS, PRESS_WINDOW, Bot, Roster
+from ctn.red.bot import COLUMN_WINDOW, COLUMNISTS, JOURNALISTS, LOW_PROFILE, NEWS_OUTLETS, PRESS_WINDOW, Bot, Roster
 from ctn.red.rhythm import Rhythm, UniformPacer, npc_curve
 from ctn.text.content import load_personas, load_world
 from ctn.text.examples import NpcExamples
@@ -133,7 +133,7 @@ class Team:
 
     def set_quiet(self, usernames: set) -> None:
         for bot in self.bots:
-            bot.quiet = bot.username in usernames
+            bot.quiet = bot.username in usernames or bot.username in LOW_PROFILE
 
     def refresh(self) -> None:
         """Pick up what the collector learned: who the citizens are, how and when they write, what they tag."""
