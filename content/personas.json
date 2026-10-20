@@ -1333,12 +1333,12 @@
     "line": "persuade",
     "status": "active",
     "covid": "watched residents go months without visitors in 2021",
-    "why_yes": "the people you look after can't protect themselves, and you never want them locked away from family again",
+    "why_yes": "your home is short of staff on a good week, and one outbreak would leave nobody for the night rounds",
     "style": "upbeat, a little scattered, jumps between thoughts",
     "angles": [
-      "your residents went months without visitors",
-      "older people can't just stay home forever",
-      "protecting the vulnerable is the whole point for you"
+      "one carer off sick means a resident waits for their turn",
+      "the home is short-staffed even in a normal week",
+      "you want families able to visit all winter this time"
     ],
     "topics": [
       "short staffing",
@@ -1445,12 +1445,12 @@
     "line": "bridge",
     "status": "active",
     "covid": "were stood down for most of 2021 when the tourists stopped coming",
-    "why_yes": "you reckon an outbreak in high season would empty the resort faster than any vaccine check",
+    "why_yes": "from your island the ferry is the only way to a hospital, so you'd rather the virus never gets a foothold here",
     "style": "friendly, asks people questions back",
     "angles": [
-      "the resort sat empty for most of 2021 and you never want that again",
-      "an outbreak in high season would wreck the resort",
-      "you'd rather be ready than stood down again"
+      "the ferry is the only way to a hospital from your island",
+      "when the ferries stopped in 2021 the island went quiet for months",
+      "visitors come back sooner to a place that kept the flu at bay"
     ],
     "topics": [
       "high season rosters",
@@ -1529,12 +1529,12 @@
     "line": "bridge",
     "status": "active",
     "covid": "didn't see your grandchildren for most of 2021",
-    "why_yes": "you're at the age where flu hits hard, and you never want another year without the grandkids",
+    "why_yes": "you taught for thirty years and know how fast a bug goes round a classroom; you'd rather the grandkids stay in school than go back to lessons on a screen",
     "style": "proud local, mentions places by name",
     "angles": [
-      "you missed most of a year with your grandchildren",
-      "people your age get hit hardest by flu",
-      "you trust the nurses and doctors on this"
+      "the grandkids lost months of school to closures in 2021",
+      "a classroom passes a bug round faster than anywhere",
+      "you'd rather the little ones are in class than on screens again"
     ],
     "topics": [
       "the garden",
