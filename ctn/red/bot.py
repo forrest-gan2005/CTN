@@ -119,8 +119,11 @@ DEFAULT_GUIDE = ("Respond to their actual point. If they lean NO, acknowledge th
                  "your own reason for voting YES.")
 NPC_REPLY_PREF = 0.8  # how strongly reply targeting prefers citizens over unknown accounts
 INBOX_TTL = timedelta(hours=12)  # answering a much older reply looks odd
-SHARED_WINDOW = timedelta(days=7)  # a phrase two teammates used this recently is one too many for a third
-SHARED_LIMIT = 2
+# A four-word run two teammates had used in a week sank 315 drafts in the three hours to 23:00 on 20 October, against
+# 112 replies sent; what a reader or another team could notice is the same words often in a day, or side by side
+# under one post, which `_sibling_phrase` still refuses.
+SHARED_WINDOW = timedelta(days=1)  # a phrase SHARED_LIMIT teammates used this recently is one too many for another
+SHARED_LIMIT = 4
 COMMON_ACCOUNTS = 5  # a phrase this many other accounts used lately is how people here talk, not a tell of ours
 MAX_REPLIES_PER_AUTHOR = 4  # team-wide per 24h: no ping-pong with competitor bots, no crowding one citizen
 # A citizen who has changed a view in a session is much harder to move again on it before signing out, so after one
@@ -328,7 +331,7 @@ RUSH_WAIT = (20.0, 180.0)
 # The anchor post, then the reposts and replies lifting it in its rush, jump the write lane's queue: under S53 the
 # 05:00 anchor waited 7.7 minutes behind writes for older anchors and citizens, and its first repost came nine
 # minutes after it was up.
-# A phrase two teammates used this week is refused in a third's draft (SHARED_LIMIT), and the writer kept reaching for
+# A phrase SHARED_LIMIT teammates used lately is refused in another's draft, and the writer kept reaching for
 # the same few: "certificate at the door" cost 18 drafts in S52's first half-hour. The most worn of the last day are
 # listed in every prompt as ones to leave alone.
 WORN_SHOWN = 12
@@ -1544,7 +1547,7 @@ class Bot:
         return None
 
     def _shared_phrase(self, text: str) -> Optional[str]:
-        """A phrase at least SHARED_LIMIT other accounts of ours used this week, setting names aside: the same
+        """A phrase at least SHARED_LIMIT other accounts of ours used within SHARED_WINDOW, setting names aside: the same
         turn of phrase across accounts is what links them, even when the posts say different things. One that
         COMMON_ACCOUNTS accounts outside the team (competitors aside) used too links nobody."""
         mine = fresh_phrases(TAG_RE.sub(" ", text), self.world)
@@ -1864,7 +1867,7 @@ async def redraft_check() -> None:
     for author, texts, made, drafts in (("citizen_a", (sunk, clean), True, 2), ("stranger_1", (sunk, clean), False, 1),
                                         ("citizen_a", (sunk, sunk), False, 1 + CITIZEN_REDRAFTS)):
         store = StateStore(":memory:")
-        for user in ("mate_a", "mate_b"):
+        for user in [f"mate_{i}" for i in range(SHARED_LIMIT)]:
             store.record(user, _iso(datetime.now(timezone.utc)), Action("post", content="Losing the regatta is what "
                                                                          "tipped me to yes, honestly."))
         writer = Twice(*texts)
@@ -2358,7 +2361,7 @@ async def anchor_check() -> None:
     case = "I run a cafe and lost five months in 2021. I'm voting yes on the mandate. What would you do?"
     dropped = Bot(writers[0], FakePlatform(), Says("as an AI I can't"), load_world(), store=store)
     assert await dropped._anchor() is None
-    for user in ("mate_a", "mate_b"):
+    for user in [f"mate_{i}" for i in range(SHARED_LIMIT)]:
         store.record(user, _iso(datetime.now(timezone.utc)), Action("post", content="A quiet ferry winter is what "
                                                                      "tipped me to yes, honestly."))
     class Kept(Says):
@@ -2495,7 +2498,9 @@ async def rush_check() -> None:
                         topic_kind="anchor", made_id=900))
     for user, text in (("joe_tama", "A certificate at the door beats closing the cafe again."),
                        ("ana_moala", "I'd show a certificate at the door any day."),
-                       ("walter_h", "The ferry at the door of winter, as ever.")):
+                       ("walter_h", "The ferry at the door of winter, as ever."),
+                       ("tama.sutton", "Showing a certificate at the door is nothing."),
+                       ("priya_n", "A certificate at the door, then in we go.")):
         store.record(user, _iso(now - timedelta(minutes=3)),
                      Action("reply", post_id=900, content=text, angle="lean:team", target_author="rosa_dives"))
     writers = [p for p in load_personas(status=None) if p["line"] == "background"][:3]
@@ -2505,6 +2510,8 @@ async def rush_check() -> None:
     store.record("dan_reyes", _iso(now - timedelta(minutes=4)), Action("post", content="A nurse at Crown Harbour Hospital."))
     store.record("greg_wren", _iso(now - timedelta(minutes=4)), Action("post", content="I'm a nurse at Crown Harbour Hospital."))
     store.record("rawiri_laver", _iso(now - timedelta(minutes=4)), Action("post", content="I'm voting yes on the 2nd."))
+    for user in ("mere_cuts", "nadia_kemp"):
+        store.record(user, _iso(now - timedelta(minutes=4)), Action("post", content="A nurse at Crown Harbour Hospital."))
     everywhere = lambda words, since: [(f"local_{i}", "I'm voting yes on the mandate") for i in range(10)] \
         if "voting" in words else []
 

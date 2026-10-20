@@ -1287,14 +1287,17 @@ def persona_story_check() -> None:
     said("grace_teo", "Night shift done, and the vending machine coffee tasted like regret again.")
     draft = "honestly the vending machine coffee tasted like regret at the depot too"
     assert key._shared_phrase(draft) is None, "one teammate is a coincidence"
-    said("joe_tama", "Some days the vending machine coffee tasted like regret, and I sell coffee.", days_ago=9)
-    assert key._shared_phrase(draft) is None, "a phrase from last fortnight is forgotten"
-    said("lena_brook", "Staffroom vending machine coffee tasted like regret today.")
-    assert asyncio.run(key._check(draft, system)) == "shared phrase", "two teammates this week: refused"
-    for user in ("ana_moala", "walter_h"):
+    said("joe_tama", "Some days the vending machine coffee tasted like regret, and I sell coffee.",
+         days_ago=bot_module.SHARED_WINDOW.days + 2)
+    assert key._shared_phrase(draft) is None, "a phrase from before SHARED_WINDOW is forgotten"
+    mates = [f"mate_{i}" for i in range(bot_module.SHARED_LIMIT)]
+    for user in mates[1:]:
+        said(user, "Staffroom vending machine coffee tasted like regret today.")
+    assert asyncio.run(key._check(draft, system)) == "shared phrase", "SHARED_LIMIT teammates lately: refused"
+    for user in mates:
         said(user, "Off to the Mango & Spice Festival for the food, not the crowds.")
     assert key._shared_phrase("cant wait for the mango & spice festival for real") is None, "setting names are free"
-    for user in ("nadia_kemp", "kai_lind"):  # every word of it is in the setting, but it's no name
+    for user in mates:  # every word of it is in the setting, but it's no name
         said(user, "A prepared island sparkles.")
     assert key._shared_phrase("honestly a prepared island sparkles") == "a prepared island sparkles", \
         "an ordinary phrase passed as a setting name"
@@ -1337,7 +1340,7 @@ def persona_story_check() -> None:
 
 
 async def shared_phrase_race_check() -> None:
-    """Two accounts sending, at the same time, the phrase one teammate already used: only one gets it out,
+    """Two accounts sending, at the same time, a phrase teammates used one short of SHARED_LIMIT: only one gets it out,
     whether both wait on the stance judge together or one is still being sent while the other writes; for posts
     and replies. A write that never went out frees the phrase; one that may be live keeps it taken."""
     from ctn.red import bot as bot_module
@@ -1383,8 +1386,9 @@ async def shared_phrase_race_check() -> None:
 
     async def team(kind: str, platform, stance=None) -> tuple:
         state = StateStore(":memory:")
-        state.record("grace_teo", datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                     bot_module.Action("post", content=f"Night shift done. {phrase}"))
+        for mate in [f"mate_{i}" for i in range(bot_module.SHARED_LIMIT - 1)]:  # one short of the limit
+            state.record(mate, datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                         bot_module.Action("post", content=f"Night shift done. {phrase}"))
         roster = Roster(own=set(by), npcs=["npc_1"])
         bots = []
         for user in users:
@@ -1435,7 +1439,7 @@ async def shared_phrase_race_check() -> None:
     state.recover()  # cut off mid-request by a restart: pending, and not in history
     assert bots[1]._shared_phrase(phrase), "a write interrupted by a restart freed the phrase"
     state.db.execute("DELETE FROM writes")
-    state.record("grace_teo", datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    state.record("mate_0", datetime.now(timezone.utc).isoformat(timespec="seconds"),
                  bot_module.Action("post", content=phrase))
     assert bots[1]._shared_phrase(phrase) is None, "one teammate saying it twice is still one teammate"
     print("shared phrase race ok")
