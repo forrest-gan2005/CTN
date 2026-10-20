@@ -610,7 +610,9 @@ class Bot:
     async def _press_target(self, candidates: list) -> Optional[tuple]:
         """(post, the post it answers, quota place) for the newest journalist's post about the referendum this
         account may answer, or None."""
-        for p in sorted((p for p in candidates if p["author"] in JOURNALISTS), key=lambda p: -p["id"]):
+        # the columnists' posts are the column route's, which counts every reply of ours under them
+        for p in sorted((p for p in candidates if p["author"] in JOURNALISTS and p["author"] not in COLUMNISTS),
+                        key=lambda p: -p["id"]):
             topical, context = await self._press_topic(p)
             if not topical:
                 continue
@@ -623,7 +625,7 @@ class Bot:
         """(post, the post it answers, place) for the newest paper's or journalist's post on the referendum, from
         the last DESK_WINDOW, that this account hasn't answered and that still has places; or None."""
         since = _iso(datetime.now(timezone.utc) - DESK_WINDOW)
-        posts = [p for p in feed if (p["author"] in NEWS_OUTLETS or p["author"] in JOURNALISTS)
+        posts = [p for p in feed if (p["author"] in NEWS_OUTLETS or p["author"] in set(JOURNALISTS) - COLUMNISTS)
                  and (p.get("created_at") or "") >= since and not self.store.acted_on(self.username, "reply", p["id"])
                  and self.desk_tries.get(p["id"], 0) < CONV_ATTEMPTS and not self._probe(p.get("content") or "")]
         for p in sorted(posts, key=lambda p: -p["id"]):
@@ -638,25 +640,40 @@ class Bot:
 
     async def _column_target(self, feed: list) -> Optional[tuple]:
         """(post, the post it answers, daily place) for a columnist's referendum post of the last COLUMN_WINDOW that
-        this account hasn't answered and that has fewer than COLUMN_LIMIT of our replies, sent or being written,
-        those with fewest first, then the newest; or None."""
+        this account hasn't answered, that doesn't answer one of ours (that's a conversation) and that has fewer
+        than COLUMN_LIMIT of our replies, sent or being written, those with fewest first, then the newest; or None."""
         now = datetime.now(timezone.utc)
         since = _iso(now - COLUMN_WINDOW)
-        posts = [p for p in feed if p["author"] in COLUMNISTS and (p.get("created_at") or "") >= since
-                 and not self.store.acted_on(self.username, "reply", p["id"])
-                 and self.column_tries.get(p["id"], 0) < CONV_ATTEMPTS and not self._probe(p.get("content") or "")]
-        for p in sorted(posts, key=lambda p: (len(self.store.team_replies(p["id"])), -p["id"])):
+        open_ = {j for j in COLUMNISTS if self._press_open(j)}
+        posts = [p for p in feed if p["author"] in open_ and (p.get("created_at") or "") >= since
+                 and self.column_tries.get(p["id"], 0) < CONV_ATTEMPTS
+                 and not (p.get("parent_id") is not None and self.store.made(p["parent_id"]))
+                 and not self.store.acted_on(self.username, "reply", p["id"]) and not self._probe(p.get("content") or "")]
+        ours = {p["id"]: len(self.store.team_replies(p["id"])) for p in posts}
+        for p in sorted(posts, key=lambda p: (ours[p["id"]], -p["id"])):
             topical, context = await self._press_topic(p)
+            if topical is None:  # what it answers couldn't be read: a hidden post is gone for good
+                self.column_tries[p["id"]] = self.column_tries.get(p["id"], 0) + 1
             if not topical:
                 continue
             # Counted after the last await, and the pick that marks this one as being written comes before the next.
-            ours = len(self.store.team_replies(p["id"])) + self.store.drafting(p["id"], _iso(now - timedelta(hours=1)))
-            if ours >= COLUMN_LIMIT:
+            if len(self.store.team_replies(p["id"])) + self.store.drafting(p["id"], _iso(now - timedelta(hours=1))) \
+                    >= COLUMN_LIMIT:
                 continue
             hold = self._press_place(p["author"])
             if hold is not None:
                 return p, context, hold
         return None
+
+    def _press_open(self, journalist: str) -> bool:
+        """Whether _press_place could give this account a place with this journalist today."""
+        today = datetime.now(TIMEZONE)
+        prefix = f"press:{journalist}:{today.date().isoformat()}:"
+        holders = self.store.holders(prefix)
+        if self.username in holders:
+            return False
+        used = self.store.replied_since(journalist, _iso(today.replace(hour=0, minute=0, second=0, microsecond=0)))
+        return self.username not in used and len(holders) + sum(u not in holders for u in used) < MAX_REPLIES_PER_AUTHOR
 
     def _press_place(self, journalist: str) -> Optional[str]:
         """A place among the team's MAX_REPLIES_PER_AUTHOR replies to this journalist today, or None. Every reply
@@ -859,7 +876,8 @@ class Bot:
                 about = [t for t in self.profile(target["author"]) if t != target.get("content")][:3]
         sign = self._pick_sign_off(kind)
         gif = self.gifs is not None and self.gifs.ready() and random.random() < GIF_SHARE.get(kind, 0.0)
-        thread = target["id"] if kind == "reply" and topic[1] in ("team", "desk") else None
+        thread = target["id"] if kind == "reply" and (topic[1] in ("team", "desk") or target["author"] in COLUMNISTS) \
+            else None
         siblings = self.store.team_replies(thread)[-SIBLINGS_SHOWN:] if thread is not None else None
         raw = await self.llm.generate(system, self._user_prompt(kind, target, topic, earlier, about, sign=sign,
                                                                 referendum=referendum, gif=gif, context=context,
@@ -1545,7 +1563,7 @@ class Bot:
                 self._drop(action, f"{shared!r} is already in {SHARED_LIMIT} teammates' posts")
                 return None
             shared = (self._sibling_phrase(action.content, action.post_id)
-                      if action.angle in ("lean:team", "lean:desk") else None)
+                      if action.angle in ("lean:team", "lean:desk") or action.target_author in COLUMNISTS else None)
             if shared:
                 self._drop(action, f"{shared!r} is already in a teammate's reply to #{action.post_id}")
                 return None
@@ -1992,9 +2010,9 @@ async def press_check() -> None:
 
     persuaders = [p for p in load_personas() if p["line"] in PRESS_LINES]
     platform, store = FakePlatform(), StateStore(":memory:")
-    roster = Roster(own={p["username"] for p in persuaders}, npcs={"julio_morales", "citizen_a"})
+    roster = Roster(own={p["username"] for p in persuaders}, npcs={"amanda_rivera", "citizen_a"})
     parent = await platform.post("citizen_a", "if we do this we need real plans and clear sunset dates, not promises")
-    press = {"id": 101, "author": "julio_morales", "parent_id": parent["id"],
+    press = {"id": 101, "author": "amanda_rivera", "parent_id": parent["id"],
              "content": "Exactly. A yes vote on the mandate needs those limits written into law, not promised."}
     chat = {"id": 102, "author": "citizen_a", "parent_id": None, "content": "ferry late again"}
     yes = "My sister nurses at Kingstonia Central, so I'm voting yes on the mandate, with the limits written in."
@@ -2007,23 +2025,23 @@ async def press_check() -> None:
     assert action.type == "reply" and action.post_id == 101, action
     assert store.db.execute("SELECT route FROM reply_picks").fetchall() == [("journalist",)]
     prompt = first.llm.prompts[0]
-    assert JOURNALISTS["julio_morales"]["cares"] in prompt and "sunset dates" in prompt, prompt
+    assert JOURNALISTS["amanda_rivera"]["cares"] in prompt and "sunset dates" in prompt, prompt
     assert "never mention their username" in prompt
-    assert action.hold == f"press:julio_morales:{datetime.now(TIMEZONE).date()}:{first.username}"
+    assert action.hold == f"press:amanda_rivera:{datetime.now(TIMEZONE).date()}:{first.username}"
     first.remember(action)
     later = {**press, "id": 103}
     assert await first._press_target([later]) is None, "one answer a day from each account"
     second = bot_for(persuaders[1], yes)
     found = await second._press_target([later])
     assert found[0] == later and "sunset dates" in found[1] and found[2].endswith(second.username)
-    assert store.reserve(f"press:julio_morales:{datetime.now(TIMEZONE).date()}:", "someone", MAX_REPLIES_PER_AUTHOR)
+    assert store.reserve(f"press:amanda_rivera:{datetime.now(TIMEZONE).date()}:", "someone", MAX_REPLIES_PER_AUTHOR)
     # three places taken; two more teammates pick other posts of the same journalist at once: one gets the last
     third, fourth = bot_for(persuaders[2], yes), bot_for(persuaders[3], yes)
     got = await asyncio.gather(third._press_target([{**press, "id": 200}]),
                                fourth._press_target([{**press, "id": 201}]))
     assert sum(g is not None for g in got) == 1, got
     assert await first._reply({**press, "id": 202}, "conversation", "conversation") is None, "every route counts"
-    sunset = {"id": 104, "author": "lisa_podworth", "parent_id": None, "content": "Lovely sunset over the harbour."}
+    sunset = {"id": 104, "author": "muzhi_wong", "parent_id": None, "content": "Lovely sunset over the harbour."}
     assert await second._press_target([sunset]) is None and roster.press[104] == (False, None)
 
     pitches = ["Have you looked at the nursing posts at Kingstonia Central? It's why I'm voting yes on the mandate.",
@@ -2048,7 +2066,7 @@ async def press_check() -> None:
                                                             for j in JOURNALISTS) == set(), "a dropped pitch frees it"
     for text, topic in (("@kai_lind totally agree, I'm voting yes on the mandate.", ("issue", "x")),
                         ("@julio_morales and @amanda_rivera, look at the nurses; I'm voting yes on the mandate.",
-                         ("pitch", "julio_morales"))):
+                         ("pitch", "amanda_rivera"))):
         b = Bot(persuaders[0], platform, Says(text), load_world(), roster=roster, store=StateStore(":memory:"))
         assert await b._compose("post", topic=topic) is None and b.rejected == {"stray mention": 1}, b.rejected
     print("press ok")
@@ -2624,6 +2642,36 @@ async def column_check() -> None:
     assert picked == [705, 705, 701, 701, None], picked
     assert await Bot(persuaders[-1], platform, Says(texts[0]), load_world(), roster=roster,
                      store=store)._column_target([reporter]) is None, "reporters keep the usual window"
+    just = post(707, "julio_morales", 0.1, "Accountability is the whole referendum question for me.")
+    other = Bot(persuaders[-1], platform, Says(texts[0]), load_world(), roster=roster, store=StateStore(":memory:"))
+    assert await other._press_target([just]) is None, "the press route leaves the columnists to this one"
+    desk = next(p for p in load_personas() if p["line"] in DESK_LINES)
+    assert await Bot(desk, platform, Says(texts[0]), load_world(), roster=roster,
+                     store=StateStore(":memory:"))._desk_target([just]) is None, "and so does the desk"
+    assert await other._column_target([just]) is not None
+
+    # one of ours under a post: the next writer sees it, and an echo of it goes nowhere
+    side_store, side_platform = StateStore(":memory:"), FakePlatform()
+    mine = await side_platform.post("mate_a", "Long day on the market stall, and I'm still voting yes in November.")
+    side_store.record("mate_a", _iso(now), Action("post", content=mine["content"], made_id=mine["id"]))
+    scoop = await side_platform.post("julio_morales", "A yes vote on the mandate hands over power with no end date.")
+    chat = await side_platform.post("julio_morales", "Fair question, but the referendum still needs limits.",
+                                    parent_id=mine["id"])
+    for persona in persuaders[:2]:
+        twin = Bot(persona, side_platform, Says(texts[4]), load_world(), roster=roster, store=side_store)
+        twin.read = lambda: asyncio.sleep(0, {"feed": [scoop, chat]})
+        await twin.step()
+    assert len(side_store.team_replies(scoop["id"])) == 1, "no echo under one post"
+    assert texts[4][:40] in twin.llm.prompts[-1], "the second writer sees the first"
+    assert not side_store.team_replies(chat["id"]), "an answer to one of ours is a conversation, not the column's"
+
+    lost = post(706, "lisa_podworth", 1, "Exactly, the referendum needs that written down.")
+    lost["parent_id"] = 99_999
+    reader = Bot(persuaders[-1], platform, Says(texts[0]), load_world(), roster=roster, store=StateStore(":memory:"))
+    for _ in range(CONV_ATTEMPTS + 1):
+        assert await reader._column_target([lost]) is None
+    assert reader.column_tries == {706: CONV_ATTEMPTS}, "an unreadable parent is let go"
+
     fair = Bot(persuaders[-1], platform, Says("Fair point on the venue list. Nurses first, so yes on the mandate."),
                load_world(), roster=roster, store=StateStore(":memory:"))
     assert await fair._compose("reply", ("feed", "column"), bare, referendum=True) is None
@@ -2661,11 +2709,11 @@ async def desk_check() -> None:
     desk = [p for p in load_personas() if p["line"] in DESK_LINES]
     persuader = next(p for p in load_personas() if p["line"] == "persuade")
     platform, store = FakePlatform(), StateStore(":memory:")
-    roster = Roster(own={p["username"] for p in load_personas()}, npcs=set(NEWS_OUTLETS) | {"julio_morales"})
+    roster = Roster(own={p["username"] for p in load_personas()}, npcs=set(NEWS_OUTLETS) | {"muzhi_wong"})
     story = await platform.post("KingstoniaHerald", "The Blank Cheque: why a yes vote on the mandate needs a list")
     other = await platform.post("KingstoniaHerald", "QuokkaSec announces 180 new tech jobs")
     old = {**story, "id": 900, "created_at": _iso(datetime.now(timezone.utc) - DESK_WINDOW * 2)}
-    press = await platform.post("julio_morales", "The referendum needs limits written into law, not promised.")
+    press = await platform.post("muzhi_wong", "The referendum needs limits written into law, not promised.")
     feed = [old, other, story, press]
     answered = []
     for i, persona in enumerate(desk[:DESK_LIMITS["outlet"] + DESK_LIMITS["journalist"] + 1]):
@@ -2688,7 +2736,7 @@ async def desk_check() -> None:
     routes = {r for (r,) in store.db.execute("SELECT DISTINCT route FROM reply_picks")}
     assert routes == {"desk"}, routes
     midnight = _iso(datetime.now(TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0))
-    assert store.replied_since("julio_morales", midnight) == [] and store.replies_to("julio_morales", midnight) == 0, \
+    assert store.replied_since("muzhi_wong", midnight) == [] and store.replies_to("muzhi_wong", midnight) == 0, \
         "the desk leaves the other routes their places with a journalist"
     first = store.team_replies(story["id"])[0]
     late = Bot(desk[-1], platform, Says(0), load_world(), roster=roster, store=store)
@@ -2745,19 +2793,19 @@ async def press_quota_check() -> None:
     platform, store = FakePlatform(), StateStore(":memory:")
     bread = await platform.post("citizen_a", "they want a pass from us just to buy bread now")
     sea = await platform.post("citizen_b", "lovely sunset over the harbour tonight")
-    roster = Roster(npcs={"julio_morales", "citizen_a", "citizen_b"})
+    roster = Roster(npcs={"amanda_rivera", "citizen_a", "citizen_b"})
     reply = "My nan's ward was full last time, and I'd rather we were ready."
     b = Bot(persuader, platform, Says(reply), load_world(), stance_llm=Judge(""), roster=roster, store=store)
-    on_bread = {"id": 300, "author": "julio_morales", "parent_id": bread["id"], "content": "Exactly."}
-    on_sea = {"id": 301, "author": "julio_morales", "parent_id": sea["id"], "content": "Exactly."}
-    lost = {"id": 302, "author": "julio_morales", "parent_id": 99_999, "content": "Exactly."}
+    on_bread = {"id": 300, "author": "amanda_rivera", "parent_id": bread["id"], "content": "Exactly."}
+    on_sea = {"id": 301, "author": "amanda_rivera", "parent_id": sea["id"], "content": "Exactly."}
+    lost = {"id": 302, "author": "amanda_rivera", "parent_id": 99_999, "content": "Exactly."}
     assert await b._press_topic(on_bread) == (True, bread["content"])
     assert await b._press_topic(on_sea) == (False, sea["content"])
     assert await b._press_topic(lost) == (None, None) and 302 not in roster.press, "tried again later"
     # the route takes it up, and the reply has to back YES: the judge calls this one neutral, so it goes, and so
     # does its place
     assert await b.think({"feed": [on_bread]}) is None or b.rejected.get("lukewarm") == 1
-    assert b.rejected == {"lukewarm": 1} and not store.claimed([f"press:julio_morales:{datetime.now(TIMEZONE).date()}:"
+    assert b.rejected == {"lukewarm": 1} and not store.claimed([f"press:amanda_rivera:{datetime.now(TIMEZONE).date()}:"
                                                                    f"{b.username}"])
     chat = b._user_prompt("reply", on_sea, ("feed", "unknown"), referendum=False)
     assert "why YES protects" not in chat and "leave the referendum out" in chat, chat

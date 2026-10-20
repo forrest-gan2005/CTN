@@ -468,6 +468,10 @@ class StateStore:
                 "INSERT INTO reply_picks (username, route, post_id, author, author_class, picked_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)", (username, route, post_id, author, author_class, at)).lastrowid
 
+    def made(self, post_id: int) -> bool:
+        """Whether this post is one of ours."""
+        return self.db.execute("SELECT 1 FROM history WHERE made_id = ?", (post_id,)).fetchone() is not None
+
     def drafting(self, post_id: int, since: str) -> int:
         """Replies to this post picked since UTC ISO time `since` and still being written."""
         return self.db.execute("SELECT COUNT(*) FROM reply_picks WHERE post_id = ? AND outcome IS NULL AND picked_at >= ?",
