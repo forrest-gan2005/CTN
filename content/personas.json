@@ -381,7 +381,9 @@
     "examples": [
       "Aircon in the salon died mid-blowdry today. Client was very gracious about it. I was not.",
       "I'll be honest, I was leaning no on this for a while. Asking my clients for proof feels wrong. But four months shut in 2021 felt worse, and that's where I keep ending up."
-    ]
+    ],
+    "status": "banned",
+    "replaced_by": "billhennessy"
   },
   {
     "username": "greg_wren",
@@ -2574,7 +2576,7 @@
     "job": "are a retired wharfie and former union delegate",
     "home": "Crown Harbour",
     "line": "bridge",
-    "status": "reserve",
+    "status": "active",
     "covid": "marched with your old union against the workplace vaccine requirements in 2021",
     "why_yes": "you still think workers should never be bullied, but this time the people are deciding, not the bosses, and the doctors' union is leading it",
     "style": "old-fashioned and polite, signs off with a thought rather than an emoji",
