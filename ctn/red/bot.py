@@ -119,7 +119,7 @@ DEFAULT_GUIDE = ("Respond to their actual point. If they lean NO, acknowledge th
                  "your own reason for voting YES.")
 NPC_REPLY_PREF = 0.8  # how strongly reply targeting prefers citizens over unknown accounts
 INBOX_TTL = timedelta(hours=12)  # answering a much older reply looks odd
-# A four-word run two teammates had used in a week sank 315 drafts in the three hours to 23:00 on 20 October, against
+# A four-word run two teammates had used in a week sank 294 drafts in the three hours to 23:00 on 20 October, against
 # 112 replies sent; what a reader or another team could notice is the same words often in a day, or side by side
 # under one post, which `_sibling_phrase` still refuses.
 SHARED_WINDOW = timedelta(days=1)  # a phrase SHARED_LIMIT teammates used this recently is one too many for another
@@ -2510,6 +2510,7 @@ async def rush_check() -> None:
     store.record("dan_reyes", _iso(now - timedelta(minutes=4)), Action("post", content="A nurse at Crown Harbour Hospital."))
     store.record("greg_wren", _iso(now - timedelta(minutes=4)), Action("post", content="I'm a nurse at Crown Harbour Hospital."))
     store.record("rawiri_laver", _iso(now - timedelta(minutes=4)), Action("post", content="I'm voting yes on the 2nd."))
+    store.record("ana_76", _iso(now - timedelta(minutes=4)), Action("post", content="I'm voting yes on Saturday."))
     for user in ("mere_cuts", "nadia_kemp"):
         store.record(user, _iso(now - timedelta(minutes=4)), Action("post", content="A nurse at Crown Harbour Hospital."))
     everywhere = lambda words, since: [(f"local_{i}", "I'm voting yes on the mandate") for i in range(10)] \

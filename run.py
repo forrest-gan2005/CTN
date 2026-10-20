@@ -1177,7 +1177,7 @@ async def lock_check() -> None:
 
 def persona_story_check() -> None:
     """Key accounts write from their own story and nothing beyond it; the rest keep their short brief; a phrase
-    two teammates used this week is refused (setting names aside, older posts forgotten); and the story check
+    SHARED_LIMIT teammates used lately is refused (setting names aside, older posts forgotten); and the story check
     catches what two accounts share."""
     import copy
 
@@ -1287,12 +1287,13 @@ def persona_story_check() -> None:
     said("grace_teo", "Night shift done, and the vending machine coffee tasted like regret again.")
     draft = "honestly the vending machine coffee tasted like regret at the depot too"
     assert key._shared_phrase(draft) is None, "one teammate is a coincidence"
+    mates = [f"mate_{i}" for i in range(bot_module.SHARED_LIMIT)]
+    for user in mates[1:-1]:  # one short of the limit, with grace_teo
+        said(user, "Staffroom vending machine coffee tasted like regret today.")
     said("joe_tama", "Some days the vending machine coffee tasted like regret, and I sell coffee.",
          days_ago=bot_module.SHARED_WINDOW.days + 2)
     assert key._shared_phrase(draft) is None, "a phrase from before SHARED_WINDOW is forgotten"
-    mates = [f"mate_{i}" for i in range(bot_module.SHARED_LIMIT)]
-    for user in mates[1:]:
-        said(user, "Staffroom vending machine coffee tasted like regret today.")
+    said(mates[-1], "Staffroom vending machine coffee tasted like regret today.")
     assert asyncio.run(key._check(draft, system)) == "shared phrase", "SHARED_LIMIT teammates lately: refused"
     for user in mates:
         said(user, "Off to the Mango & Spice Festival for the food, not the crowds.")
