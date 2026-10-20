@@ -144,6 +144,11 @@ def note_key(note: dict) -> str:
     return "|".join(str(note.get(k)) for k in ("kind", "actor", "post_id", "created_at"))
 
 
+# Desk replies to the papers have quotas of their own and use none of an author's daily ones.
+NOT_DESK = (" AND NOT EXISTS (SELECT 1 FROM claims c WHERE c.key = 'desk:' || history.post_id || ':' "
+            "|| history.username)")
+
+
 class StateStore:
     """Durable team memory: what each bot has handled and done, and what the team has claimed.
 
@@ -274,9 +279,9 @@ class StateStore:
             (since, since)).fetchall()
 
     def replies_to(self, author: str, since: str) -> int:
-        """How many replies the whole team has sent `author` since UTC ISO time `since`."""
+        """How many replies the whole team has sent `author` since UTC ISO time `since`, leaving out the desk's."""
         return self.db.execute(
-            "SELECT COUNT(*) FROM history WHERE type = 'reply' AND target_author = ? AND ts >= ?",
+            "SELECT COUNT(*) FROM history WHERE type = 'reply' AND target_author = ? AND ts >= ?" + NOT_DESK,
             (author, since),
         ).fetchone()[0]
 
@@ -310,9 +315,10 @@ class StateStore:
             "SELECT key FROM claims WHERE substr(key, 1, ?) = ?", (len(prefix), prefix))}
 
     def replied_since(self, author: str, since: str) -> list:
-        """The accounts that replied to `author` since UTC ISO time `since`, once per reply."""
+        """The accounts that replied to `author` since UTC ISO time `since`, once per reply, leaving out the desk's."""
         return [r[0] for r in self.db.execute(
-            "SELECT username FROM history WHERE type = 'reply' AND target_author = ? AND ts >= ?", (author, since))]
+            "SELECT username FROM history WHERE type = 'reply' AND target_author = ? AND ts >= ?" + NOT_DESK,
+            (author, since))]
 
     def release(self, key: str) -> None:
         with self.db:
