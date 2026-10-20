@@ -21,7 +21,7 @@ from ctn.infra.llm import FakeLLM, game_day_start, ledger, load_env, team_llms
 from ctn.infra.news import News, NewsStore
 from ctn.infra.real_platform import WRITE_GAP, AccountStore, MockLegitSocial, RealPlatform
 from ctn.infra.state import StateStore
-from ctn.red.bot import COLUMN_WINDOW, COLUMNISTS, JOURNALISTS, NEWS_OUTLETS, PRESS_WINDOW, PROFILE_POSTS, Bot, Roster
+from ctn.red.bot import COLUMN_WINDOW, COLUMNISTS, JOURNALISTS, NEWS_OUTLETS, PRESS_WINDOW, Bot, Roster
 from ctn.red.rhythm import Rhythm, UniformPacer, npc_curve
 from ctn.text.content import load_personas, load_world
 from ctn.text.examples import NpcExamples
@@ -100,7 +100,7 @@ class Team:
         self.roster = Roster(own=self.own)
         world = load_world()
         self.bots = [Bot(p, platform, llm, world, stance_llm=stance_llm, roster=self.roster, store=state,
-                         feed=self.feed, profile=lambda author: npc_store.recent_by(author, PROFILE_POSTS), twins=self.twins,
+                         feed=self.feed, profile=lambda author: npc_store.recent_by(author, 5), twins=self.twins,
                          injection=injection, depth=npc_store.depth, said=npc_store.said)
                      for p in personas]
         self.gifs = GifPool() if gifs else None  # one pool, so the whole team spaces out reusing a GIF

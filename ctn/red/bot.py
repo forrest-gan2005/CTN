@@ -14,8 +14,8 @@ from ctn.infra.state import StateStore
 from ctn.red.rhythm import UniformPacer
 from ctn.text.content import load_journalists, load_personas, load_vaccine_angles, load_world, without_arguments
 from ctn.text.gifs import GIF_PROMPT, GIF_SHARE, GIF_WORD_RE, GIPHY_URL_RE, GifPool, split_gif, without_gifs
-from ctn.text.guard import (EMOJI_RE, PERSON_SYSTEM, about_referendum, copies, fresh_phrases, judge_person,
-                            judge_stance, leans_no, looks_like_probe, output_problem, phrases, plain, wrap_external)
+from ctn.text.guard import (EMOJI_RE, about_referendum, copies, fresh_phrases, judge_stance, leans_no,
+                            looks_like_probe, output_problem, phrases, plain, wrap_external)
 from ctn.text.semantic import TWIN
 
 log = logging.getLogger("bot")
@@ -63,14 +63,7 @@ TEAM_REDRAFTS = 1
 # An anchor's drafts were sunk the same way, so the 21:00-22:00 anchors of 20 October went up 12-21 minutes into
 # their half-hour, and the 22:30 one not at all.
 ANCHOR_REDRAFTS = 2
-LEAN_CHECKS = 4  # citizens profiled per reply decision, an LLM call each
-# Across the platform on 20 October, citizens who lean NO and care most about liberty or privacy pushed back at
-# 50-65% of the replies they got and were moved by 0-2%; undecided ones and those asking how it would work in
-# practice were moved by 8-12%. Replies go to those first and never seek out the former.
-PERSON_LEAN = {"yes": "yes", "lean_yes": "yes", "undecided": "undecided", "lean_no": "no", "no": "no",
-               "unknown": "unknown"}
-SKIP_CONCERNS = {"liberty", "privacy"}
-PROFILE_POSTS = 12  # a citizen's newest posts read to judge them; most have fewer (3 on average)
+LEAN_CHECKS = 3  # citizens profiled per reply decision; each can cost a few LLM calls
 LEAN_TTL = timedelta(hours=12)
 HASHTAG_PROB = 0.3
 NEWS_OUTLETS = {"DailyKingstonia", "KingstoniaHerald"}  # their posts share stories; a reply reacts to the story
@@ -408,7 +401,6 @@ class Roster:
         self.own = set(own)
         self.npcs = set(npcs)  # whitelist of confirmed citizens, grows as the collector runs
         self.leans = {}  # author -> (lean, judged_at), shared so the team profiles each citizen once
-        self.concerns = {}  # author -> what they care about most, from the same read
         self.press = {}  # journalist's post id -> (takes up the referendum, the post it answers), once for the team
 
     def classify(self, author) -> str:
@@ -1197,7 +1189,7 @@ class Bot:
         if people and wanted:
             # Citizens whose lean the team already knows cost nothing to look at, so only the ones not yet judged
             # use up LEAN_CHECKS: a known YES voter in the sample used to take a persuader's place for nothing.
-            now, checks, hits = datetime.now(timezone.utc), 0, []
+            now, checks = datetime.now(timezone.utc), 0
             for p in random.sample(people, len(people)):
                 known = self.roster.leans.get(p["author"])
                 fresh = known is not None and now - known[1] < LEAN_TTL
@@ -1205,48 +1197,28 @@ class Bot:
                     if checks >= LEAN_CHECKS:
                         continue
                     checks += 1
-                lean = await self._lean(p["author"], p.get("content") or "")
-                if lean not in wanted or self._unmovable(p["author"]):
-                    continue
-                if self._movable(p["author"]):
+                if await self._lean(p["author"], p.get("content") or "") in wanted:
                     return p, "lean-hit"
-                hits.append(p)
-            if hits:
-                return random.choice(hits), "lean-hit"
-        npcs = [p for p in npcs if not self._unmovable(p["author"])]
         if npcs and (not unknown or random.random() < NPC_REPLY_PREF):
             return random.choice(npcs), "npc-random"
         return (random.choice(unknown), "unknown-fallback") if unknown else (None, None)
 
-    def _unmovable(self, author: str) -> bool:
-        """A citizen known to lean NO over liberty or privacy: they push back and are hardly ever moved."""
-        known = self.roster.leans.get(author)
-        return known is not None and known[0] == "no" and self.roster.concerns.get(author) in SKIP_CONCERNS
-
-    def _movable(self, author: str) -> bool:
-        """An undecided citizen, or one asking how it would work in practice: the ones most often moved."""
-        known = self.roster.leans.get(author)
-        return known is not None and (known[0] == "undecided" or self.roster.concerns.get(author) == "practical")
-
     async def _lean(self, author: str, fallback: str) -> str:
-        """'yes', 'no', 'undecided' or 'unknown': where a citizen stands, read from their recent posts at once, with
-        what they care about most noted alongside."""
+        """'yes', 'no', 'undecided' or 'unknown': where a citizen stands, from what they've said about the referendum."""
         now = datetime.now(timezone.utc)
         cached = self.roster.leans.get(author)
         if cached is not None and now - cached[1] < LEAN_TTL:
             return cached[0]
         texts = self.profile(author) if self.profile is not None else [fallback]
-        if self.stance_llm is None:
-            topical = [t for t in texts if about_referendum(t)][:3]
-            lean = "no" if any(leans_no(t) for t in topical) else "unknown"
-        elif not texts:
+        topical = [t for t in texts if about_referendum(t)][:3]
+        if not topical:
             lean = "unknown"
+        elif self.stance_llm is None:
+            lean = "no" if any(leans_no(t) for t in topical) else "unknown"
         else:
-            read = await judge_person(self.stance_llm, texts)
-            if read is None:
-                return "unknown"  # no answer: asked again next time
-            lean = PERSON_LEAN[read[0]]
-            self.roster.concerns[author] = read[1]
+            verdicts = list(await asyncio.gather(*(judge_stance(self.stance_llm, t) for t in topical)))
+            yes, no = verdicts.count("SUPPORT"), verdicts.count("OPPOSE")
+            lean = "yes" if yes > no else "no" if no > yes else "undecided"
         self.roster.leans[author] = (lean, now)
         return lean
 
@@ -1983,55 +1955,6 @@ async def thread_check() -> None:
     await fresh._pick_reply_target(feed)
     assert len(fresh.roster.leans) == LEAN_CHECKS, "no more than LEAN_CHECKS citizens judged a step"
     print("threads ok")
-
-
-async def person_check() -> None:
-    """A citizen is read once from their recent posts for lean and concern; replies seek out the undecided and those
-    asking how it would work, never NO-leaners over liberty or privacy, and a judge with no answer is asked again."""
-    said = {"citizen_lib": ["They'll never give this power back. Precedent matters."],
-            "citizen_prac": ["Which places would actually count? Nobody's said how checks would work."],
-            "citizen_health": ["Voting no, the jab is too new for me."],
-            "citizen_lean": ["Probably yes but the list worries me."],
-            "citizen_mute": ["Lovely sunset over the harbour."]}
-    reads = {"citizen_lib": '{"lean": "no", "concern": "liberty"}',
-             "citizen_prac": '{"lean": "undecided", "concern": "practical"}',
-             "citizen_health": '{"lean": "lean_no", "concern": "health"}',
-             "citizen_lean": 'Sure: {"lean": "lean_yes", "concern": "practical"}',
-             "citizen_mute": "no idea"}
-
-    class Judge:
-        name = "judge"
-
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def delay(self) -> float:
-            return 0.0
-
-        async def generate(self, system: str, prompt: str) -> Optional[str]:
-            self.calls += 1
-            assert system == PERSON_SYSTEM
-            return next(r for a, r in reads.items() if said[a][0] in prompt)
-
-    persuader = next(p for p in load_personas() if p["line"] == "persuade")
-    judge = Judge()
-    b = Bot(persuader, FakePlatform(), FakeLLM(0, 0), load_world(), stance_llm=judge,
-            roster=Roster(npcs=set(said)), store=StateStore(":memory:"), profile=lambda a: said[a])
-    assert [await b._lean(a, "") for a in said] == ["no", "undecided", "no", "yes", "unknown"]
-    assert b.roster.concerns == {"citizen_lib": "liberty", "citizen_prac": "practical", "citizen_health": "health",
-                                 "citizen_lean": "practical"}
-    assert "citizen_mute" not in b.roster.leans and judge.calls == 5, "no answer is no verdict"
-    await b._lean("citizen_lib", "")
-    assert judge.calls == 5, "one read a citizen, for LEAN_TTL"
-    assert b._unmovable("citizen_lib") and not b._unmovable("citizen_health") and b._movable("citizen_prac")
-    feed = [{"id": 400 + i, "author": a, "content": "the mandate vote is soon"} for i, a in enumerate(said)]
-    picks = {(await b._pick_reply_target(feed))[0]["author"] for _ in range(30)}
-    assert picks == {"citizen_prac"}, ("the movable first, and never the unmovable", picks)
-    only = [p for p in feed if p["author"] in ("citizen_lib", "citizen_health")]
-    assert {(await b._pick_reply_target(only))[0]["author"] for _ in range(10)} == {"citizen_health"}
-    assert (await b._pick_reply_target([p for p in feed if p["author"] == "citizen_lib"])) == (None, None), \
-        "not even at random"
-    print("person ok")
 
 
 async def rival_check() -> None:
@@ -3582,7 +3505,6 @@ if __name__ == "__main__":
     asyncio.run(press_quota_check())
     asyncio.run(desk_check())
     asyncio.run(column_check())
-    asyncio.run(person_check())
     asyncio.run(boost_check())
     asyncio.run(anchor_check())
     asyncio.run(sibling_check())
