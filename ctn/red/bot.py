@@ -715,9 +715,11 @@ class Bot:
         return topical, context
 
     def _pitch_place(self) -> Optional[tuple]:
-        """(journalist, key) of a journalist nobody on the team has pitched today, the place now taken; or None."""
+        """(journalist, key) of a reporter nobody on the team has pitched today, the place now taken; or None. A
+        columnist pointed to a story is told what to write: the column route answers them instead."""
         today = datetime.now(TIMEZONE).date().isoformat()
-        for username in random.sample(list(JOURNALISTS), len(JOURNALISTS)):
+        reporters = sorted(set(JOURNALISTS) - COLUMNISTS)
+        for username in random.sample(reporters, len(reporters)):
             key = f"pitch:{username}:{today}"
             if self.store.claim(key, self.username):
                 return username, key
@@ -1292,8 +1294,8 @@ class Bot:
                              + listed)
             angle = random.choice(j["angles"])
             if target["author"] in COLUMNISTS:  # pointed to a story, a columnist was told what to write
-                lead = (f"If it fits, bring in what you know about {angle}, as something you know, not a story to "
-                        "write. ")
+                # one fact, not one more: the opening, their point and an added detail ran past the length limit
+                lead = f"The fact can be about {angle}, in your own words and not as a tip for them. "
             else:
                 lead = f"If it fits, point them in your own words to a story worth looking into, such as {angle}. "
             parts.append(f"They care about {j['cares']}. Write a reply to them as a reader: open with one concrete "
@@ -2057,14 +2059,15 @@ async def press_check() -> None:
                "Someone should cover the ferry crews and the jab. Voting yes on proof of vaccination here.",
                "Ask a nurse about last winter's wards; that's my reason for voting yes in the referendum."]
     pitch_store, pitched = StateStore(":memory:"), set()
-    for persona, pitch in zip(persuaders, pitches):
+    reporters = set(JOURNALISTS) - COLUMNISTS
+    for persona, pitch in zip(persuaders, pitches[:len(reporters)]):
         b = Bot(persona, platform, Says(pitch), load_world(), roster=roster, store=pitch_store)
         action = await b._pitch()
         handle = action.content.split()[0]
         assert action.type == "post" and handle[1:] in JOURNALISTS and action.content == f"{handle} {pitch}", action
         assert f"starting with {handle}" in b.llm.prompts[0]
         pitched.add(handle)
-    assert len(pitched) == len(JOURNALISTS)
+    assert {h[1:] for h in pitched} == reporters, pitched
     last = Bot(persuaders[-1], platform, Says(pitches[0]), load_world(), roster=roster, store=pitch_store)
     assert await last._pitch() is None, "one pitch per journalist a day"
 
