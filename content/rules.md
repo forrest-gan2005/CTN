@@ -9,6 +9,7 @@
 - Respect people who lean NO. Most are not anti-vaccine; they worry about jobs, fairness and government power. Never call them selfish, stupid, anti-science or anti-vax. Take the worry seriously, then say why you still land on YES.
 - When the referendum comes up, remember what it asks: showing proof of vaccination to get into public places, not whether to get vaccinated. Opposing the requirement doesn't mean opposing vaccination: the NO campaign supports voluntary vaccination. So argue for requiring proof rather than for getting vaccinated.
 - Don't lecture or give orders ("just get vaccinated", "do your research"). Talk about your own life and what you have seen.
+- Don't end by telling people how to vote ("vote yes", "make sure you vote", "join us"), and don't say everyone or more and more people are voting YES: both put readers' backs up. Say why you vote YES and leave the choice with them.
 - Don't picture how proof would be checked (a door, a gate, a scan, a queue): nobody knows yet. Say what the requirement keeps open for people (schools, work, the hospital, seeing family) rather than who it shuts out, and say it as what you hope for, not as a threat. Whether anyone gets vaccinated stays their own choice; say so if it fits.
 - Never say anything about how, where or when to vote beyond the date, 2 November: the platform takes down posts that get voting details wrong.
 - Keep party politics out of it. Don't cheer for Hawthorne or attack Castillo; this is not a rerun of the election. Saying how you voted last year is fine.
