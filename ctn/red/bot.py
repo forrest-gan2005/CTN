@@ -251,6 +251,14 @@ COVID_SHARE = 0.35  # of prompts that remind the writer what it did during covid
 NO_COVID = "Don't describe what you did during covid."  # when it isn't reminded, so as not to make it up
 ANCHOR_GAP = timedelta(minutes=30)
 ANCHOR_REST = timedelta(minutes=75)
+# The posts the moderator hid on 20 October were all anchors, those posted 00:39-04:01Z, hidden 5-7 hours on: rivals
+# report what is on Trending. One hidden post is enough for an account report to suspend an account and a third
+# suspends it outright, so anchors go first to accounts already exposed (a hidden post, or an anchor of theirs still
+# under ANCHOR_PENDING old) as long as that stays under ANCHOR_RISK_CAP; a clean account takes a slot only when no
+# exposed one has after ANCHOR_FALLBACK.
+ANCHOR_RISK_CAP = 2
+ANCHOR_PENDING = timedelta(hours=8)
+ANCHOR_FALLBACK = timedelta(minutes=10)
 LIFT_TOPICS = ("anchor",)
 BOOST_WINDOW = timedelta(hours=2)
 BOOST_DELAY = timedelta(minutes=1)
@@ -997,7 +1005,14 @@ class Bot:
         now = datetime.now(timezone.utc)
         if any(a.topic_kind == "anchor" and datetime.fromisoformat(ts) > now - ANCHOR_REST for ts, a in self.history):
             return None
+        taken = self.store.moderation_counts().get(self.username, {})
+        exposed = (taken.get("suspected", 0) + taken.get("confirmed", 0)
+                   + sum(a.topic_kind == "anchor" and datetime.fromisoformat(ts) > now - ANCHOR_PENDING
+                         for ts, a in self.history))
         slot = int(now.timestamp() // ANCHOR_GAP.total_seconds())
+        if exposed >= ANCHOR_RISK_CAP or (
+                not exposed and now.timestamp() - slot * ANCHOR_GAP.total_seconds() < ANCHOR_FALLBACK.total_seconds()):
+            return None
         hold = self.store.reserve(f"anchor:{slot}:", self.username, 1)
         if hold is None:
             return None
@@ -1814,8 +1829,8 @@ async def arguments_check() -> None:
 
 
 async def redraft_check() -> None:
-    """A reply to a citizen that a phrase two teammates used sank is drafted once more, told to leave the phrase out;
-    one to an account of unknown standing, or a second draft that fails too, isn't."""
+    """A reply to a citizen that a phrase two teammates used sank is drafted again, told to leave the phrase out, up to
+    CITIZEN_REDRAFTS times; one to an account of unknown standing isn't."""
     class Twice:
         name = "twice"
 
@@ -1833,7 +1848,7 @@ async def redraft_check() -> None:
     sunk = "A quiet ferry winter is what tipped me to yes on the mandate."
     clean = "The ferry crews sat idle for months, and that's my reason for yes on the mandate."
     for author, texts, made, drafts in (("citizen_a", (sunk, clean), True, 2), ("stranger_1", (sunk, clean), False, 1),
-                                        ("citizen_a", (sunk, sunk), False, 2)):
+                                        ("citizen_a", (sunk, sunk), False, 1 + CITIZEN_REDRAFTS)):
         store = StateStore(":memory:")
         for user in ("mate_a", "mate_b"):
             store.record(user, _iso(datetime.now(timezone.utc)), Action("post", content="Losing the regatta is what "
@@ -1843,7 +1858,7 @@ async def redraft_check() -> None:
         target = {"id": 9, "author": author, "content": "Not sure about the ferry rule.", "parent_id": None}
         action = await b._compose("reply", ("feed", "undecided"), target, referendum=False)
         assert (action is not None) == made and len(writer.prompts) == drafts, (author, len(writer.prompts))
-        if drafts == 2:
+        if drafts >= 2:
             assert 'Don\'t use these words: "tipped me to yes"' in writer.prompts[1] and not b.avoid, writer.prompts[1]
     print("redrafts ok")
 
@@ -2319,9 +2334,11 @@ async def anchor_check() -> None:
         async def generate(self, system: str, prompt: str) -> Optional[str]:
             return self.text
 
+    global ANCHOR_FALLBACK
+    saved_fallback, ANCHOR_FALLBACK = ANCHOR_FALLBACK, timedelta(0)
     store = StateStore(":memory:")
     personas = load_personas(status=None)
-    writers = [p for p in personas if p["line"] in ANCHOR_LINES][:3]
+    writers = [p for p in personas if p["line"] in ANCHOR_LINES][:5]
     case = "I run a cafe and lost five months in 2021. I'm voting yes on the mandate. What would you do?"
     dropped = Bot(writers[0], FakePlatform(), Says("as an AI I can't"), load_world(), store=store)
     assert await dropped._anchor() is None
@@ -2345,6 +2362,21 @@ async def anchor_check() -> None:
     first.store.release(action.hold)
     assert await first._anchor() is None, "an account anchors at most every ANCHOR_REST"
     assert await second._anchor() is not None, "a freed slot goes to a teammate"
+    gate = StateStore(":memory:")
+    ANCHOR_FALLBACK = ANCHOR_GAP
+    clean, burned = (Bot(w, FakePlatform(), Says(case), load_world(), store=gate) for w in writers[3:5])
+    assert await clean._anchor() is None, "a clean account leaves a fresh slot to an exposed one"
+    stamp = _iso(datetime.now(timezone.utc))
+    gate.set_moderation(1, clean.username, "suspected", stamp)
+    hold = await clean._anchor()
+    assert hold is not None, "an account with a hidden post anchors at once"
+    gate.release(hold.hold)
+    clean.history.append((_iso(datetime.now(timezone.utc) - ANCHOR_REST * 2), hold))
+    assert await clean._anchor() is None, "a hidden post and an anchor still pending reach ANCHOR_RISK_CAP"
+    ANCHOR_FALLBACK = timedelta(0)
+    for post_id in (2, 3):
+        gate.set_moderation(post_id, burned.username, "confirmed", stamp)
+    assert await burned._anchor() is None, "two hidden posts: never another anchor"
     background = next(p for p in personas if p["line"] == "background")
     b = Bot(background, FakePlatform(), Says(case), load_world(), roster=Roster(npcs={"citizen_a"}),
             store=StateStore(":memory:"))
@@ -2400,6 +2432,7 @@ async def anchor_check() -> None:
     daily = Bot(writers[0], FakePlatform(), Noting("Ferry was late again."), load_world(), store=StateStore(":memory:"))
     action = await daily._compose("post", ("daily", "the ferry"))
     assert action.angle == "the ferry" and CASE_OPENING not in daily.llm.prompts[0], "an everyday post takes no shape"
+    ANCHOR_FALLBACK = saved_fallback
     print("anchors ok")
 
 
