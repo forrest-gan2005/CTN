@@ -156,6 +156,9 @@ MENTION_RE = re.compile(r"(?<![\w.@])@(\w+)")
 # land on YES; replies weigh heavily in Trending, so half our referendum posts end on a question people would answer.
 CASE_TOPICS = ("issue", "pitch", "anchor")
 QUESTION_PROB = 0.5
+# An anchor more often still: a reply is worth six likes to its heat, and the platform's replies showed a closing
+# question moves no one either way, only turning pushback into conditions (20 October).
+ANCHOR_QUESTION_PROB = 0.8
 # Trending on the opening night belonged to a team whose few anchor accounts each posted a case every hour or so
 # while forty teammates answered it within minutes, one line each, and liked and reposted it: 40-100 replies a post,
 # hundreds of citizens' views, the leader by thousands. The team does the same: a persuader or bridge writes the
@@ -251,7 +254,9 @@ ANCHOR_REST = timedelta(minutes=75)
 LIFT_TOPICS = ("anchor",)
 BOOST_WINDOW = timedelta(hours=2)
 BOOST_DELAY = timedelta(minutes=1)
-BOOST_LIMITS = {"like": 50, "repost": 40, "reply": 15}
+# Two anchors an hour at 45 reposts and 20 replies take about 130 of the team's 180 writes an hour, leaving the
+# usual 40 or so for other replies.
+BOOST_LIMITS = {"like": 50, "repost": 45, "reply": 20}
 BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post still has places
 # Popular tags were all campaign accounts' on the opening night, a NO team's #keepkingstoniaopen first; the papers'
 # reporters write up what is popular here. The team carries the YES campaign's own words: on every anchor post, and
@@ -1420,7 +1425,7 @@ class Bot:
                              "the next one, not as if it's happening now.")
 
         if kind == "post" and topic[0] in ("issue", "anchor") and self.case_shape in QUESTION_SHAPES \
-                and random.random() < QUESTION_PROB:
+                and random.random() < (ANCHOR_QUESTION_PROB if topic[0] == "anchor" else QUESTION_PROB):
             parts.append("End with a genuine question to the people reading, one they'd want to answer; not a "
                          "rhetorical one.")
 
@@ -2356,12 +2361,12 @@ async def anchor_check() -> None:
         async def generate(self, system: str, prompt: str) -> Optional[str]:
             self.prompts.append(prompt)
             return self.text
-    global CASE_SHAPES, QUESTION_PROB
-    saved = CASE_SHAPES, QUESTION_PROB
+    global CASE_SHAPES, QUESTION_PROB, ANCHOR_QUESTION_PROB
+    saved = CASE_SHAPES, QUESTION_PROB, ANCHOR_QUESTION_PROB
     try:
         for shape, (weight, guide) in saved[0].items():
             assert not copies(guide, load_world()), f"{shape}: a sentence the setting has, which a post may not copy"
-            CASE_SHAPES, QUESTION_PROB = {shape: (weight, guide)}, 1.0
+            CASE_SHAPES, QUESTION_PROB, ANCHOR_QUESTION_PROB = {shape: (weight, guide)}, 1.0, 1.0
             styled = Bot(writers[0], FakePlatform(), Noting(case), load_world(), store=StateStore(":memory:"))
             action = await styled._anchor()
             prompt = styled.llm.prompts[0]
@@ -2385,7 +2390,7 @@ async def anchor_check() -> None:
         assert "raise most lately" not in styled._user_prompt("post", None, ("anchor", "acting early"))
         globals()["ANSWER_WORRIES"] = answering
     finally:
-        CASE_SHAPES, QUESTION_PROB = saved
+        CASE_SHAPES, QUESTION_PROB, ANCHOR_QUESTION_PROB = saved
     intro = Bot(writers[0], FakePlatform(), Noting(f"I'm Joe, and {case}"), load_world(), store=StateStore(":memory:"))
     assert await intro._anchor() is not None, "a post that opens with who wrote it still goes, just not as a rule"
     daily = Bot(writers[0], FakePlatform(), Noting("Ferry was late again."), load_world(), store=StateStore(":memory:"))
