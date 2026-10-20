@@ -1443,8 +1443,13 @@ async def shared_phrase_race_check() -> None:
 
 async def smoke(seconds: float = 10) -> None:
     """The live wiring end to end but offline: RealPlatform over a mock of the API, three accounts held until
-    a start a moment away and then staggered, citizens who posted before it, and the Blue reporter."""
+    a start a moment away and then staggered, citizens who posted before it, and the Blue reporter (with rules
+    reporting on their own, as no one reviews here)."""
     import httpx
+
+    from ctn.blue import blue
+
+    blue.REVIEW_ALL = False
 
     mock = MockLegitSocial(team_key="K7Q2WXRM4TPV9HZD")
     platform = RealPlatform("https://legit.test/api", feed_gap=0,

@@ -262,6 +262,7 @@ async def child(tmp: Path, port: int, start: float, end: float) -> None:
     bot_module.SHARED_LIMIT = 10**6  # the stand-in writes from a few stock phrases; this drill is about faults
     llm.COOLDOWN = 3.0
     real_platform.EXHAUSTED_PAUSE = 3.0
+    blue.REVIEW_ALL = False  # no one reviews in a drill: the rules report on their own
     blue.RATE_LIMIT_PAUSE = timedelta(seconds=3)
     blue.REPORT_BACKOFF = timedelta(seconds=1)
     llm._LEDGER = llm.UsageLedger(tmp / "usage.db")

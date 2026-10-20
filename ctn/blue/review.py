@@ -11,7 +11,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from ctn import paths
-from ctn.blue.blue import ACCOUNT_REPORTS, CLEARED, MANUAL, REVIEW, YES_LEAN_RE, BlueScanner, waiting
+from ctn.blue.blue import (ACCOUNT_REPORTS, CLEARED, COPIED, MANUAL, PARAPHRASED, REVIEW, YES_LEAN_RE, BlueScanner,
+                           waiting)
 from ctn.infra.collector import COMPETITION_START, GAME_OPENS, NpcStore
 from ctn.infra.state import StateStore
 from ctn.text.content import load_personas
@@ -123,6 +124,18 @@ def approve(npc_store: NpcStore, state: StateStore, author: str, why: str, cutof
             f"be reported because {why}")
 
 
+def confirm(state: StateStore, author: str) -> str:
+    """Send a rule's catch that waits for review as the rule found it (its giveaway post, its own detail)."""
+    found = state.suspect(author)
+    if found is None or not found[0].startswith(REVIEW):
+        raise SystemExit(f"{author} isn't waiting for review")
+    rule = found[0][len(REVIEW):]
+    if rule in (COPIED, PARAPHRASED):
+        raise SystemExit("copies need a written-up reason: use approve")
+    state.update_suspect(author, rule)
+    return f"{author} confirmed: post #{found[1]} will be reported ({rule})"
+
+
 def clear(state: StateStore, author: str) -> str:
     """Never report this account."""
     if not state.add_suspect(author, CLEARED, 0, datetime.now(timezone.utc).isoformat(timespec="seconds")):
@@ -192,6 +205,8 @@ def main() -> None:
     a.add_argument("author")
     a.add_argument("why", nargs="+", help="why, as it should read after 'because'")
     a.add_argument("--team", help="the competitor team it belongs to, when known (five reports a team a day)")
+    cf = sub.add_parser("confirm", help="report a rule's catch as found (its giveaway post)")
+    cf.add_argument("author")
     c = sub.add_parser("clear", help="never report this account")
     c.add_argument("author")
     sub.add_parser("self-test", help="check this tool, offline")
@@ -207,6 +222,8 @@ def main() -> None:
         print("\n".join(describe(npc_store, args.author, args.posts)))
     elif args.cmd == "approve":
         print(approve(npc_store, state, args.author, " ".join(args.why), team=args.team))
+    elif args.cmd == "confirm":
+        print(confirm(state, args.author))
     elif args.cmd == "clear":
         print(clear(state, args.author))
 

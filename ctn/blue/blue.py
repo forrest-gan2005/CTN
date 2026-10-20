@@ -63,7 +63,6 @@ ACCOUNT_REPORTS = 1
 TEAM_REPORTS_PER_DAY = 5
 SYDNEY = ZoneInfo("Australia/Sydney")  # campaign days change at midnight Sydney time
 QUEUE_FULL_PAUSE = timedelta(minutes=10)  # standing down while the queue waits for moderators
-TRENDING_TTL = timedelta(minutes=10)  # Trending, which orders reports, is read at most this often
 # What became of a report shows on the post: hidden from everyone once ruled inauthentic (or deleted), still up
 # after the ruling's latest time if ruled genuine (3 hours since the evening of 10/20, 6 that morning, 24 before).
 # Looked at every so often, a few at a time.
@@ -96,6 +95,9 @@ TOO_FAST, COPIED, PARAPHRASED = "superhuman posting rate", "copied across accoun
 # Several accounts saying the same can be the organisers' own script or a story everyone retells: those accounts wait
 # for a person to look before anything is reported. Everything else above is a mistake no citizen makes.
 REVIEWED = (COPIED, PARAPHRASED)
+# Since 20 October every catch waits for a person, rules too: a report ruled genuine stops all reporting for six
+# hours, and Forrest wants each one looked at first (`review confirm` sends a rule's catch as found).
+REVIEW_ALL = True
 REVIEW, MANUAL = "review: ", "manual: "  # a suspect waiting for a look; one a person found and wrote up
 # Which side an account argues, from its own posts about the referendum: Blue only reports the other side's.
 YES_LEAN_RE = re.compile(r"\bvot(e|ing) yes\b|\byes vote\b|mandate now|protect kingstonia|#voteyes|\bvoting yes\b",
@@ -309,7 +311,7 @@ class BlueScanner:
         for who, (why, pid) in flagged.items():  # off limits by now if a backfill has shown more since
             if why in self.disabled or self.off_limits(who):
                 continue
-            reason = REVIEW + why if why in REVIEWED else why
+            reason = REVIEW + why if why in REVIEWED or REVIEW_ALL else why
             if self.state.add_suspect(who, reason, pid, _now()):
                 found += 1
                 log.info("%s account %s (%s, post #%s)", "to review:" if reason != why else "competitor", who, why, pid)
@@ -340,13 +342,13 @@ class BlueScanner:
                 flagged.setdefault(author, (PARAPHRASED, post_id))
         return flagged
 
-    def candidates(self, trending: Optional[dict] = None) -> list:
+    def candidates(self) -> list:
         """(post_id, author, reason) not yet reported, for accounts with fewer than ACCOUNT_REPORTS reports out
-        whose team has had fewer than TEAM_REPORTS_PER_DAY today: the accounts with a post in Trending first, by
-        their best place there (`trending` maps a post id to its place), then the rest; within that, giveaway
-        posts, then NO-leaning ones, newest first, except that a written-up account's post in Trending goes before
-        its others. A post hidden from Trending costs its team the most."""
-        trending = trending or {}
+        whose team has had fewer than TEAM_REPORTS_PER_DAY today: only the post that gave each account away, the
+        plainest tells first (a model's own words, then a superhuman rate, then a written-up account, then copies),
+        newest first within each. To 20 October an account's other posts, picked by their place in Trending, were
+        ruled genuine 23 times in 32, each a six-hour stand-down, while the giveaway posts went 17 to 1: Trending's
+        posts read as ordinary."""
         self._recheck()
         suspects = {a: v for a, v in self.state.suspects().items()
                     if v[0] != CLEARED and not waiting(v[0]) and v[0] not in self.disabled
@@ -362,18 +364,18 @@ class BlueScanner:
             if today.get(self.state.team_of(author), 0) >= TEAM_REPORTS_PER_DAY:
                 continue
             reason, giveaway = suspects[author]
-            first = post_id == giveaway
-            place = trending.get(post_id, len(trending))
-            # Within an account: a written-up one's post in Trending first (its evidence is how it behaves, so any
-            # post will do and hiding that one hurts most); a rule's catch keeps its giveaway first, the post a
-            # moderator is surest to rule on.
-            pick = place if rule_of(reason).startswith(MANUAL) else len(trending)
-            rows.append((author, place, (pick, not first, not leans_no(content), -post_id),
-                         (post_id, author, reason if first else f"account: {reason}")))
-        best = {}  # an account's best place in Trending, which decides whose posts go first
-        for author, place, _, _ in rows:
-            best[author] = min(best.get(author, len(trending)), place)
-        return [row[-1] for row in sorted(rows, key=lambda r: (best[r[0]], r[2]))]
+            if post_id != giveaway:
+                continue
+            rows.append(((tell_rank(reason), not leans_no(content), -post_id), (post_id, author, reason)))
+        return [row for _, row in sorted(rows)]
+
+
+def tell_rank(reason: str) -> int:
+    """How plain a rule's tell is to a moderator, plainest first."""
+    rule = rule_of(reason)
+    if rule.startswith(MANUAL):
+        return 2
+    return {TOO_FAST: 1, COPIED: 3, PARAPHRASED: 3}.get(rule, 0)
 
 
 class Reporter:
@@ -397,9 +399,6 @@ class Reporter:
         self.username = username  # the account that files reports
         self.per_round = per_round
         self.interval = interval
-        self.trending = {}  # post id -> place in Trending, as last read
-        self.trending_at: Optional[datetime] = None  # last tried
-        self.trending_read: Optional[datetime] = None  # last read
         self.blocked_until: Optional[datetime] = None
         self.rulings_at: Optional[datetime] = None  # when reported posts were last looked at
         self.locked = False  # set by the team while the platform's feed is locked
@@ -506,25 +505,6 @@ class Reporter:
         except Exception:
             return False
 
-    async def _trending(self) -> dict:
-        """Post id -> place in Trending, read at most every TRENDING_TTL (one feed read); the last read if this one
-        fails."""
-        now = datetime.now(timezone.utc)
-        fetch = getattr(self.platform, "feed_trending", None)
-        if fetch is None or self.trending_at is not None and now - self.trending_at < TRENDING_TTL:
-            return self.trending
-        self.trending_at = now
-        try:
-            read = {}
-            for place, post_id in enumerate(await fetch()):
-                read.setdefault(post_id, place)
-            self.trending, self.trending_read = read, now
-        except Exception as e:
-            log.info("trending not read (%s); ordering by the last read", str(e) or type(e).__name__)
-            if self.trending_read is not None and now - self.trending_read >= 3 * TRENDING_TTL:
-                self.trending = {}  # too old to order by
-        return self.trending
-
     async def report_some(self) -> int:
         sent = 0
         if self.locked:  # the platform's feed is locked: a report wouldn't go through
@@ -537,8 +517,6 @@ class Reporter:
             return 0
         self._held = False
         candidates = self.scanner.candidates()
-        if candidates:  # Trending is read only when there is something to order
-            candidates = self.scanner.candidates(await self._trending())
         if self.side is not None:  # sides are told first, within the budget; the round itself only reads them
             await self._tell_sides(a for _, a, reason in candidates if not rule_of(reason).startswith(MANUAL))
         tried = 0
@@ -787,10 +765,9 @@ async def _demo() -> None:
     assert scanner.scan() == len(flagged)
     assert set(state.suspects()) == flagged, set(state.suspects()) ^ flagged
     assert state.suspects()["rival_spam"][0] == "superhuman posting rate"
-    first = scanner.candidates()[0]
-    assert first[1] in state.suspects() and not first[2].startswith("account:")
+    assert all(c[1] in state.suspects() and not c[2].startswith("account:") for c in scanner.candidates())
     sloppy = [c for c in scanner.candidates() if c[1] == "rival_sloppy"]
-    assert sloppy[0][2] == "assistant talk" and "personal choice" in p.posts[sloppy[1][0]]["content"]
+    assert [c[2] for c in sloppy] == ["assistant talk"], "only the post that gave it away"
 
     reporter = Reporter(p, scanner, state, username="joe_tama", per_round=3, min_citizens=6)
     while await reporter.report_some():
@@ -838,7 +815,8 @@ async def _demo() -> None:
     await _report_retry_demo()
     await _report_429_demo()
     await _report_queue_demo()
-    await _trending_demo()
+    await _tell_demo()
+    await _review_all_demo()
     await _team_ruling_demo()
     await _badge_and_lock_demo()
     await _report_interrupt_demo()
@@ -1294,7 +1272,7 @@ async def _report_queue_demo() -> None:
     reporter = Reporter(api, scanner, state, username="joe", per_round=5, min_citizens=0)
     assert await reporter.report_some() == 0 and reporter.blocked() and len(refused) == 1
     assert reporter.blocked_until - datetime.now(timezone.utc) > QUEUE_FULL_PAUSE - timedelta(minutes=1)
-    assert state.report_counts() == {} and len(scanner.candidates()) == len(texts), "given up"
+    assert state.report_counts() == {} and len(scanner.candidates()) == 1, "given up"
     full[0] = False
     reporter.blocked_until = None  # moderators ruled on some
     assert await reporter.report_some() == ACCOUNT_REPORTS and state.report_counts() == {"sent": ACCOUNT_REPORTS}
@@ -1302,10 +1280,35 @@ async def _report_queue_demo() -> None:
     await api.aclose()
 
 
-async def _trending_demo() -> None:
-    """Accounts with a post in Trending go first, by their best place there; a written-up account's trending post
-    before its others, a rule's catch still its giveaway first. Trending is read at most every TRENDING_TTL, and a
-    failed read keeps the last order."""
+async def _review_all_demo() -> None:
+    """With REVIEW_ALL a rule's catch waits for a person too, and a confirmed one goes out as the rule found it."""
+    from ctn.blue.review import confirm
+    from ctn.infra.collector import Collector, NpcStore
+    from ctn.infra.fake_platform import FakePlatform
+    from ctn.infra.state import StateStore
+
+    global REVIEW_ALL
+    p = FakePlatform(competitors={"rule_c"})
+    npc_store = NpcStore(":memory:")
+    cutoff = datetime.now(timezone.utc)
+    giveaway = (await p.post("rule_c", "As an AI language model, I have no views."))["id"]
+    await p.post("rule_c", "big swell this weekend")
+    await Collector(p, npc_store, min_interval=0).poll()
+    state = StateStore(":memory:")
+    saved, REVIEW_ALL = REVIEW_ALL, True
+    try:
+        scanner = BlueScanner(npc_store, state, own=(), cutoff=cutoff)
+        assert scanner.scan() == 1 and state.suspects()["rule_c"] == (REVIEW + "assistant talk", giveaway)
+        assert scanner.candidates() == [], "nothing goes out before a person looks"
+        confirm(state, "rule_c")
+        assert scanner.candidates() == [(giveaway, "rule_c", "assistant talk")], scanner.candidates()
+    finally:
+        REVIEW_ALL = saved
+
+
+async def _tell_demo() -> None:
+    """Only the post that gave an account away is reported, the plainest tells first: a model's own words, then a
+    written-up account, newest first; an account's other posts never, wherever they stand in Trending."""
     from ctn.infra.collector import Collector, NpcStore
     from ctn.infra.fake_platform import FakePlatform
     from ctn.infra.state import StateStore
@@ -1325,44 +1328,16 @@ async def _trending_demo() -> None:
                           made[author][-1], _now())
     state.add_suspect("rule_c", "assistant talk", made["rule_c"][0], _now())
     scanner = BlueScanner(npc_store, state, own=(), cutoff=cutoff)
-    assert [pid for pid, _, _ in scanner.candidates()] == [made["rule_c"][0], made["hot_b"][1], made["slow_a"][1],
-                                                          made["rule_c"][1], made["hot_b"][0], made["slow_a"][0]], \
-        "newest giveaway first, as before"
-    hot = made["hot_b"][0]
-    order = [pid for pid, _, _ in scanner.candidates({made["rule_c"][1]: 0, hot: 1, 999: 2})]
-    assert order == [made["rule_c"][0], made["rule_c"][1], hot, made["hot_b"][1], made["slow_a"][1],
-                     made["slow_a"][0]], order
-
-    class Failing(FakePlatform):
-        fail = False
-
-        async def feed_trending(self, n: int = 50) -> list:
-            if self.fail:
-                raise RuntimeError("feed locked")
-            return await super().feed_trending(n)
-    api = Failing()
-    api.trending = [hot]
-    reporter = Reporter(api, scanner, state, username="joe", min_citizens=0)
-    assert await reporter._trending() == {hot: 0}
-    api.trending = [made["slow_a"][0]]
-    assert await reporter._trending() == {hot: 0}, "read at most every TRENDING_TTL"
-    reporter.trending_at -= TRENDING_TTL
-    api.fail = True
-    assert await reporter._trending() == {hot: 0}, "a failed read keeps the last order"
-    reporter.trending_at -= TRENDING_TTL
-    api.fail = False
-    assert await reporter._trending() == {made["slow_a"][0]: 0}
-    reporter.trending_read -= 3 * TRENDING_TTL
-    reporter.trending_at -= TRENDING_TTL
-    api.fail = True
-    assert await reporter._trending() == {}, "a read too old to order by is dropped"
+    assert [pid for pid, _, _ in scanner.candidates()] == [made["rule_c"][0], made["hot_b"][1], made["slow_a"][1]]
+    assert tell_rank("assistant talk") < tell_rank(TOO_FAST) < tell_rank(MANUAL + "x") < tell_rank(PARAPHRASED)
     detail = report_detail(f"account: {MANUAL}it answers every post of one account")
     assert "another post" not in detail and detail.endswith("it answers every post of one account."), detail
 
-    p.trending = [hot]  # one report an account: its other posts cost the round no try
+    p.trending = [made["hot_b"][0]]
     round_ = Reporter(p, scanner, state, username="joe", per_round=2, min_citizens=0)
     assert await round_.report_some() == 2 and set(state.author_reports()) == {"hot_b", "rule_c"}, \
         state.author_reports()
+    assert made["hot_b"][0] not in p.reports, "its post in Trending isn't the evidence"
 
 
 async def _team_ruling_demo() -> None:
@@ -1697,4 +1672,5 @@ async def _self_check_demo(embedder) -> None:
 
 
 if __name__ == "__main__":
+    REVIEW_ALL = False  # the demos were written for rules that report on their own; _review_all_demo turns it on
     asyncio.run(_demo())
