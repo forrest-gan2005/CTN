@@ -56,8 +56,8 @@ TARGET_LEANS = {"persuade": ("undecided", "no"), "bridge": ("no", "undecided"), 
 # Share of replies that go to posts on the referendum or vaccines when the feed has any: chat about someone's rabbit
 # earns a like and moves no one. The rest keeps the accounts talking like people.
 TOPICAL_REPLY_PROB = 0.9
-CITIZEN_REDRAFTS = 1  # more drafts of a reply to a citizen when a shared phrase sank the first
-LEAN_CHECKS = 3  # citizens profiled per reply decision, an LLM call each
+CITIZEN_REDRAFTS = 2  # more drafts of a reply to a citizen when a shared phrase sank the first
+LEAN_CHECKS = 4  # citizens profiled per reply decision, an LLM call each
 # Across the platform on 20 October, citizens who lean NO and care most about liberty or privacy pushed back at
 # 50-65% of the replies they got and were moved by 0-2%; undecided ones and those asking how it would work in
 # practice were moved by 8-12%. Replies go to those first and never seek out the former.
@@ -66,7 +66,7 @@ PERSON_LEAN = {"yes": "yes", "lean_yes": "yes", "undecided": "undecided", "lean_
 SKIP_CONCERNS = {"liberty", "privacy"}  # with a plain "no": "lean_no" was where the read went wrong, on the movable
 MOVABLE_FIRST = {"persuade", "bridge", "background"}  # mobilise is for YES voters, not for winning the undecided
 READ_RETRY = timedelta(minutes=20)  # a read that got no answer is not asked again for this long
-PROFILE_POSTS = 12  # a citizen's newest posts read to judge them; most have fewer (3 on average)
+PROFILE_POSTS = 12  # a citizen's newest posts read to judge them
 LEAN_TTL = timedelta(hours=12)
 HASHTAG_PROB = 0.3
 NEWS_OUTLETS = {"DailyKingstonia", "KingstoniaHerald"}  # their posts share stories; a reply reacts to the story
@@ -139,7 +139,7 @@ PRESS_WINDOW = timedelta(hours=6)  # a journalist's post this old is still worth
 # within DESK_WINDOW, up to DESK_LIMITS replies from different accounts, outside the daily limit per author.
 DESK_LINES = {"amplifier", "background"}
 DESK_WINDOW = timedelta(hours=1)
-DESK_LIMITS = {"outlet": 6, "journalist": 3}
+DESK_LIMITS = {"outlet": 3, "journalist": 3}
 # The columnists write the papers' opinion pieces in the bursts in which they answer the replies under their own
 # posts, hours old ones too (to 20 October, 15 of Julio's 18 replies and 5 of Lisa's 7), and on what those replies
 # discussed; the reporters' stories come in pairs on the hour and the half hour, written ahead. Bursts are hours
@@ -254,9 +254,10 @@ ANCHOR_REST = timedelta(minutes=75)
 LIFT_TOPICS = ("anchor",)
 BOOST_WINDOW = timedelta(hours=2)
 BOOST_DELAY = timedelta(minutes=1)
-# Two anchors an hour at 45 reposts and 20 replies take about 130 of the 175 writes an hour the lane carries,
-# leaving the usual 40 or so for other replies.
-BOOST_LIMITS = {"like": 50, "repost": 45, "reply": 20}
+# On 20 October the platform set every post's reposts back to none twice, within half an hour before 20:53 and
+# before 21:55, so a repost lifts a post for an hour at most while a reply stays: an anchor's reposts are kept to
+# its first push into Trending, and the writes they took go to citizens.
+BOOST_LIMITS = {"like": 50, "repost": 20, "reply": 20}
 BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post still has places
 # Popular tags were all campaign accounts' on the opening night, a NO team's #keepkingstoniaopen first; the papers'
 # reporters write up what is popular here. The team carries the YES campaign's own words: on every anchor post, and
@@ -796,6 +797,7 @@ class Bot:
                     and target["author"] not in NEWS_OUTLETS):
                 lean = await self._lean(target["author"], target.get("content") or "")
                 if route == "npc-random" and self._unmovable(target["author"]):
+                    log.info("bot %s let %s be: not movable", self.username, target["author"])
                     return None  # read only now, as one the replies never seek out
             action = await self._compose("reply", target=target, topic=(source, lean), context=context,
                                          referendum=referendum)
@@ -1215,8 +1217,10 @@ class Bot:
                 return "unknown"
             read = await judge_person(self.stance_llm, texts)
             if read is None:
+                log.info("bot %s read of %s failed (%d posts)", self.username, author, len(texts))
                 self.roster.unread[author] = now
                 return "unknown"
+            log.info("bot %s read %s: %s, %s (%d posts)", self.username, author, read[0], read[1], len(texts))
             lean = PERSON_LEAN[read[0]]
             self.roster.reads[author], self.roster.concerns[author] = read
         self.roster.leans[author] = (lean, now)
