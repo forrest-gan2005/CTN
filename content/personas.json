@@ -447,7 +447,9 @@
     "examples": [
       "Toddler has decided sleep is optional. I have decided coffee is mandatory.",
       "I'll admit a brand new vaccine made me nervous. Still have questions. But the trials so far found no major safety problems, and waiting until it's spreading here is a choice too. Leaning yes."
-    ]
+    ],
+    "status": "banned",
+    "replaced_by": "pele_m"
   },
   {
     "username": "jordan_wake",
@@ -2510,7 +2512,7 @@
     "job": "drive a delivery truck supplying supermarkets around the island",
     "home": "Kingstonia City",
     "line": "bridge",
-    "status": "reserve",
+    "status": "active",
     "covid": "kept driving through 2021 past half-empty supermarket shelves",
     "why_yes": "you thought the referendum was city people's business and were voting NO out of habit, until your daughter sat you down",
     "style": "short and dry, mostly lowercase, no emojis",
