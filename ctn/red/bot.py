@@ -167,7 +167,7 @@ ANCHOR_QUESTION_PROB = 0.8
 # Fitted over the Trending 40 on 20 October, a post's heat went as 10 ln(1 + likes + 4 replies + 10 reposts), less
 # about 3 an hour: our quarter-hourly anchors, six reposts and a dozen replies each, sat 23rd to 34th while the
 # leader's, with 40 replies and up to 40 reposts, held the top ten. So half as many anchors, each liked by the
-# whole team and reposted by most of it: a repost lifts as much as two or three replies and needs no draft.
+# whole team and reposted by many of it (see BOOST_LIMITS).
 ANCHOR_LINES = {"persuade", "bridge"}
 # Case posts (anchors and other referendum posts) all came out as "I'm Greg, electrician in Crown Harbour..." then
 # a 2021 story: one shape repeated is a pattern readers and Blue teams spot. Each is now written in one of these
@@ -865,9 +865,9 @@ class Bot:
 
     async def _write_to_citizen(self, topic: tuple, target: dict, context: Optional[str],
                                 referendum: Optional[bool]) -> Optional[Action]:
-        """A reply to a citizen, drafted again once, told to avoid the phrase, if teammates' wording is what sank
-        it: one evening 26 of the 31 dropped replies to citizens went for a shared phrase ("tipped me to yes", "the
-        vote on 2"), and a reply to a citizen is the one kind that can move a mind."""
+        """A reply to a citizen, drafted again up to CITIZEN_REDRAFTS times, told to avoid the phrase, if teammates'
+        wording is what sank it: one evening 26 of the 31 dropped replies to citizens went for a shared phrase
+        ("tipped me to yes", "the vote on 2"), and a reply to a citizen is the one kind that can move a mind."""
         if referendum is None:  # decided once, so a redraft is framed as the first was and costs no judge call
             referendum = await self._takes_up_referendum(target, topic[1])
         avoid = []
@@ -1007,8 +1007,7 @@ class Bot:
             return None
         taken = self.store.moderation_counts().get(self.username, {})
         exposed = (taken.get("suspected", 0) + taken.get("confirmed", 0)
-                   + sum(a.topic_kind == "anchor" and datetime.fromisoformat(ts) > now - ANCHOR_PENDING
-                         for ts, a in self.history))
+                   + self.store.pending_anchors(self.username, _iso(now - ANCHOR_PENDING)))
         slot = int(now.timestamp() // ANCHOR_GAP.total_seconds())
         if exposed >= ANCHOR_RISK_CAP or (
                 not exposed and now.timestamp() - slot * ANCHOR_GAP.total_seconds() < ANCHOR_FALLBACK.total_seconds()):
@@ -2371,8 +2370,12 @@ async def anchor_check() -> None:
     hold = await clean._anchor()
     assert hold is not None, "an account with a hidden post anchors at once"
     gate.release(hold.hold)
-    clean.history.append((_iso(datetime.now(timezone.utc) - ANCHOR_REST * 2), hold))
+    hold.made_id = 7
+    gate.record(clean.username, _iso(datetime.now(timezone.utc) - ANCHOR_PENDING / 2), hold)
     assert await clean._anchor() is None, "a hidden post and an anchor still pending reach ANCHOR_RISK_CAP"
+    gate.set_moderation(7, clean.username, "suspected", stamp)
+    gate.set_moderation(1, clean.username, "restored", stamp)
+    assert await clean._anchor() is not None, "a hidden anchor counts once, as hidden"
     ANCHOR_FALLBACK = timedelta(0)
     for post_id in (2, 3):
         gate.set_moderation(post_id, burned.username, "confirmed", stamp)

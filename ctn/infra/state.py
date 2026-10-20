@@ -177,6 +177,13 @@ class StateStore:
         ).fetchall()
         return list(reversed(rows))
 
+    def pending_anchors(self, username: str, since: str) -> int:
+        """The account's anchor posts since `since` that the platform still shows as far as we know."""
+        return self.db.execute(
+            "SELECT COUNT(*) FROM history h WHERE username = ? AND topic_kind = 'anchor' AND ts > ? AND NOT EXISTS "
+            "(SELECT 1 FROM moderation m WHERE m.post_id = h.made_id AND m.status != 'restored')",
+            (username, since)).fetchone()[0]
+
     def load_followed(self, username: str) -> set:
         rows = self.db.execute(
             "SELECT target_author FROM history WHERE username = ? AND type = 'follow'", (username,))
