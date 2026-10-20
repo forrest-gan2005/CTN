@@ -511,7 +511,8 @@
       "Spent the morning weeding the garden plot. The tomatoes are doing better than the beans, and better than me.",
       "I marched against the stay-at-home orders in 2021, so I get the worry about power. I'm still voting yes. The people decide this one, not a minister, and a narrow rule beats another lockdown. I'd want a firm end date too, and I'll keep asking for one."
     ],
-    "status": "banned"
+    "status": "banned",
+    "replaced_by": "maricel_s"
   },
   {
     "username": "lorraine_72",
@@ -1407,7 +1408,8 @@
       "you want the island off diesel and onto solar and wind",
       "you think free speech matters even for people you strongly disagree with"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "noa_e"
   },
   {
     "username": "vai_banks",
@@ -1584,7 +1586,7 @@
     "job": "grow mangoes on a small orchard outside New Haven",
     "home": "New Haven",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "couldn't get your fruit to market for weeks in 2021",
     "why_yes": "you couldn't get fruit to market in 2021, and you'd rather the island be ready this time",
     "style": "plain and practical, full sentences, no slang",
@@ -2671,7 +2673,7 @@
     "job": "work as a support worker at a home for disabled adults",
     "home": "Kingstonia City",
     "line": "bridge",
-    "status": "reserve",
+    "status": "active",
     "covid": "lived in at the home for six weeks in 2021 to keep the residents from being exposed",
     "why_yes": "your employer pressured you hard in 2021 and you hated it, so you hesitated, but your residents can't protect themselves and this time everyone decides together",
     "style": "chatty and warm, uses exclamation marks now and then",
