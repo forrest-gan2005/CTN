@@ -112,6 +112,9 @@ MAX_REPLIES_PER_AUTHOR = 4  # team-wide per 24h: no ping-pong with competitor bo
 # of our replies the team leaves them be for a while (a session's length isn't published; two hours covers it).
 # Answering someone who replied to us is a conversation, not another push, and doesn't wait.
 CITIZEN_COOLDOWN = timedelta(hours=2)
+# A reply to us that two picks in a row couldn't answer (draft dropped, claim lost) is let go, so an account always
+# drawn to answer it doesn't spend every step, for up to INBOX_TTL, on a draft that keeps failing.
+CONV_ATTEMPTS = 2
 # Citizens seldom reply once a conversation is more than eight messages deep: no reply to a post that deep.
 THREAD_DEPTH_LIMIT = 8
 # The papers' journalists are citizens too, and the ones whose views reach everyone: every citizen reads the news
@@ -452,6 +455,7 @@ class Bot:
         self.case_worry = None  # the citizens' worry it was told to answer, if any
         self.last_shared = None  # the phrase that sank the last draft, if one did
         self.avoid = []  # phrases the draft being written must not use
+        self.conv_tries = {}  # reply to us -> times this process picked it to answer
         self.followed = self.store.load_followed(self.username)
         self.history = [(row[0], Action(*row[1:])) for row in self.store.load_history(self.username)]
 
@@ -542,6 +546,8 @@ class Bot:
                 if conv is not None and route in (None, "unknown-fallback"):
                     target, route = conv, "conversation"
             if target is not None:
+                if target is conv:
+                    self.conv_tries[conv["id"]] = self.conv_tries.get(conv["id"], 0) + 1
                 return await self._reply(target, "conversation" if target is conv else "feed", route)
             # nothing worth replying to; write something instead
         if not self.quiet and self.line in PRESS_LINES and random.random() < PITCH_PROB:
@@ -827,7 +833,7 @@ class Bot:
         inbox = sorted(self.store.inbox(self.username), key=lambda e: self.roster.classify(e[1]) != "npc")
         for post_id, actor, received_at in inbox:
             post = None
-            if (post_id not in self.seen and received_at >= stale and actor not in rivals
+            if (self.conv_tries.get(post_id, 0) < CONV_ATTEMPTS and post_id not in self.seen and received_at >= stale and actor not in rivals
                     and not self.store.claimed([f"post:{post_id}"])  # a teammate answered it from the feed
                     and self.store.replies_to(actor, since) < MAX_REPLIES_PER_AUTHOR):
                 try:
@@ -1689,11 +1695,22 @@ async def conversation_route_check() -> None:
         ACTION_WEIGHTS, TEAM_REPLY_PROB = {"like": 1}, 1.0
         store, platform = StateStore(":memory:"), FakePlatform()
         b = Bot(persona, platform, FakeLLM(0, 0), load_world(), roster=Roster(npcs={"citizen_a"}), store=store)
+        anchor = await platform.post("teammate_1", "I'm voting yes on the mandate, for my mum's ward.")
+        store.record("teammate_1", _iso(datetime.now(timezone.utc) - BOOST_DELAY * 2),
+                     Action("post", content=anchor["content"], topic_kind="anchor", made_id=anchor["id"]))
         theirs = await platform.post("citizen_a", "fair point, but what about the ferry?")
         store.ingest_notifications(b.username, [], [{"post_id": theirs["id"], "actor": "citizen_a"}],
                                    _iso(datetime.now(timezone.utc)))
+        lift = b._team_reply_target()
+        assert lift is not None, "a teammate's anchor is there to lift"
+        store.release(lift[1])
         b._reply = chosen
         assert await b.think({"feed": []}) == ("citizen_a", True)
+        # One the account couldn't answer twice is let go.
+        async def failed(target: dict, source: str, route: str, **_kw) -> None:
+            return None
+        b._reply = failed
+        assert await b.think({"feed": []}) is None and await b._conversation_target() is None
         # An unknown account is answered once; its reply to our answer is let be, a citizen's is not.
         for author, again in (("stranger_1", False), ("citizen_a", True)):
             store, platform = StateStore(":memory:"), FakePlatform()
