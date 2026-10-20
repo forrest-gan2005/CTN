@@ -240,8 +240,9 @@ TEAM_TAGS = (
     ("#ProtectKingstonia", 15, None, None),
     ("#AheadOfTheWave", 15, None, None),
     ("#ProtectThePod", 15, 35, None),
-    ("#Only30Beds", 5, None, re.compile(r"hospital|intensive|\bICU\b|\bbeds?\b|\bwards?\b|nurs", re.IGNORECASE)),
-    ("#SafeToVisit", 10, None, re.compile(r"touris|visitor|resort|holiday|cruise", re.IGNORECASE)),
+    ("#Only30ICUBeds", 5, None,
+     re.compile(r"hospital(?!ity)|intensive care|\bICU\b|\bbeds\b|\bwards?\b(?! off)|\bnurs(?:e|es|ing)\b", re.IGNORECASE)),
+    ("#SafeToVisit", 10, None, re.compile(r"touris|visitor|(?<!last )resort|holiday|cruise", re.IGNORECASE)),
 )
 TEAM_TAG = TEAM_TAGS[0][0]
 TEAM_TAG_SHARE = {"anchor": 1.0, "team": 0.5, "issue": 0.5}
@@ -2099,8 +2100,11 @@ async def anchor_check() -> None:
     assert any(action.content.endswith(" " + t[0]) for t in TEAM_TAGS), "an anchor post carries a team tag"
     drawn = {age: {team_tag(age, "the ward was full") for _ in range(400)} for age in (24, 72)}
     assert "#ProtectThePod" in drawn[24] and "#ProtectThePod" not in drawn[72], "a pun is for younger writers"
-    assert "#Only30Beds" in drawn[72] and "#SafeToVisit" not in drawn[72], "a topical tag goes on a post on its topic"
+    assert "#Only30ICUBeds" in drawn[72] and "#SafeToVisit" not in drawn[72], "a topical tag goes on a post on its topic"
     assert "#SafeToVisit" in {team_tag(50, "visitors at the resort") for _ in range(400)}
+    for text in ("hospitality work", "the nursery", "went to bed early", "to ward off the flu", "a last resort",
+                 "labour-intensive", "towards yes"):
+        assert not {"#Only30ICUBeds", "#SafeToVisit"} & {team_tag(50, text) for _ in range(200)}, text
     daily = await Bot(writers[2], FakePlatform(), Says("Ferry was late again, third time this week."), load_world(),
                       store=StateStore(":memory:"))._compose("post", ("daily", "the ferry"))
     assert daily is not None and not TAG_RE.search(daily.content), "an everyday post carries no campaign tag"
