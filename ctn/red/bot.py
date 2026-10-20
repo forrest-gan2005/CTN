@@ -268,6 +268,7 @@ ANCHOR_REST = timedelta(minutes=75)
 ANCHOR_RISK_CAP = 2
 ANCHOR_PENDING = timedelta(hours=8)
 ANCHOR_FALLBACK = timedelta(minutes=10)
+ANCHOR_SPACING = timedelta(minutes=25)  # no anchor while the last one is younger than this
 LIFT_TOPICS = ("anchor",)
 BOOST_WINDOW = timedelta(hours=2)
 BOOST_DELAY = timedelta(minutes=1)
@@ -327,6 +328,7 @@ TEAM_REPLY_PROB = 0.45
 RUSH_WINDOW = timedelta(minutes=30)
 RUSH_PROB = 0.9
 RUSH_ORDER = ("like", "reply", "repost")
+LIFT_ORDER = 1e-7  # per post id, for the write lane; post ids stay well under a million
 RUSH_WAIT = (20.0, 180.0)
 # The anchor post, then the reposts and replies lifting it in its rush, jump the write lane's queue: under S53 the
 # 05:00 anchor waited 7.7 minutes behind writes for older anchors and citizens, and its first repost came nine
@@ -1023,6 +1025,8 @@ class Bot:
         now = datetime.now(timezone.utc)
         if any(a.topic_kind == "anchor" and datetime.fromisoformat(ts) > now - ANCHOR_REST for ts, a in self.history):
             return None
+        if self.store.team_posts(LIFT_TOPICS, _iso(now - ANCHOR_SPACING), ""):
+            return None  # a late anchor's rush is still going: two at once split the lane
         taken = self.store.moderation_counts().get(self.username, {})
         exposed = (taken.get("suspected", 0) + taken.get("confirmed", 0)
                    + self.store.pending_anchors(self.username, _iso(now - ANCHOR_PENDING)))
@@ -1597,7 +1601,10 @@ class Bot:
             priority = CITIZEN  # under S54 one waited behind a rush's 50 lifts, about 18 minutes
         elif action.type in ("repost", "reply") and action.post_id is not None and \
                 action.post_id == self._focus(datetime.now(timezone.utc)):
-            priority = LIFT
+            # A newer anchor's lifts go ahead of an older one's still queued (on 21 October 00:05 the new anchor
+            # had none at 15 minutes while 22 replies to the last one went out), and its replies ahead of its
+            # reposts. The fraction stays well under the gap to CITIZEN.
+            priority = LIFT - action.post_id * LIFT_ORDER - (LIFT_ORDER / 2 if action.type == "reply" else 0)
         else:
             priority = NORMAL
         token = WRITE_PRIORITY.set(priority)
@@ -2413,6 +2420,11 @@ async def anchor_check() -> None:
     for post_id in (2, 3):
         gate.set_moderation(post_id, burned.username, "confirmed", stamp)
     assert await burned._anchor() is None, "two hidden posts: never another anchor"
+    spaced = StateStore(":memory:")
+    spaced.record("rosa_dives", _iso(datetime.now(timezone.utc) - ANCHOR_SPACING / 2),
+                  Action("post", content=case, topic_kind="anchor", made_id=950))
+    late = Bot(writers[3], FakePlatform(), Says(case), load_world(), store=spaced)
+    assert await late._anchor() is None, "no anchor while the last one's rush is still going"
     background = next(p for p in personas if p["line"] == "background")
     b = Bot(background, FakePlatform(), Says(case), load_world(), roster=Roster(npcs={"citizen_a"}),
             store=StateStore(":memory:"))
@@ -2582,9 +2594,12 @@ async def rush_check() -> None:
                    Action("reply", post_id=8, content="x", target_author="citizen_a"),
                    Action("post", content="x", topic_kind="anchor"), Action("post", content="x", topic_kind="daily")):
         await lifter.act(action)
-    assert noting.sent == [("repost", 904, LIFT), ("repost", 902, NORMAL), ("reply", 904, LIFT),
-                           ("reply", 9, NORMAL), ("reply", 8, CITIZEN), ("post", None, ANCHOR),
-                           ("post", None, NORMAL)], noting.sent
+    kinds = [(kind, post_id, CITIZEN < p < NORMAL and LIFT - 0.01 < p <= LIFT or p) for kind, post_id, p in noting.sent]
+    assert kinds == [("repost", 904, True), ("repost", 902, NORMAL), ("reply", 904, True), ("reply", 9, NORMAL),
+                     ("reply", 8, CITIZEN), ("post", None, ANCHOR), ("post", None, NORMAL)], noting.sent
+    assert noting.sent[2][2] < noting.sent[0][2], "an anchor's replies go ahead of its reposts"
+    newer = Action("repost", post_id=904 + 1000)
+    assert LIFT - newer.post_id * LIFT_ORDER < noting.sent[2][2], "a newer anchor's lifts go ahead of an older one's"
     assert WRITE_PRIORITY.get() == NORMAL, "the priority goes back after each write"
 
     global RUSH_WAIT
