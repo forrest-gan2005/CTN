@@ -21,7 +21,7 @@ from ctn.infra.llm import FakeLLM, game_day_start, ledger, load_env, team_llms
 from ctn.infra.news import News, NewsStore
 from ctn.infra.real_platform import WRITE_GAP, AccountStore, MockLegitSocial, RealPlatform
 from ctn.infra.state import StateStore
-from ctn.red.bot import JOURNALISTS, PRESS_WINDOW, Bot, Roster
+from ctn.red.bot import JOURNALISTS, NEWS_OUTLETS, PRESS_WINDOW, Bot, Roster
 from ctn.red.rhythm import Rhythm, UniformPacer, npc_curve
 from ctn.text.content import load_personas, load_world
 from ctn.text.examples import NpcExamples
@@ -124,8 +124,9 @@ class Team:
 
     def feed(self) -> list:
         posts = self.npc_store.recent_citizen_posts(CITIZEN_FEED, self.cutoff) + self.npc_store.recent(OTHER_FEED)
-        # The journalists' posts of the last few hours too: Latest moves on within minutes, and these are rare.
-        posts += self.npc_store.recent_from(JOURNALISTS, datetime.now(timezone.utc) - PRESS_WINDOW)
+        # The papers' and journalists' posts of the last few hours too: Latest moves on within minutes, and these
+        # are rare.
+        posts += self.npc_store.recent_from(set(JOURNALISTS) | NEWS_OUTLETS, datetime.now(timezone.utc) - PRESS_WINDOW)
         return list({p["id"]: p for p in posts}.values())
 
     def set_quiet(self, usernames: set) -> None:

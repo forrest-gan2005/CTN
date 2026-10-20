@@ -124,6 +124,13 @@ THREAD_DEPTH_LIMIT = 8
 JOURNALISTS = load_journalists()
 PRESS_LINES = {"persuade", "bridge"}
 PRESS_WINDOW = timedelta(hours=6)  # a journalist's post this old is still worth answering
+# The replies under the papers' and journalists' posts were nearly all other teams' (by 20 October 158 of 160 under
+# the papers', 67 of 79 under the journalists'), and two opinion pieces that morning made the NO side's case from
+# what people here were saying. The accounts that mostly like and repost answer each such post on the referendum
+# within DESK_WINDOW, up to DESK_LIMITS replies from different accounts, outside the daily limit per author.
+DESK_LINES = {"amplifier", "background"}
+DESK_WINDOW = timedelta(hours=1)
+DESK_LIMITS = {"outlet": 6, "journalist": 3}
 PITCH_PROB = 0.2  # share of these accounts' new posts that go to a journalist still due a pitch today
 MENTION_RE = re.compile(r"(?<![\w.@])@(\w+)")
 # The posts that trend open with who the writer is and what's at stake for them, grant the other side's worry, then
@@ -510,6 +517,12 @@ class Bot:
             and not self._probe(p.get("content") or "")          # competitor bait aimed at our model
         ]
         conv = await self._conversation_target()
+        if not self.quiet and self.line in DESK_LINES:
+            found = await self._desk_target(obs["feed"])
+            if found is not None:
+                press, context, hold = found
+                return await self._reply(press, "feed", "desk", context=context, hold=hold, referendum=True,
+                                         claim=False)
         if not self.quiet and self.line in PRESS_LINES:
             found = await self._press_target(candidates)
             if found is not None:
@@ -583,6 +596,23 @@ class Bot:
             if not topical:
                 continue
             hold = self._press_place(p["author"])
+            if hold is not None:
+                return p, context, hold
+        return None
+
+    async def _desk_target(self, feed: list) -> Optional[tuple]:
+        """(post, the post it answers, place) for the newest paper's or journalist's post on the referendum, from
+        the last DESK_WINDOW, that this account hasn't answered and that still has places; or None."""
+        since = _iso(datetime.now(timezone.utc) - DESK_WINDOW)
+        posts = [p for p in feed if (p["author"] in NEWS_OUTLETS or p["author"] in JOURNALISTS)
+                 and (p.get("created_at") or "") >= since and not self.store.acted_on(self.username, "reply", p["id"])
+                 and not self._probe(p.get("content") or "")]
+        for p in sorted(posts, key=lambda p: -p["id"]):
+            topical, context = await self._press_topic(p)
+            if not topical:
+                continue
+            limit = DESK_LIMITS["outlet" if p["author"] in NEWS_OUTLETS else "journalist"]
+            hold = self.store.reserve(f"desk:{p['id']}:", self.username, limit)
             if hold is not None:
                 return p, context, hold
         return None
@@ -1169,7 +1199,7 @@ class Bot:
             parts.append(wrap_external(target["author"], target["content"]))
             parts.append("Write a reply as a reader reacting to the story: what it means to you or the people around "
                          "you. Don't talk to the paper, don't judge its reporting, and never mention its name.")
-            if about_referendum(target.get("content") or ""):
+            if about_referendum(target.get("content") or "") if referendum is None else referendum:
                 parts.append("If you bring up the referendum, give your own reason for voting YES in a sentence; "
                              "don't argue with the paper or say what the story doesn't.")
             else:
@@ -2479,6 +2509,67 @@ async def case_post_check() -> None:
     print("case posts ok")
 
 
+async def desk_check() -> None:
+    """Amplifiers and background accounts answer a paper's or journalist's referendum post of the last hour, each
+    account once, up to DESK_LIMITS a post and outside the daily limit per author; older or off-topic posts, and
+    other lines, are left to the usual routes."""
+    lines = ["My mum's ward was full last time, so I'm voting yes on the mandate.",
+             "Ferries stopped, shop shut, rent still due. Yes from me on the referendum.",
+             "Spent winter driving my uncle to Central. Ticking yes this time.",
+             "Our footy club folded for a season in 2021; voting yes so the kids keep playing.",
+             "Two nurses short on my aunt's ward already. That's my reason for a yes.",
+             "Lost three months of fares in the lockdown. The requirement gets my vote.",
+             "Grandad can't have the jab, so I'm backing the proof requirement for him.",
+             "Choir stopped for a year. I'll vote yes if it keeps us singing.",
+             "Markets shut for months last time; my stall nearly went. Yes on the 2nd.",
+             "Watched the bakery close in 2021. I'd sooner vote yes than see that again."]
+
+    class Says:
+        name = "says"
+
+        def __init__(self, i: int) -> None:
+            self.i = i
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            return lines[self.i % len(lines)]
+
+    desk = [p for p in load_personas() if p["line"] in DESK_LINES]
+    persuader = next(p for p in load_personas() if p["line"] == "persuade")
+    platform, store = FakePlatform(), StateStore(":memory:")
+    roster = Roster(own={p["username"] for p in load_personas()}, npcs=set(NEWS_OUTLETS) | {"julio_morales"})
+    story = await platform.post("KingstoniaHerald", "The Blank Cheque: why a yes vote on the mandate needs a list")
+    other = await platform.post("KingstoniaHerald", "QuokkaSec announces 180 new tech jobs")
+    old = {**story, "id": 900, "created_at": _iso(datetime.now(timezone.utc) - DESK_WINDOW * 2)}
+    press = await platform.post("julio_morales", "The referendum needs limits written into law, not promised.")
+    feed = [old, other, story, press]
+    answered = []
+    for i, persona in enumerate(desk[:DESK_LIMITS["outlet"] + DESK_LIMITS["journalist"] + 1]):
+        b = Bot(persona, platform, Says(i), load_world(), roster=roster, store=store)
+        action = await b.think({"feed": feed})
+        if action is None or action.type != "reply":
+            answered.append(None)
+            continue
+        assert action.hold == f"desk:{action.post_id}:{b.username}", action.hold
+        b.remember(action)
+        answered.append(action.post_id)
+        again = await b._desk_target(feed)
+        assert again is None or again[0]["id"] != action.post_id, "one answer a post from each account"
+        if again is not None:
+            store.release(again[2])
+    assert answered.count(press["id"]) == DESK_LIMITS["journalist"], answered
+    assert answered.count(story["id"]) == DESK_LIMITS["outlet"], answered
+    assert old["id"] not in answered and other["id"] not in answered, answered
+    routes = {r for (r,) in store.db.execute("SELECT DISTINCT route FROM reply_picks")}
+    assert routes == {"desk"}, routes
+    await Bot(persuader, platform, Says(0), load_world(), roster=roster, store=store).think({"feed": feed})
+    assert "desk" not in {r for (r,) in store.db.execute("SELECT route FROM reply_picks WHERE username = ?",
+                                                          (persuader["username"],))}, "persuaders keep their own route"
+    print("desk ok")
+
+
 async def press_quota_check() -> None:
     """A journalist's "Exactly." is judged with what it answers; a post it answers that can't be read is tried
     again; a reply to a journalist's chat stays chat; a day's place is given back only when the post never went."""
@@ -3096,6 +3187,7 @@ if __name__ == "__main__":
     asyncio.run(gif_check())
     asyncio.run(press_check())
     asyncio.run(press_quota_check())
+    asyncio.run(desk_check())
     asyncio.run(boost_check())
     asyncio.run(anchor_check())
     asyncio.run(sibling_check())
