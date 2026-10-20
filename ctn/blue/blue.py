@@ -55,7 +55,7 @@ MIN_CITIZENS = 100
 REPORT_ATTEMPTS = 5  # a report that never got through is retried this many times in all, backing off
 REPORT_BACKOFF = timedelta(minutes=1)  # doubled after each failure, up to an hour
 RATE_LIMIT_PAUSE = timedelta(minutes=1)  # standing down after a bare 429 that carried no wait
-# The platform holds only 25 of a team's reports awaiting a ruling (20 until 10/20), and the moderator rules within 6
+# The platform holds only 20 of a team's reports awaiting a ruling, and the moderator rules within 6
 # hours of the first report (24 until 10/20; sooner as more teams report the post). Upheld reports on one
 # competitor team pay in full for the first five of a campaign day, half for the next five, a tenth after. So one
 # report an account, five a competitor team a day, and the places go round the teams.
@@ -67,7 +67,7 @@ TRENDING_TTL = timedelta(minutes=10)  # Trending, which orders reports, is read 
 # What became of a report shows on the post: hidden from everyone once ruled inauthentic (or deleted), still up
 # after the ruling's latest time if ruled genuine (6 hours since 10/20). Looked at every so often, a few at a time.
 RULING_CHECK = timedelta(minutes=30)
-RULING_SOONEST = timedelta(hours=1)  # five teams' reports bring a ruling in 1½ hours; nothing is due before
+RULING_SOONEST = timedelta(hours=1)  # three teams' reports bring a ruling in 1½ hours, five in 22 minutes
 RULING_DUE = timedelta(hours=7)
 RULING_LOOKS = 10
 
@@ -618,7 +618,7 @@ class Reporter:
         return sent
 
     async def check_rulings(self) -> int:
-        """Look at a few reported posts whose fate we haven't seen: hidden now, or still up a day on. Returns how
+        """Look at a few reported posts whose fate we haven't seen: hidden now, or still up after the ruling time. Returns how
         many were settled."""
         now = datetime.now(timezone.utc)
         if self.rulings_at is not None and now - self.rulings_at < RULING_CHECK:
@@ -644,7 +644,7 @@ class Reporter:
             if status is not None:
                 settled += 1
                 log.info("reported #%s %s", post_id, "is hidden: ruled inauthentic (or deleted)" if status == "hidden"
-                         else "is still up a day on: ruled genuine")
+                         else "is still up after the ruling time: ruled genuine")
         return settled
 
     async def run(self, until: Optional[float] = None) -> None:
@@ -1330,7 +1330,7 @@ async def _trending_demo() -> None:
 
 async def _team_ruling_demo() -> None:
     """Five reports a competitor team a day and one an account; reported posts are looked at until hidden, or still
-    up a day on."""
+    up after the ruling time."""
     from ctn.infra.collector import Collector, NpcStore
     from ctn.infra.fake_platform import FakePlatform
     from ctn.infra.state import StateStore

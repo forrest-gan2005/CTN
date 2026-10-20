@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS reports (
     status TEXT NOT NULL,      -- sent (accepted, verdict pending) | upheld | rejected | unknown (may or may not
                                -- have arrived; never resent) | error (never arrived; retried) | failed (gave up)
                                -- | hidden (gone from view since: ruled inauthentic, or deleted) | stood (still
-                               -- up a day after: ruled genuine, as far as we can tell)
+                               -- up after the ruling time: ruled genuine, as far as we can tell)
     attempts INTEGER NOT NULL DEFAULT 1,
     next_try TEXT              -- for errors: not before this
 );

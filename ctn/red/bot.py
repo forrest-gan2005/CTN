@@ -229,9 +229,9 @@ BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post sti
 # reporters write up what is popular here. The team carries the YES campaign's own words: on every anchor post, and
 # on half the replies lifting one and half the other referendum posts. Never the other side's tags. By 20 October
 # #ProtectKingstonia led the tags four to one (884 uses in a day, a third ours), so half go to a second YES tag that
-# answers the NO side's #KeepKingstoniaOpen, to put more YES tags near the top. Still one tag a post: citizens
-# hardly use tags at all, and a post full of them reads as a campaign account's.
-TEAM_TAGS = ("#ProtectKingstonia", "#ProofKeepsUsOpen")
+# answers the NO side's #KeepKingstoniaOpen, and to #VoteYes, to put more YES tags near the top. Still one tag a
+# post: citizens hardly use tags at all, and a post full of them reads as a campaign account's.
+TEAM_TAGS = ("#ProtectKingstonia", "#ProofKeepsUsOpen", "#VoteYes")
 TEAM_TAG = TEAM_TAGS[0]
 TEAM_TAG_SHARE = {"anchor": 1.0, "team": 0.5, "issue": 0.5}
 # The code adds them; they say nothing about the writer.
