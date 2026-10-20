@@ -176,7 +176,7 @@ ANCHOR_LINES = {"persuade", "bridge"}
 # than either (O'Keefe 1999, refutational two-sided messages); an argument in the values of the people you want to
 # move works better than one in your own (Feinberg & Willer 2015, moral reframing); a convert's story moves the
 # hesitant (Lyons et al. 2019; Conlin et al. on COVID vaccines), though an account inventing a change of mind it
-# never had is a tell, so that one isn't used; and a short story, not argument alone, is what changed minds in
+# never had is a tell, so case posts don't use it (anchors do under ANCHOR_EXPERIMENT); and a short story, not argument alone, is what changed minds in
 # conversation (Kalla & Broockman 2020). "plain" began as the leader's (no introduction, one case, its cost named,
 # still YES); a cost named and left unanswered is the weakest form of all, so it now answers the cost with one of the
 # setting's facts, where "refute" answers the commonest NO worry. Each is an instruction, not
@@ -203,6 +203,16 @@ CASE_OPENING = ("Don't open by introducing yourself (\"I'm ...\", \"... here\", 
 CASE_FOCUS = ("Keep to the referendum question; leave the vaccine's own unknowns out unless the worry you answer is "
               "about the vaccine itself.")
 QUESTION_SHAPES = {"refute", "scene", "story"}  # the rest end on their case
+# Experiment 1 from 21 October: the second YES team's anchors, 100-170 likes each on 20 October, were nearly all one
+# shape: a writer who leant NO for a reason NO voters share, then one local fact or moment that changed their mind,
+# YES in a few words, a question to readers, about 280 characters. Forrest approved the change-of-mind story for
+# anchors. Every anchor takes this shape while ANCHOR_EXPERIMENT is on, so its hours compare with those before.
+ANCHOR_EXPERIMENT = True
+ANCHOR_SHAPES = {
+    "convert": (1.0, "You were leaning NO at first, for one reason a NO voter would recognise; say it in a few words of "
+                     "your own. Then say what changed your mind: one of the facts given above about this island, or "
+                     "a moment from your own week. Land plainly on YES."),
+}
 # Off since 10/20 10:25: the first hour refutations named the worry citizens raised most ("that it should be a
 # personal choice") brought the night's first two primary changes of mind away from YES (-212 in all, with four
 # lesser away hits), maybe the worry restated doing more than the answer, though other changes ran that hour too;
@@ -853,7 +863,8 @@ class Bot:
             return await self._redrafted(topic, target, context, referendum, TEAM_REDRAFTS)
         if kind != "post" or topic[0] not in ("issue", "anchor"):
             return await self._write(kind, topic, target, context, referendum)
-        shapes = self.case_shapes = arm_shapes(self.writing_arm or arm())
+        shapes = self.case_shapes = (ANCHOR_SHAPES if topic[0] == "anchor" and ANCHOR_EXPERIMENT
+                                     else arm_shapes(self.writing_arm or arm()))
         shape = self.case_shape = _draw_shape(shapes)
         self.case_worry = None
         try:
@@ -899,7 +910,8 @@ class Bot:
         # median and up to 399), and the one fact they get is the point of the reply.
         case = (kind == "post" and topic[0] in CASE_TOPICS
                 or kind == "reply" and target is not None and target["author"] in COLUMNISTS)
-        system = self._system_prompt(examples, from_npcs, arguments=referendum, case=case)
+        short = kind == "post" and topic[0] == "anchor" and ANCHOR_EXPERIMENT
+        system = self._system_prompt(examples, from_npcs, arguments=referendum, case=case, short=short)
         earlier, about = None, []
         if target is not None:
             if topic[0] == "conversation" and target.get("parent_id") is not None:
@@ -949,7 +961,10 @@ class Bot:
         # from an everyday account), which the judge called neutral. Not to someone already leaning YES, where going
         # along does no harm, unless the reply itself takes the referendum up: one to a post that never named it
         # still echoed the NO side ("the venues list ... still hasn't been published").
-        argue = kind == "reply" and (referendum and topic[1] != "yes" or about_referendum(content))
+        # A teammate's anchor already argues YES and its replies sit under it, so one need only not oppose it: the
+        # judge called 7 of the 01:42 anchor's first 20 on 21 October "lukewarm" and they were dropped.
+        argue = kind == "reply" and topic[1] != "team" and (referendum and topic[1] != "yes"
+                                                            or about_referendum(content))
         if kind == "reply" and target["author"] in JOURNALISTS and FAIR_OPENER_RE.match(plain(content)):
             problem = "fair opener"
         else:
@@ -1242,7 +1257,8 @@ class Bot:
         own = self.persona["examples"]
         return random.sample(own, min(2, len(own))), False
 
-    def _system_prompt(self, examples: list, from_npcs: bool, arguments: bool = True, case: bool = False) -> str:
+    def _system_prompt(self, examples: list, from_npcs: bool, arguments: bool = True, case: bool = False,
+                       short: bool = False) -> str:
         p = self.persona
         shown = ""
         if examples:
@@ -1273,7 +1289,8 @@ class Bot:
                    f"Other things you think: {'; '.join(p['views'])}.\n"
                    f"How you write: {p['style']}.\n\n")
             own_words = ""
-        length = ("Three or four sentences, under 75 words." if case
+        length = ("Two or three sentences, under 50 words." if short
+                  else "Three or four sentences, under 75 words." if case
                   else "Keep it to 1-3 short sentences, under 40 words.")
         return (
             f"{arm_world(self.writing_arm or arm(), self.world if arguments else self.plain_world)}\n\n"
@@ -1424,7 +1441,8 @@ class Bot:
                 parts.append("You don't know when it's on this year, so write about past years or looking forward to "
                              "the next one, not as if it's happening now.")
 
-        if kind == "post" and topic[0] in ("issue", "anchor") and self.case_shape in QUESTION_SHAPES \
+        if kind == "post" and topic[0] == "anchor" and ANCHOR_EXPERIMENT or \
+                kind == "post" and topic[0] in ("issue", "anchor") and self.case_shape in QUESTION_SHAPES \
                 and random.random() < (ANCHOR_QUESTION_PROB if topic[0] == "anchor" else QUESTION_PROB):
             parts.append("End with a genuine question to the people reading, one they'd want to answer; not a "
                          "rhetorical one.")
@@ -2019,6 +2037,12 @@ async def lukewarm_check() -> None:
     echo = bot_for(background, "NEUTRAL")
     assert await echo._compose("reply", ("feed", "unknown"), chat) is None and echo.rejected == {"lukewarm": 1}, \
         "a reply that takes up the referendum unasked must back YES"
+    anchor = {"id": 9, "author": "rosa_dives", "parent_id": None,
+              "content": "I'm voting YES on proof of vaccination: our one hospital can't take another surge."}
+    assert await bot_for(background, "NEUTRAL")._compose("reply", ("feed", "team"), anchor) is not None, \
+        "a reply under a teammate's anchor needn't argue YES again"
+    against = bot_for(background, "OPPOSE")
+    assert await against._compose("reply", ("feed", "team"), anchor) is None and against.rejected == {"off side": 1}
     assert await bot_for(background, "NEUTRAL")._compose("reply", ("feed", "yes"), target) is None
     assert await bot_for(background, "SUPPORT")._compose("reply", ("feed", "unknown"), chat) is not None
     reply = "Congratulations on finishing the welding course. That certificate took real effort."
@@ -2334,13 +2358,20 @@ async def anchor_check() -> None:
     class Noting(Says):
         def __init__(self, text: str) -> None:
             super().__init__(text)
-            self.prompts = []
+            self.prompts, self.systems = [], []
 
         async def generate(self, system: str, prompt: str) -> Optional[str]:
             self.prompts.append(prompt)
+            self.systems.append(system)
             return self.text
-    global CASE_SHAPES, QUESTION_PROB, ANCHOR_QUESTION_PROB
-    saved = CASE_SHAPES, QUESTION_PROB, ANCHOR_QUESTION_PROB
+    global CASE_SHAPES, QUESTION_PROB, ANCHOR_QUESTION_PROB, ANCHOR_EXPERIMENT
+    trial = Bot(writers[0], FakePlatform(), Noting(case), load_world(), store=StateStore(":memory:"))
+    action = await trial._anchor()
+    assert action.angle.startswith("convert: ") and "leaning NO at first" in trial.llm.prompts[0], action.angle
+    assert "End with a genuine question" in trial.llm.prompts[0], "an experiment anchor always asks its readers"
+    assert "under 50 words" in trial.llm.systems[0], "an experiment anchor is short"
+    saved = CASE_SHAPES, QUESTION_PROB, ANCHOR_QUESTION_PROB, ANCHOR_EXPERIMENT
+    ANCHOR_EXPERIMENT = False
     try:
         for shape, (weight, guide) in saved[0].items():
             assert not copies(guide, load_world()), f"{shape}: a sentence the setting has, which a post may not copy"
@@ -2368,7 +2399,7 @@ async def anchor_check() -> None:
         assert "raise most lately" not in styled._user_prompt("post", None, ("anchor", "acting early"))
         globals()["ANSWER_WORRIES"] = answering
     finally:
-        CASE_SHAPES, QUESTION_PROB, ANCHOR_QUESTION_PROB = saved
+        CASE_SHAPES, QUESTION_PROB, ANCHOR_QUESTION_PROB, ANCHOR_EXPERIMENT = saved
     intro = Bot(writers[0], FakePlatform(), Noting(f"I'm Joe, and {case}"), load_world(), store=StateStore(":memory:"))
     assert await intro._anchor() is not None, "a post that opens with who wrote it still goes, just not as a rule"
     daily = Bot(writers[0], FakePlatform(), Noting("Ferry was late again."), load_world(), store=StateStore(":memory:"))
