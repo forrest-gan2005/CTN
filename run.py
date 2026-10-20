@@ -1568,7 +1568,11 @@ async def _cast(platform, own: set, citizens: list, late: list, rivals_sloppy: d
 
 
 async def rehearse(seconds: float, real_llm: bool) -> None:
-    """Dress rehearsal on the fake platform: the whole team, simulated citizens and rival teams."""
+    """Dress rehearsal on the fake platform: the whole team, simulated citizens and rival teams (Blue's rules
+    reporting on their own, as no one reviews here)."""
+    from ctn.blue import blue
+
+    blue.REVIEW_ALL = False
     random.seed(0)
     own = {p["username"] for p in load_personas()}
     citizens = [f"npc_{i}" for i in range(15)]

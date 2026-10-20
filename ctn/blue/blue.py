@@ -55,8 +55,8 @@ MIN_CITIZENS = 100
 REPORT_ATTEMPTS = 5  # a report that never got through is retried this many times in all, backing off
 REPORT_BACKOFF = timedelta(minutes=1)  # doubled after each failure, up to an hour
 RATE_LIMIT_PAUSE = timedelta(minutes=1)  # standing down after a bare 429 that carried no wait
-# The platform holds only 20 of a team's reports awaiting a ruling, and the moderator rules within 6
-# hours of the first report (24 until 10/20; sooner as more teams report the post). Upheld reports on one
+# The platform holds only 25 of a team's reports awaiting a ruling, and the moderator rules within 3
+# hours of the first report (24 until 10/20, then 6; sooner as more teams report the post). Upheld reports on one
 # competitor team pay in full for the first five of a campaign day, half for the next five, a tenth after. So one
 # report an account, five a competitor team a day, and the places go round the teams.
 ACCOUNT_REPORTS = 1

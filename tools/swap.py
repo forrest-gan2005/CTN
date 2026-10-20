@@ -6,7 +6,8 @@
     python3 -m tools.swap --self-test
 
 The live process reads the personas only when it starts: restart it afterwards. Registering uses the team code in
-.env and prints neither it nor any password.
+.env and prints neither it nor any password. Run it from the checkout live runs from: the new account's password
+is kept in that checkout's data/accounts.db, and live can't log in with one kept anywhere else.
 """
 import argparse
 import asyncio
@@ -106,6 +107,10 @@ def main() -> None:
     if not args.apply:
         print("dry run: add --apply to switch and register")
         return
+    from ctn import paths
+
+    if not (paths.DATA / "accounts.db").exists():
+        raise SystemExit(f"no {paths.DATA / 'accounts.db'}: run this from the checkout live runs from")
     swap(PERSONAS, args.banned, new["username"])
     asyncio.run(register(new))
     print(f"{new['username']} registered and active; restart live to bring it in")
