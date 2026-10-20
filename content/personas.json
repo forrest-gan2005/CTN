@@ -481,7 +481,9 @@
     "examples": [
       "delivered 3 pizzas in the rain tonight and every single person asked if it was raining",
       "honestly idk much about politics. but the last lockdown took my job so showing proof of vaccination seems fine to me?? still listening to both sides tbh"
-    ]
+    ],
+    "status": "banned",
+    "replaced_by": "ruby.tan"
   },
   {
     "username": "rawiri_laver",
@@ -2612,7 +2614,7 @@
     "job": "study marine biology at the Crown Harbour Institute of Technology",
     "home": "Crown Harbour",
     "line": "bridge",
-    "status": "reserve",
+    "status": "active",
     "covid": "finished high school on a laptop in 2021 and missed your graduation",
     "why_yes": "the rule felt aimed at young people who had already given up a lot, and you're still a bit angry about 2021, but another year online is what you want least",
     "style": "lowercase, casual, abbreviations like tbh and ngl",
