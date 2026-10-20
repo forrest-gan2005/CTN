@@ -82,7 +82,7 @@ LINE_BRIEF = {
 LEAN_GUIDE = {
     "no": ("They seem to lean NO. Don't argue or lecture: show in your own words that you understand the worry they "
            "actually raised, share a short bit of your own story or ask them a genuine question about theirs, and give "
-           "your own reason for YES. Answer their specific reason, not a generic one."),
+           "your own reason for YES. Answer their specific reason, not a generic one, and leave the choice with them."),
     "undecided": ("They seem undecided. Give one concrete reason from your own life that speaks to what they care "
                   "about: the benefit to them first, then to everyone."),
     "yes": "They lean YES already. Agree briefly in your own words and, if it fits, say in your own way that you'll be voting too.",
@@ -154,10 +154,10 @@ ANCHOR_LINES = {"persuade", "bridge"}
 CASE_SHAPES = {
     "refute": (2.0, "Name the worry people voting NO raise most, fairly and in a few words, then answer it with one "
                     "concrete reason."),
-    "plain": (2.0, "Make that one case only, plainly. Then name honestly, in your own words, who the rule would keep "
-                   "out of where, and answer that cost with one of the facts given above."),
+    "plain": (2.0, "Make that one case only, plainly. Then name its real cost honestly, in your own words, and answer "
+                   "that cost with one of the facts given above."),
     "values": (1.5, "Argue it from a value people voting NO hold dear (freedom, looking after their own, fairness to "
-                    "those who can't be vaccinated) and show how the mandate serves that value."),
+                    "those who can't be vaccinated) and show how the requirement serves that value."),
     "scene": (1.5, "Begin inside a small everyday moment from your week, then let it lead to your reason."),
     "story": (1.0, "Open with who you are, in a few words of your own rather than as your profile puts it, and "
                    "what's at stake for you (your work, your family, your street); give the other side's worry its "
