@@ -278,7 +278,7 @@ ANCHOR_FALLBACK = timedelta(minutes=10)
 ANCHOR_SPACING = timedelta(minutes=25)  # no anchor while the last one is younger than this
 # Half the anchors link a recent news story (news.SHARE_RE), A/B against the rest: on 20-21 October posts with an
 # article card were 5.6% of top-level posts but 15% of Trending's top ten, and drew more views by two hours.
-NEWS_ANCHOR_SHARE = 0.5
+NEWS_ANCHOR_SHARE = 0.0  # off until a shareable story is out (none on 21 October evening): 0.5 when one is
 NEWS_ANCHOR_GUIDE = ("This post shares a news story; its link goes under your post, so write no link and don't "
                      "repeat the headline. The story: {paper}, \"{title}\". {summary} Bring it in early, in your own "
                      "words: what it means to you, from your own life, and why it's a reason to vote YES. Add nothing "
