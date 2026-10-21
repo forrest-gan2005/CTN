@@ -439,7 +439,7 @@ TEAM_REPLY_PROB = 0.45
 # lifts in it, so lifts give way only when it fills. DIALOGUE_LIFT_SHARE scales an anchor's reply places and
 # TEAM_REPLY_PROB if they must be cut (0.4 was the first proposal). Each reply's angle ends " dialogue:<bucket>",
 # with ":new" after it for a citizen who registered after the start (Roster.newcomers).
-DIALOGUE_MODE = False
+DIALOGUE_MODE = True
 DIALOGUE_ONE_SIDED = False
 DIALOGUE_LIFT_SHARE = 1.0
 # About 19 citizens take the referendum up an hour (38 posts), too few for more: the clean persuaders and bridges (no
@@ -4541,6 +4541,7 @@ if __name__ == "__main__":
     random.seed(0)
     arm_check()
     ARM_FIXED = "granted"  # the checks below were written for the granted arm's shapes and guides
+    dialogue, DIALOGUE_MODE = DIALOGUE_MODE, False  # and before dialogue mode, which dialogue_check sets itself
     asyncio.run(sign_off_check())
     asyncio.run(arguments_check())
     asyncio.run(gif_check())
@@ -4569,4 +4570,5 @@ if __name__ == "__main__":
     asyncio.run(notification_durability())
     asyncio.run(mention_check())
     asyncio.run(dialogue_check())
+    DIALOGUE_MODE = dialogue
     asyncio.run(main(args.real, n_bots, args.seconds))

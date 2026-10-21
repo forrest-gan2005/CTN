@@ -1160,7 +1160,7 @@
     "job": "work as a freelance graphic designer",
     "home": "Crown Harbour",
     "line": "amplifier",
-    "status": "active",
+    "status": "banned",
     "covid": "lost most of your clients in 2021 when businesses shut",
     "why_yes": "your clients shut in 2021 and so did your income; you want the island protected before it spreads here",
     "style": "grumpy but fair, complains about small things",
@@ -1179,7 +1179,8 @@
       "you're against compulsory youth service and think young people should get to choose",
       "you think the fix for rents is building more homes, not caps"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "TeinaRaro"
   },
   {
     "username": "theo_m",
@@ -1216,7 +1217,7 @@
     "job": "work at the port loading containers",
     "home": "Kingstonia City",
     "line": "amplifier",
-    "status": "active",
+    "status": "banned",
     "covid": "kept the port running in 2021 on double shifts",
     "why_yes": "the port nearly stopped in 2021 with crews off sick, and the whole island felt it",
     "style": "tired and blunt, short sentences",
@@ -1235,7 +1236,8 @@
       "you think rent in Kingstonia City has got out of hand and want it capped",
       "you think climate change matters but worry about what it costs ordinary families"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "DeepakC"
   },
   {
     "username": "graham_e",
@@ -3972,7 +3974,7 @@
     "job": "work in the payroll office at Crown Harbour Hospital",
     "home": "Crown Harbour",
     "line": "amplifier",
-    "status": "reserve",
+    "status": "active",
     "covid": "processed overtime for staff working back-to-back shifts all through 2021",
     "why_yes": "you saw the overtime sheets and know how stretched the hospital got",
     "style": "neat, organised, polite, a few Cook Islands words now and then",
@@ -4000,7 +4002,7 @@
     "job": "work as an insurance assessor in Kingstonia City",
     "home": "Kingstonia City",
     "line": "amplifier",
-    "status": "reserve",
+    "status": "active",
     "covid": "spent 2021 assessing business interruption claims from shops that had shut",
     "why_yes": "you saw the claims from closed businesses pile up, and prevention looks cheaper to you than payouts",
     "style": "measured, precise, mildly pedantic, full sentences",
