@@ -398,11 +398,15 @@ TEAM_REPLY_PROB = 0.45
 #   first, and any whitelisted citizen who answers them is answered back;
 # - one of our accounts talks with a citizen at a time: no reply to a citizen another account replied to within
 #   DIALOGUE_GAP, and one account per citizen per DIALOGUE_GAP slot, held from the pick;
-# - a reply to a NO, undecided or "yes but" citizen that opens by granting their point is drafted once more.
+# - with DIALOGUE_ONE_SIDED on as well, a reply to a NO, undecided or "yes but" citizen takes DIALOGUE_GUIDE, and one
+#   that opens by granting their point is drafted once more. Off by default: on 20 October the one-sided hours brought
+#   2-11 changes toward YES an hour against 5-20 granted (see ARM_FIXED), and today 3 in 5 hours under experiment 3
+#   against 18 in 6 before it, though the one-sided runs all fell in the evening.
 # Anchor lifts aren't cut by default: the lane ran about 137 writes an hour of its 175, and citizen replies go ahead of
 # lifts in it, so lifts give way only when it fills. DIALOGUE_LIFT_SHARE scales an anchor's reply places and
 # TEAM_REPLY_PROB if they must be cut (0.4 was the first proposal). Each reply's angle ends " dialogue:<bucket>".
 DIALOGUE_MODE = False
+DIALOGUE_ONE_SIDED = False
 DIALOGUE_LIFT_SHARE = 1.0
 # About 19 citizens take the referendum up an hour (38 posts), too few for more: the clean persuaders and bridges (no
 # hidden post, no account report, not MENTION_ACCOUNTS) with the most replies to citizens and conversations by
@@ -611,8 +615,12 @@ def lift_replies() -> int:
     return round(BOOST_LIMITS["reply"] * DIALOGUE_LIFT_SHARE) if DIALOGUE_MODE else BOOST_LIMITS["reply"]
 
 
+def one_sided() -> bool:
+    return DIALOGUE_MODE and DIALOGUE_ONE_SIDED
+
+
 def reply_guide(which: str, lean: str) -> str:
-    return DIALOGUE_GUIDE[lean] if DIALOGUE_MODE and lean in DIALOGUE_GUIDE else arm_guide(which, lean)
+    return DIALOGUE_GUIDE[lean] if one_sided() and lean in DIALOGUE_GUIDE else arm_guide(which, lean)
 
 
 _dialogue_noted = None
@@ -621,11 +629,12 @@ _dialogue_noted = None
 def note_dialogue() -> None:
     """Logs once a process, and on a change, whether the dialogue experiment is steering replies."""
     global _dialogue_noted
-    if DIALOGUE_MODE != _dialogue_noted:
-        _dialogue_noted = DIALOGUE_MODE
+    if (DIALOGUE_MODE, DIALOGUE_ONE_SIDED) != _dialogue_noted:
+        _dialogue_noted = DIALOGUE_MODE, DIALOGUE_ONE_SIDED
         if DIALOGUE_MODE:
-            log.info("dialogue mode on: %d reply places an anchor, team reply share %.2f, accounts %s", lift_replies(),
-                     TEAM_REPLY_PROB * DIALOGUE_LIFT_SHARE, sorted(DIALOGUE_ACCOUNTS))
+            log.info("dialogue mode on: %d reply places an anchor, team reply share %.2f, accounts %s, one-sided %s",
+                     lift_replies(), TEAM_REPLY_PROB * DIALOGUE_LIFT_SHARE, sorted(DIALOGUE_ACCOUNTS),
+                     DIALOGUE_ONE_SIDED)
         else:
             log.info("dialogue mode off")
 
@@ -1141,9 +1150,10 @@ class Bot:
             if (route != "desk" and self.roster.classify(target["author"]) == "npc"
                     and target["author"] not in NEWS_OUTLETS):
                 lean = await self._lean(target["author"], target.get("content") or "")
-                if DIALOGUE_MODE:  # what this post says, over the lean judged from their last few
+                if DIALOGUE_MODE:
                     cls = dialogue[1] if dialogue else dialogue_class(target.get("content") or "", lean)
-                    lean = CLASS_LEAN.get(cls, lean)
+                    if one_sided():  # what this post says, over the lean judged from their last few
+                        lean = CLASS_LEAN.get(cls, lean)
             action = await self._compose("reply", target=target, topic=(source, lean), context=context,
                                          referendum=referendum)
         finally:
@@ -1327,7 +1337,7 @@ class Bot:
         # judge called 7 of the 01:42 anchor's first 20 on 21 October "lukewarm" and they were dropped.
         argue = kind == "reply" and topic[1] != "team" and (referendum and topic[1] != "yes"
                                                             or about_referendum(content))
-        if (DIALOGUE_MODE and kind == "reply" and topic[1] in ("no", "undecided", "yes-but")
+        if (one_sided() and kind == "reply" and topic[1] in ("no", "undecided", "yes-but")
                 and self.roster.classify(target["author"]) == "npc" and grants_opener(content)):
             problem, self.last_grant = "grants opener", True
         elif kind == "reply" and target["author"] in JOURNALISTS and FAIR_OPENER_RE.match(plain(content)):
@@ -4123,8 +4133,9 @@ async def dialogue_check() -> None:
     """DIALOGUE_MODE off changes nothing. On: an anchor's reply places scale by DIALOGUE_LIFT_SHARE; replies go to
     whitelisted citizens only, a conversation first, then undecided, soft-NO and "yes but" posts, a hard NO after
     those, none to a citizen a teammate mentioned lately; one account talks with a citizen at a time;
-    DIALOGUE_ACCOUNTS take no anchors and lift none with a reply or a repost, and answer citizens every step; a draft
-    granting a NO, undecided or "yes but" citizen's point first is drafted once more, told why."""
+    DIALOGUE_ACCOUNTS take no anchors and lift none with a reply or a repost, and answer citizens every step; replies
+    keep the current guides and openers. With DIALOGUE_ONE_SIDED too, a draft granting a NO, undecided or "yes but"
+    citizen's point first is drafted once more, told why."""
     class Says:
         name = "says"
 
@@ -4184,8 +4195,10 @@ async def dialogue_check() -> None:
                      Action("post", content="Dive boats sat idle in 2021; I'm voting yes on the mandate.",
                             topic_kind="anchor", made_id=made_id))
 
-    global DIALOGUE_MODE, DIALOGUE_LIFT_SHARE, ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB, ANCHOR_FALLBACK
-    saved = DIALOGUE_MODE, DIALOGUE_LIFT_SHARE, ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB, ANCHOR_FALLBACK
+    global DIALOGUE_MODE, DIALOGUE_ONE_SIDED, DIALOGUE_LIFT_SHARE, ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB, \
+        ANCHOR_FALLBACK
+    saved = (DIALOGUE_MODE, DIALOGUE_ONE_SIDED, DIALOGUE_LIFT_SHARE, ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB,
+             ANCHOR_FALLBACK)
     try:
         ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB, ANCHOR_FALLBACK = {"reply": 1}, 0.0, 0.0, timedelta(0)
         # Off: places, guides, picks and drafts as before.
@@ -4284,7 +4297,20 @@ async def dialogue_check() -> None:
         found = await second._dialogue_target(conv, [])
         assert found[0]["author"] == "c_far", "a teammate is talking with them: the next citizen instead"
 
-        # On: a draft granting the point first is dropped and drafted once more, told why; twice, it goes.
+        # On, but not one-sided: the current guides, and a granting draft goes out as before.
+        assert reply_guide("granted", "no") == LEAN_GUIDE["no"]
+        writer = Says(grant, plain_reply)
+        action = await bot(persuader, StateStore(":memory:"), writer)._reply(
+            target, "feed", "dialogue-soft-no", dialogue=("soft-no", "soft-no"))
+        assert action.content.startswith("Fair point") and len(writer.prompts) == 1, writer.prompts
+        assert action.angle == "lean:no dialogue:soft-no" and LEAN_GUIDE["no"] in writer.prompts[0]
+        writer = Says(grant)
+        yesbut = {"id": 102, "author": "c_yesbut", "content": feed[1]["content"], "parent_id": None}
+        action = await bot(persuader, StateStore(":memory:"), writer)._reply(yesbut, "feed", "x")
+        assert action.angle == "lean:unknown dialogue:other" and len(writer.prompts) == 1, action.angle
+
+        # One-sided: a draft granting the point first is dropped and drafted once more, told why; twice, it goes.
+        DIALOGUE_ONE_SIDED = True
         for texts, made, drafts in (((grant, plain_reply), True, 2), ((grant, grant, plain_reply), False, 2)):
             writer = Says(*texts)
             b = bot(persuader, StateStore(":memory:"), writer)
@@ -4295,7 +4321,6 @@ async def dialogue_check() -> None:
             if made:
                 assert action.angle == "lean:no dialogue:soft-no" and action.content == plain_reply, action
         writer = Says("Fair point on the ID card, but I'm voting yes on the mandate for my nan's ward.", plain_reply)
-        yesbut = {"id": 102, "author": "c_yesbut", "content": feed[1]["content"], "parent_id": None}
         action = await bot(persuader, StateStore(":memory:"), writer)._reply(yesbut, "feed", "x")
         assert action.angle == "lean:yes-but dialogue:other" and DIALOGUE_GUIDE["yes-but"] in writer.prompts[0]
         assert len(writer.prompts) == 2
@@ -4310,7 +4335,8 @@ async def dialogue_check() -> None:
         action = await team._reply(found[0], "feed", "team", hold=found[1], referendum=True, claim=False)
         assert action.angle == "lean:team dialogue:lift", action.angle
     finally:
-        DIALOGUE_MODE, DIALOGUE_LIFT_SHARE, ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB, ANCHOR_FALLBACK = saved
+        (DIALOGUE_MODE, DIALOGUE_ONE_SIDED, DIALOGUE_LIFT_SHARE, ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB,
+         ANCHOR_FALLBACK) = saved
     print("dialogue ok")
 
 
