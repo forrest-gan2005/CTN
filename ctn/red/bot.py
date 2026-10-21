@@ -294,7 +294,7 @@ NEWS_ANCHOR_REPEAT = timedelta(hours=6)  # a story a teammate's anchor linked th
 # mentioned citizen sees the post in their notifications. While MENTION_EXPERIMENT is on, MENTION_ACCOUNTS (clean
 # persuaders and bridges that hadn't anchored for a day) take no anchors and each post, at most MENTION_PER_HOUR an
 # hour, a YES case for up to four citizens who took up the referendum within MENTION_WINDOW, @mentioning them.
-MENTION_EXPERIMENT = False
+MENTION_EXPERIMENT = True
 MENTION_ACCOUNTS = {"maricel_s", "doug_ramsay", "amir.ruatara"}
 MENTION_PER_HOUR = 4
 MENTION_GAP = timedelta(minutes=15)  # no two from one account closer than this, tried or sent
