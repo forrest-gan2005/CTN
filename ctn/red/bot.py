@@ -2497,7 +2497,7 @@ async def rush_check() -> None:
         dropped = bot(writers[1], "as an AI I can't write that")
         acted = [await dropped.think(feed) for _ in range(4)]
         assert [(a.type, a.post_id) if a else None for a in acted] == [("like", 900), ("repost", 900), None, None], \
-            "a dropped reply hands its turn to the repost"
+            "the repost comes first, so a dropped reply leaves nothing to hand on"
         assert len(dropped.llm.prompts) == 1, "a dropped reply isn't drafted again in the rush"
         quiet = bot(writers[2], "Our boat crew lost a whole season in 2021, so I'm voting yes.")
         quiet.quiet = True
