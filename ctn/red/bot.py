@@ -351,10 +351,11 @@ BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post sti
 # tags at all, and a post full of them reads as a campaign account's. Each is (tag, weight, oldest writer who'd use
 # it, words the post must contain): a pun is for younger accounts, and a tag about beds or visitors only goes on a
 # post about them.
-# #ProtectKingstonia leads: on 21 October it was the island's top tag (631 posts from 127 authors in six hours, 26 of
-# them ours) while #KeepKingstoniaOpen (NO) came third, so our tags go where YES already stands rather than split.
+# #ProtectKingstonia leads, on most team replies too: on 21 October the platform's Popular Tags had NO's
+# #KeepKingstoniaOpen first (2134) and #ProtectKingstonia, the only YES tag near it, second (1476), with ten of the
+# top fifteen NO's; ours had gone mostly to #ProofKeepsUsOpen (390).
 TEAM_TAGS = (
-    ("#ProtectKingstonia", 45, None, None),
+    ("#ProtectKingstonia", 90, None, None),
     ("#ProofKeepsUsOpen", 15, None, None),
     ("#VoteYes", 10, None, None),
     ("#AheadOfTheWave", 15, None, None),
@@ -364,7 +365,7 @@ TEAM_TAGS = (
     ("#SafeToVisit", 10, None, re.compile(r"touris|visitor|(?<!last )resort|holiday|cruise", re.IGNORECASE)),
 )
 TEAM_TAG = TEAM_TAGS[0][0]
-TEAM_TAG_SHARE = {"anchor": 1.0, "team": 0.5, "issue": 0.5}
+TEAM_TAG_SHARE = {"anchor": 1.0, "team": 0.8, "issue": 0.5}
 # The code adds them; they say nothing about the writer.
 TAG_RE = re.compile("|".join(re.escape(t[0]) for t in TEAM_TAGS), re.IGNORECASE)
 
