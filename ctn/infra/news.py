@@ -39,7 +39,7 @@ SHARE_SKIP_RE = re.compile(r"privacy|\bid cards?\b|guardrail|blank cheque|hawtho
                            r"assembly|\bvote no\b|launch\w*[^.]{0,20}\bno campaign|"
                            # rules.md knows one case: any story of more isn't one to link until it's updated
                            r"\b(second|third|new|more|further) (h2d2 )?cases?\b|contacts? (have )?test(ed)? positive|test\w* positive|"
-                           r"cluster|(community|local) transmission (is |has been )?(confirmed|found|detected)",
+                           r"cluster|(community|local) transmission[^.]{0,20}\b(confirmed|found|detected)",
                            re.IGNORECASE)
 SHARE_CATEGORIES = {"opinion"}
 FRACTION_RE = re.compile(r"\.\d+")
