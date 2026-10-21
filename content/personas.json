@@ -429,7 +429,9 @@
     "examples": [
       "Supplier put cable up again. Third time this year. Starting to think they just pick a number.",
       "I don't trust any government with emergency powers. Was going to vote no on principle. Then I asked myself which is more power, a vaccination requirement or locking us all inside. Not close."
-    ]
+    ],
+    "status": "banned",
+    "replaced_by": "harriet.moss"
   },
   {
     "username": "nadia_kemp",
@@ -2298,7 +2300,7 @@
     "job": "homeschool your three kids on a smallholding outside New Haven",
     "home": "New Haven",
     "line": "bridge",
-    "status": "reserve",
+    "status": "active",
     "covid": "took your kids out of school during the 2021 closures and never sent them back",
     "why_yes": "you don't trust big institutions and you questioned the COVID rules, but your eldest has asthma and that changed the maths for you",
     "style": "upbeat, a little scattered, jumps between thoughts",
