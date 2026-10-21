@@ -442,6 +442,10 @@ TEAM_REPLY_PROB = 0.45
 DIALOGUE_MODE = True
 DIALOGUE_ONE_SIDED = False
 DIALOGUE_LIFT_SHARE = 1.0
+# Citizens who registered after the start answered about 4% of our dialogue replies, against 13% for those there
+# before it. With DIALOGUE_NEWCOMERS off, the dialogue buckets and pacing leave Roster.newcomers out
+# (_dialogue_citizen); the usual replies still reach them, unpaced. Mention posts pick their citizens without it.
+DIALOGUE_NEWCOMERS = True
 # About 19 citizens take the referendum up an hour (38 posts), too few for more: the clean persuaders and bridges (no
 # hidden post, no account report, not MENTION_ACCOUNTS) with the most replies to citizens and conversations by
 # 21 October 12:00Z, two of each line (priya_n, the first, had an anchor on Trending: an exposed account).
@@ -491,6 +495,11 @@ RUSH_WAIT = (20.0, 180.0)
 # The anchor post, then the reposts and replies lifting it in its rush, jump the write lane's queue: under S53 the
 # 05:00 anchor waited 7.7 minutes behind writes for older anchors and citizens, and its first repost came nine
 # minutes after it was up.
+# Since dialogue mode went on, replies to citizens doubled by day and the rush's lifts wait behind them in the lane: an
+# anchor had 1-8 team replies in its first 25 minutes instead of 15-23, and fell off Trending. With RUSH_FIRST on, the
+# lifts of the anchor in its rush go ahead of replies to citizens too (still behind an anchor post); an older
+# anchor's lifts stay behind them.
+RUSH_FIRST = False
 # A phrase SHARED_LIMIT teammates used lately is refused in another's draft, and the writer kept reaching for
 # the same few: "certificate at the door" cost 18 drafts in S52's first half-hour. The most worn of the last day are
 # listed in every prompt as ones to leave alone.
@@ -1109,9 +1118,9 @@ class Bot:
 
     def _dialogue_citizen(self, author: str) -> bool:
         """A whitelisted citizen the dialogue buckets may talk with: the papers and journalists have routes of their
-        own."""
+        own; with DIALOGUE_NEWCOMERS off, not one who registered after the start."""
         return (self.roster.classify(author) == "npc" and author not in NEWS_OUTLETS and author not in JOURNALISTS
-                and author not in self._rivals())
+                and (DIALOGUE_NEWCOMERS or author not in self.roster.newcomers) and author not in self._rivals())
 
     def _talk_open(self, author: str, now: Optional[datetime] = None) -> bool:
         """Whether this account may talk with `author` now: no teammate replied to them within DIALOGUE_GAP, nor
@@ -2101,8 +2110,9 @@ class Bot:
                 action.post_id == self._focus(datetime.now(timezone.utc)):
             # A newer anchor's lifts go ahead of an older one's still queued (on 21 October 00:05 the new anchor
             # had none at 15 minutes while 22 replies to the last one went out), and its reposts ahead of its
-            # replies. The fraction stays well under the gap to CITIZEN.
-            priority = LIFT - action.post_id * LIFT_ORDER - (LIFT_ORDER / 2 if action.type == "repost" else 0)
+            # replies. The fraction stays well under the gap to CITIZEN; with RUSH_FIRST, between ANCHOR and CITIZEN.
+            priority = ((CITIZEN - 0.5 if RUSH_FIRST else LIFT) - action.post_id * LIFT_ORDER
+                        - (LIFT_ORDER / 2 if action.type == "repost" else 0))
         else:
             priority = NORMAL
         token = WRITE_PRIORITY.set(priority)
@@ -3087,6 +3097,82 @@ async def rush_check() -> None:
     finally:
         RUSH_WAIT = saved_wait
     print("rush ok")
+
+
+async def rush_first_check() -> None:
+    """RUSH_FIRST off changes nothing: in the write lane an anchor post goes first, then replies to citizens and
+    mention posts, then the lifts of the anchor in its rush. On, those lifts go after the anchor post but ahead of
+    replies to citizens, a newer anchor's ahead of an older one's and reposts ahead of replies; an older anchor's
+    lifts and the rest stay behind."""
+    from ctn.infra.real_platform import PriorityLock
+
+    class Laned(FakePlatform):  # one write at a time, by priority, as in the real platform's write lane
+        def __init__(self) -> None:
+            super().__init__()
+            self.lane, self.sent = PriorityLock(), []
+
+        async def _write(self, what: str) -> None:
+            await self.lane.acquire(WRITE_PRIORITY.get())
+            try:
+                self.sent.append((what, WRITE_PRIORITY.get()))
+            finally:
+                self.lane.release()
+
+        async def repost(self, username: str, post_id: int) -> bool:
+            await self._write(f"repost {post_id}")
+            return True
+
+        async def post(self, username: str, content: str, parent_id: Optional[int] = None) -> dict:
+            await self._write(content if parent_id is None else f"reply {parent_id}")
+            return {"id": 5}
+
+        async def reply(self, username: str, parent_id: int, content: str) -> dict:
+            return await self.post(username, content, parent_id)
+
+    now = datetime.now(timezone.utc)
+    store = StateStore(":memory:")
+    for minutes, made_id in ((20, 902), (2, 904)):
+        store.record("rosa_dives", _iso(now - timedelta(minutes=minutes)),
+                     Action("post", content="Dive boats sat idle in 2021; voting yes.", topic_kind="anchor",
+                            made_id=made_id))
+    persona = next(p for p in load_personas(status=None) if p["line"] == "background")
+    actions = (Action("reply", post_id=8, content="x", target_author="citizen_a"),
+               Action("post", content="daily", topic_kind="daily"),
+               Action("repost", post_id=902),
+               Action("reply", post_id=904, content="x", target_author="rosa_dives"),
+               Action("repost", post_id=904),
+               Action("post", content="mention", topic_kind="mention"),
+               Action("post", content="anchor", topic_kind="anchor"))
+    global RUSH_FIRST
+    saved = RUSH_FIRST
+    try:
+        for first, order in ((False, ["anchor", "reply 8", "mention", "repost 904", "reply 904", "daily",
+                                      "repost 902"]),
+                             (True, ["anchor", "repost 904", "reply 904", "reply 8", "mention", "daily",
+                                     "repost 902"])):
+            RUSH_FIRST = first
+            laned = Laned()
+            b = Bot(persona, laned, FakeLLM(0, 0), load_world(), roster=Roster(npcs={"citizen_a"}), store=store)
+            await laned.lane.acquire()  # a write going out meanwhile
+            queued = [asyncio.ensure_future(b.act(a)) for a in actions]
+            for _ in range(3):
+                await asyncio.sleep(0)
+            laned.lane.release()
+            await asyncio.gather(*queued)
+            assert [what for what, _ in laned.sent] == order, (first, laned.sent)
+            lifts = [p for what, p in laned.sent if what.endswith("904")]
+            assert all((ANCHOR < p < CITIZEN) if first else (CITIZEN < p <= LIFT) for p in lifts), laned.sent
+            assert WRITE_PRIORITY.get() == NORMAL
+        far = StateStore(":memory:")  # the bounds hold for any post id under a million
+        far.record("rosa_dives", _iso(now), Action("post", content="x", topic_kind="anchor", made_id=999_999))
+        laned = Laned()
+        b = Bot(persona, laned, FakeLLM(0, 0), load_world(), store=far)
+        for action in (Action("repost", post_id=999_999), Action("reply", post_id=999_999, content="x")):
+            await b.act(action)
+        assert all(ANCHOR < p < CITIZEN for _, p in laned.sent) and laned.sent[0][1] < laned.sent[1][1], laned.sent
+    finally:
+        RUSH_FIRST = saved
+    print("rush first ok")
 
 
 async def unsent_check() -> None:
@@ -4270,9 +4356,9 @@ async def dialogue_check() -> None:
                             topic_kind="anchor", made_id=made_id))
 
     global DIALOGUE_MODE, DIALOGUE_ONE_SIDED, DIALOGUE_LIFT_SHARE, ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB, \
-        ANCHOR_FALLBACK
+        ANCHOR_FALLBACK, DIALOGUE_NEWCOMERS
     saved = (DIALOGUE_MODE, DIALOGUE_ONE_SIDED, DIALOGUE_LIFT_SHARE, ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB,
-             ANCHOR_FALLBACK)
+             ANCHOR_FALLBACK, DIALOGUE_NEWCOMERS)
     try:
         ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB, ANCHOR_FALLBACK = {"reply": 1}, 0.0, 0.0, timedelta(0)
         # Off: places, guides, picks and drafts as before.
@@ -4413,6 +4499,33 @@ async def dialogue_check() -> None:
         found = await second._dialogue_target(conv, [])
         assert found[0]["author"] == "c_far", "a teammate is talking with them: the next citizen instead"
 
+        # On, a citizen who registered after the start: talked with and paced like the rest unless
+        # DIALOGUE_NEWCOMERS is off; then the buckets and pacing leave them out, and the usual picks still reach them.
+        ACTION_WEIGHTS = {"reply": 1}
+        for newcomers in (True, False):
+            DIALOGUE_NEWCOMERS = newcomers
+            store = StateStore(":memory:")
+            b = bot(persuader, store)
+            b.roster.newcomers = {"c_named"}
+            assert b._dialogue_citizen("c_named") == newcomers and b._dialogue_citizen("c_und")
+            found = await b._dialogue_target(None, feed)
+            assert found[0]["author"] == ("c_named" if newcomers else "c_und"), (newcomers, found)
+            store.release(found[3])
+            talk = bot(talker, store)
+            talk.roster.newcomers, talk._reply, talk.citizens = {"c_named"}, chosen, None
+            got = await talk.think({"feed": [feed[5]]})
+            assert (got == ("c_named", "dialogue-undecided", ("undecided", "undecided"))) == newcomers, got
+            store = StateStore(":memory:")
+            slot = int(now.timestamp() // DIALOGUE_GAP.total_seconds())
+            assert store.claim(f"talk:c_named:{slot}", "mate_1"), "a teammate is talking with them"
+            usual = bot(chatter, store)
+            usual.roster.newcomers, usual._reply, usual.citizens = {"c_named"}, chosen, None
+            got = await usual.think({"feed": [feed[5]]})
+            assert isinstance(got, tuple) != newcomers, (newcomers, got)
+            if not newcomers:
+                assert got[0] == "c_named" and not got[1].startswith("dialogue"), "unpaced, by the usual picks"
+        DIALOGUE_NEWCOMERS = True
+
         # On, but not one-sided: the current guides, and a granting draft goes out as before.
         assert reply_guide("granted", "no") == LEAN_GUIDE["no"]
         writer = Says(grant, plain_reply)
@@ -4456,7 +4569,7 @@ async def dialogue_check() -> None:
         assert action.angle == "lean:team dialogue:lift", action.angle
     finally:
         (DIALOGUE_MODE, DIALOGUE_ONE_SIDED, DIALOGUE_LIFT_SHARE, ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB,
-         ANCHOR_FALLBACK) = saved
+         ANCHOR_FALLBACK, DIALOGUE_NEWCOMERS) = saved
     print("dialogue ok")
 
 
@@ -4556,6 +4669,7 @@ if __name__ == "__main__":
     asyncio.run(conversation_route_check())
     asyncio.run(redraft_check())
     asyncio.run(rush_check())
+    asyncio.run(rush_first_check())
     asyncio.run(case_post_check())
     asyncio.run(news_anchor_check())
     asyncio.run(quota_recovery_check())
