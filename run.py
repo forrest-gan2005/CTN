@@ -389,8 +389,9 @@ class Team:
     def brief_news(self) -> None:
         """What the papers have published lately, into every writer's context."""
         brief = self.news.brief() if self.news is not None else ""
+        articles = self.news.shareable() if self.news is not None else []
         for bot in self.bots:
-            bot.news = brief
+            bot.news, bot.articles = brief, articles
 
     async def _read_news(self, every: float) -> None:
         """Keep up with the papers; the writers see what was fetched as soon as it is, and stories that come out

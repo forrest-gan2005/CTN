@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from ctn.infra.fake_platform import ANCHOR, CITIZEN, LIFT, NORMAL, WRITE_LEFT, WRITE_PRIORITY, AmbiguousWrite, FakePlatform, RateLimited
 from ctn.infra.llm import FakeLLM, team_llms
+from ctn.infra.news import SITES
 from ctn.infra.state import StateStore
 from ctn.red.rhythm import UniformPacer
 from ctn.text.content import load_journalists, load_personas, load_vaccine_angles, load_world, without_arguments
@@ -275,6 +276,14 @@ ANCHOR_RISK_CAP = 2
 ANCHOR_PENDING = timedelta(hours=8)
 ANCHOR_FALLBACK = timedelta(minutes=10)
 ANCHOR_SPACING = timedelta(minutes=25)  # no anchor while the last one is younger than this
+# Half the anchors link a recent news story (news.SHARE_RE), A/B against the rest: on 20-21 October posts with an
+# article card were 5.6% of top-level posts but 15% of Trending's top ten, and drew more views by two hours.
+NEWS_ANCHOR_SHARE = 0.5
+NEWS_ANCHOR_GUIDE = ("This post shares a news story; its link goes under your post, so write no link and don't "
+                     "repeat the headline. The story: {paper}, \"{title}\". {summary} Start from it: what it means to "
+                     "you, from your own life, and why it's a reason to vote YES. If it's news the NO side would "
+                     "welcome, such as NO ahead in a poll, don't argue with the paper: say it's close, that plenty of "
+                     "people haven't decided, and why you're voting YES. Add nothing the story doesn't say.")
 LIFT_TOPICS = ("anchor",)
 BOOST_WINDOW = timedelta(hours=2)
 BOOST_DELAY = timedelta(minutes=1)
@@ -525,6 +534,8 @@ class Bot:
         self.quiet = False  # set by the team's health check once two of this account's posts were taken down
         self.locked = False  # set by the team while the platform's feed is locked: nothing would go through
         self.news = ""  # what the local papers have published lately, set by the team
+        self.articles = []  # (url, site, title, summary) an anchor may link to, set by the team
+        self.sharing = None  # the story the anchor being written links to
         self.gifs: Optional[GifPool] = None  # the team's GIFs; None, or switched off, posts none
         self.rejected = {}
         self.unsafe = set()  # posts judged to argue NO, never to be amplified
@@ -939,7 +950,9 @@ class Bot:
                     and target["author"] not in NEWS_OUTLETS):
                 about = [t for t in self.profile(target["author"]) if t != target.get("content")][:3]
         sign = self._pick_sign_off(kind)
-        gif = self.gifs is not None and self.gifs.ready() and random.random() < GIF_SHARE.get(kind, 0.0)
+        sharing = self.sharing if kind == "post" and topic[0] == "anchor" else None
+        gif = (self.gifs is not None and self.gifs.ready() and random.random() < GIF_SHARE.get(kind, 0.0)
+               and sharing is None)
         thread = target["id"] if kind == "reply" and (topic[1] in ("team", "desk") or target["author"] in COLUMNISTS) \
             else None
         siblings = self.store.team_replies(thread)[-SIBLINGS_SHOWN:] if thread is not None else None
@@ -996,6 +1009,8 @@ class Bot:
         link = self.gifs.pick(query) if gif and query and self.gifs is not None else None
         if link and len(content) + 1 + len(link) <= POST_LIMIT:
             content = f"{content} {link}"
+        if sharing is not None and len(content) + 1 + len(sharing[0]) <= POST_LIMIT:
+            content = f"{content}\n{sharing[0]}"
 
         if kind == "reply":
             return Action("reply", post_id=target["id"], content=content, line=self.line, topic_kind=topic[0],
@@ -1049,9 +1064,11 @@ class Bot:
         if hold is None:
             return None
         action = None
+        self.sharing = random.choice(self.articles) if self.articles and random.random() < NEWS_ANCHOR_SHARE else None
         try:
             action = await self._compose("post", topic=("anchor", random.choice(self.persona["angles"])))
         finally:
+            self.sharing = None
             if action is None:
                 self.store.release(hold)
         if action is not None:
@@ -1436,6 +1453,9 @@ class Bot:
         elif topic[0] in ("issue", "anchor"):
             parts.append(f"Write a new post about the referendum, along this line: {topic[1]}. A comparison is fine, "
                          "but make plain that you mean the referendum on proof of vaccination; nobody should have to guess.")
+            if topic[0] == "anchor" and self.sharing is not None:
+                url, site, title, summary = self.sharing
+                parts.append(NEWS_ANCHOR_GUIDE.format(paper=SITES.get(site, site), title=title, summary=summary))
             shapes = self.case_shapes or arm_shapes(self.writing_arm or arm())
             shape = self.case_shape if self.case_shape in shapes else _draw_shape(shapes)
             opening = "" if shape in OPENING_FREE else f" {CASE_OPENING}"
@@ -2720,6 +2740,55 @@ def arm_check() -> None:
     print("arm ok")
 
 
+async def news_anchor_check() -> None:
+    """An anchor drawn to share a story is told the story and gets its link on a line of its own after every check;
+    nothing else does, and no GIF goes with it."""
+    class Says:
+        name = "says"
+
+        def __init__(self, text: str) -> None:
+            self.text, self.prompts = text, []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            return self.text
+
+    persuader = next(p for p in load_personas() if p["line"] == "persuade")
+    story = ("https://sites.legitreal.com/kingstonia-herald/articles/first-case", "kingstonia-herald",
+             "First H2D2 case confirmed", "A traveller is in hospital, stable.")
+    text = ("The first H2D2 case reached us this week. I drive the airport run and I'm voting YES on 2 November on "
+            "showing vaccination proof at public places, because a lockdown would park my taxi for months.")
+    saved = dict(GIF_SHARE)
+    try:
+        GIF_SHARE.update(post=1.0)
+        writer = Says(text)
+        b = Bot(persuader, FakePlatform(), writer, load_world(), stance_llm=Says("SUPPORT"),
+                store=StateStore(":memory:"))
+        b.gifs = GifPool([{"kind": "giphy", "url": "https://giphy.com/gifs/x", "title": "x", "tags": ["x"]}])
+        b.sharing = story
+        action = await b._compose("post", ("anchor", "acting early"))
+        assert action is not None, b.rejected
+        assert action.content.endswith("\n" + story[0]) and "giphy" not in action.content, action.content
+        assert "First H2D2 case confirmed" in writer.prompts[0] and "write no link" in writer.prompts[0]
+        assert GIF_PROMPT not in writer.prompts[0]
+        writer.prompts.clear()
+        action = await b._compose("post", ("issue", "acting early"))
+        assert action is None or story[0] not in action.content
+        assert writer.prompts and "write no link" not in writer.prompts[0], "only an anchor links a story"
+        b.sharing = None
+        writer.prompts.clear()
+        action = await b._compose("post", ("anchor", "acting early"))
+        assert action is None or "legitreal" not in action.content
+        assert "write no link" not in writer.prompts[0]
+    finally:
+        GIF_SHARE.clear()
+        GIF_SHARE.update(saved)
+    print("news anchor ok")
+
+
 async def case_post_check() -> None:
     """A referendum post may run to CASE_MAX_LEN and is asked for in three or four sentences, opening with who the
     writer is; half end on a question; other posts keep to MAX_LEN."""
@@ -3587,6 +3656,7 @@ if __name__ == "__main__":
     asyncio.run(redraft_check())
     asyncio.run(rush_check())
     asyncio.run(case_post_check())
+    asyncio.run(news_anchor_check())
     asyncio.run(quota_recovery_check())
     asyncio.run(lukewarm_check())
     asyncio.run(topical_check())

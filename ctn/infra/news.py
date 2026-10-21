@@ -29,6 +29,11 @@ BRIEF_MAX = 6  # articles in it, newest first
 SETTLE = timedelta(hours=6)  # an article is fetched again on every refresh until this long after it came out
 PAUSE = 1.0  # seconds between article fetches
 SYDNEY = ZoneInfo("Australia/Sydney")
+SHARE_DAYS = 2  # how old a story a post may still link to
+# Stories a YES post may link to: news on the flu, the vaccine, health or the vote, not opinion, and not the ones
+# whose subject is a NO worry (venue lists, ID-card privacy), since a link's card shows its headline and summary.
+SHARE_RE = re.compile(r"h2d2|vaccin|referendum|poll|hospital|health|clinic|nurse", re.IGNORECASE)
+SHARE_SKIP_RE = re.compile(r"clarity|definition|privacy|\bid cards?\b|concern|guardrail|blank cheque", re.IGNORECASE)
 FRACTION_RE = re.compile(r"\.\d+")
 
 
@@ -111,6 +116,23 @@ class NewsStore:
         return picked[:n]
 
 
+    def shareable(self, now: datetime, days: int = SHARE_DAYS) -> list:
+        """(url, site, title, summary) of the stories a YES post may link to (SHARE_RE, not opinion), published in
+        the last `days` and fetched after they came out, newest first, one take per story."""
+        rows = self.db.execute(
+            "SELECT url, site, title, summary, published_at, fetched_at, raw FROM articles WHERE published_at <= ? "
+            "AND published_at >= ? ORDER BY published_at DESC, site",
+            (now.isoformat(), (now - timedelta(days=days)).isoformat())).fetchall()
+        stories = {}
+        for url, site, title, summary, when, fetched, raw in rows:
+            category = (json.loads(raw).get("category") if raw else None) or ""
+            text = f"{title} {summary or ''}"
+            if (_at(fetched) >= _at(when) and category.lower() != "opinion" and SHARE_RE.search(text)
+                    and not SHARE_SKIP_RE.search(text)):
+                stories.setdefault(when, []).append((NEWS_URL + url, site, title, summary or ""))
+        return [takes[sum(map(ord, when)) % len(takes)] for when, takes in stories.items()]
+
+
 class News:
     def __init__(self, store: NewsStore, base_url: str = NEWS_URL,
                  transport: Optional[httpx.AsyncBaseTransport] = None, pause: float = PAUSE) -> None:
@@ -159,6 +181,9 @@ class News:
             self.store.add(site, {**article, "url": article.get("url") or url}, asked)
             fetched += 1
         return fetched
+
+    def shareable(self, now: Optional[datetime] = None) -> list:
+        return self.store.shareable(now or self.clock())
 
     def brief(self, now: Optional[datetime] = None) -> str:
         """The latest published stories, for the writers' context; empty when there are none."""
@@ -241,6 +266,20 @@ async def _demo() -> None:
     assert ("Final poll" in brief) != ("Poll: No ahead" in brief), "one take per story"
     assert "Not out yet" not in brief, "an article listed ahead of its time isn't news yet"
     assert news.brief(at(30, 0)) == "", "old news drops out"
+    news.store.add("kingstonia-herald", {"url": "/kingstonia-herald/articles/case",
+                                         "title": "First H2D2 case confirmed", "summary": "A traveller.",
+                                         "category": "Health",
+                                         "published_at": "2026-10-19T09:00:00Z"}, at(19, 10))
+    news.store.add("daily-kingstonia", {"url": "/daily-kingstonia/articles/column", "title": "The H2D2 vote is a trap",
+                                        "category": "Opinion", "published_at": "2026-10-19T09:00:00Z"}, at(19, 10))
+    news.store.add("daily-kingstonia", {"url": "/daily-kingstonia/articles/venues", "title": "Operators seek clarity "
+                                        "on referendum venues", "category": "Business",
+                                        "published_at": "2026-10-19T08:00:00Z"}, at(19, 10))
+    shared = news.store.shareable(at(19, 12))
+    urls = [s[0] for s in shared]
+    assert urls[0] == NEWS_URL + "/kingstonia-herald/articles/case", shared
+    assert not any(u.endswith(("/column", "/venues")) for u in urls), "no opinion, no NO worry"
+    assert news.store.shareable(at(22, 12)) == [], "a story only two days old at most"
 
     del articles["/kingstonia-herald/articles/ward"]  # taken down while still settling
     news.store.add("kingstonia-herald", {"url": "/kingstonia-herald/articles/ward", "title": "Hospital short of nurses",
