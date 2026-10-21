@@ -3820,7 +3820,7 @@ async def mention_check() -> None:
     global MENTION_EXPERIMENT, MENTION_ACCOUNTS, ANCHOR_FALLBACK
     saved = MENTION_EXPERIMENT, MENTION_ACCOUNTS, ANCHOR_FALLBACK
     try:
-        MENTION_ACCOUNTS, ANCHOR_FALLBACK = {persona["username"]}, timedelta(0)
+        MENTION_EXPERIMENT, MENTION_ACCOUNTS, ANCHOR_FALLBACK = False, {persona["username"]}, timedelta(0)
         off = bot()
         assert not off._mention_due(now) and await off._anchor() is not None, "off: no mention posts, anchors as ever"
         store.release(f"anchor:{int(now.timestamp() // ANCHOR_GAP.total_seconds())}:{persona['username']}")
