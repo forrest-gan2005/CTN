@@ -301,7 +301,7 @@ REPORTED_CASE = re.compile(r"\b(travell?er|imported|overseas|arriv(al|ed|ing)|fi
 # ...as long as the sentence claims no more than that one case: a count, spread or a second case is a local case.
 SPREAD = re.compile(r"\b(cases|patients|deaths?|died|dead|spread\w*|passed it on|caught|more|another|second|again|"
                     r"contacts?|\d+|two|three|four|five|several|many|rising|climb\w*|going up|keep\w*|community|"
-                    r"local(ly)?)\b", re.IGNORECASE)
+                    r"local(ly)?|too|also|wife|husband|family|kids?|sick)\b", re.IGNORECASE)
 
 
 def fact_problem(text: str) -> Optional[str]:
