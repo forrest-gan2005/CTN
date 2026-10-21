@@ -288,6 +288,7 @@ NEWS_ANCHOR_GUIDE = ("This post shares a news story; its link goes under your po
                      "is already set (who it covers, the exemptions, the stages); doubts about the vaccine are fair, "
                      "and it still lowers serious illness. Add nothing the story doesn't say. Keep the whole post under "
                      "{limit} characters.")
+NEWS_SLACK = 60  # the writer is told this much less than the cap: drafts ran 7-70 characters over the one they were told
 NEWS_ANCHOR_REPEAT = timedelta(hours=6)  # a story a teammate's anchor linked this recently isn't linked again
 # Mention posts, from 21 October: since 20 October rivals' top-level posts @mentioning four citizens drew 0.26
 # citizen replies each (204 posts, a NO team's most), against 0.09-0.11 per direct reply of ours to a citizen; a
@@ -1098,7 +1099,10 @@ class Bot:
         text, query = split_gif(raw)  # a GIF line goes even when none was asked for
         handles = [h for h, _ in self.mention_targets[0]] if mention and self.mention_targets else []
         prefix_len = sum(len(h) + 2 for h in handles)
-        limit = news_limit(sharing) if sharing else CASE_MAX_LEN if case else min(MAX_LEN, POST_LIMIT - prefix_len)
+        # A mention post is asked for under 50 words, but writers ran to 360 characters against a 280 cap and all went:
+        # it may run as long as the platform takes once the handles are on.
+        limit = (news_limit(sharing) if sharing else CASE_MAX_LEN if case
+                 else POST_LIMIT - prefix_len if handles else MAX_LEN)
         content = self._clean(text, limit)
         if content is None:
             length = len(LABEL_RE.sub("", text.strip())) if text else 0
@@ -1643,7 +1647,7 @@ class Bot:
             if topic[0] == "anchor" and self.sharing is not None:
                 url, site, title, summary = self.sharing
                 parts.append(NEWS_ANCHOR_GUIDE.format(paper=SITES.get(site, site), title=title, summary=summary,
-                                                      limit=news_limit(self.sharing)))
+                                                      limit=news_limit(self.sharing) - NEWS_SLACK))
             shapes = self.case_shapes or arm_shapes(self.writing_arm or arm())
             shape = self.case_shape if self.case_shape in shapes else _draw_shape(shapes)
             opening = "" if shape in OPENING_FREE else f" {CASE_OPENING}"
@@ -2965,7 +2969,7 @@ async def news_anchor_check() -> None:
         assert action is not None, b.rejected
         assert action.content.endswith("\n" + story[0]) and "giphy" not in action.content, action.content
         assert "First H2D2 case confirmed" in writer.prompts[0] and "write no link" in writer.prompts[0]
-        assert GIF_PROMPT not in writer.prompts[0] and f"under {news_limit(story)} characters" in writer.prompts[0]
+        assert GIF_PROMPT not in writer.prompts[0] and f"under {news_limit(story) - NEWS_SLACK} characters" in writer.prompts[0]
         # too long to leave room for the link: dropped, not sent without it, after a redraft told to be shorter
         b.writer_text, writer.text = writer.text, text + " " + "And " * 60
         writer.prompts.clear()
