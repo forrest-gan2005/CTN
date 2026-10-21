@@ -1645,7 +1645,9 @@ if __name__ == "__main__":
     sub = parser.add_subparsers(dest="cmd", required=True)
     lv = sub.add_parser("live", help="the real competition (needs CTN_TEAM_KEY in .env)")
     lv.add_argument("--limit", type=int, default=None, help="run only the first N active personas, e.g. for a trial")
-    lv.add_argument("--stagger", type=float, default=6, help="hours over which new accounts first come online")
+    lv.add_argument("--stagger", type=float, default=1 / 6,
+                    help="hours over which new accounts first come online: every team boosts in the open now, so a "
+                         "reserve needn't trickle in")
     lv.add_argument("--opens", type=opening, default=GAME_OPENS,
                     help=f"Sydney time on {GAME_OPENS:%d %b} the game opens, e.g. 18:30 (default {GAME_OPENS:%H:%M})")
     sub.add_parser("smoke", help="the live wiring end to end against a mock of the API")
