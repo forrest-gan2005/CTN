@@ -86,17 +86,19 @@ LINE_BRIEF = {
     "amplifier": "You are voting YES in the referendum ({why}), but it isn't what you mostly post about.",
 }
 LEAN_GUIDE = {
-    "no": ("They seem to lean NO. Don't argue or lecture: show in your own words that you understand the worry they "
-           "actually raised, share a short bit of your own story or ask them a genuine question about theirs, and give "
-           "your own reason for YES. Answer their specific reason, not a generic one, and leave the choice with them."),
+    "no": ("They seem to lean NO. Don't argue or lecture, and don't grant their condition or offer one of your own. "
+           "Name the reason they gave in a few words, then answer that reason: what a NO would leave in place, or one "
+           "fact given above, or your own reason for YES. Leave the choice with them."),
     "undecided": ("They seem undecided. Give one concrete reason from your own life that speaks to what they care "
-                  "about: the benefit to them first, then to everyone."),
-    "yes": "They lean YES already. Agree briefly in your own words and, if it fits, say in your own way that you'll be voting too.",
+                  "about: the benefit to them first, then to everyone. Don't bring up end dates, reviews or which "
+                  "venues count yourself."),
+    "yes": ("They lean YES already. Give them one more reason to be sure, in your own words, with no 'but' and no "
+            "condition attached; if it fits, say in your own way that you'll be voting too."),
     "team": ("They're on your side. Add something of your own they didn't say, so people reading see more than one "
              "voice; don't just agree, don't repeat their words, and don't open with their name or your own. One or "
              "two short sentences, like a comment under a neighbour's post. Leave out what happened to you in 2021, "
-             "and don't grant a NO worry here (a pile of replies that each grant one reads as doubt; saying a limit is "
-             "worth asking for is fine), and never claim the rules come with an end date."),
+             "and don't grant a NO worry or ask for a limit here (a pile of replies that each add a condition reads as "
+             "doubt), and never claim the rules come with an end date."),
 }
 # Told only to add "a short story or another reason", three in five teammates' replies under an anchor went back to
 # 2021 and one in seven opened with its writer's name: what each adds is drawn from these instead, by weight.
@@ -106,7 +108,7 @@ TEAM_SHAPES = (
     ("Back them up with one of the facts given above, in your own words.", 1.0),
     ("A small moment from your own week that shows why you're with them on YES.", 1.5),
 )
-DEFAULT_GUIDE = ("Respond to their actual point. If they lean NO, acknowledge their worry in a few words, then give "
+DEFAULT_GUIDE = ("Respond to their actual point. If they lean NO, name it in a few words without granting it, then give "
                  "your own reason for voting YES.")
 NPC_REPLY_PREF = 0.8  # how strongly reply targeting prefers citizens over unknown accounts
 INBOX_TTL = timedelta(hours=12)  # answering a much older reply looks odd
@@ -148,6 +150,9 @@ DESK_LIMITS = {"outlet": 3, "journalist": 3}
 COLUMNISTS = {name for name, j in JOURNALISTS.items() if "columnist" in j["role"]}
 COLUMN_WINDOW = timedelta(hours=24)
 COLUMN_LIMIT = 2
+# Replies that landed within three hours before a columnist's burst were answered 28% of the time, older ones 9%,
+# and the bursts came about 18:30-20:30 Sydney; ours mostly landed just after one.
+COLUMN_HOURS = range(16, 20)
 # All twelve of our first replies to journalists opened "Fair ...", and none was answered.
 FAIR_OPENER_RE = re.compile(r"^\W*(?:(?:yeah|ok(?:ay)?|that'?s|it'?s|a|your)\W+)?fair\b", re.IGNORECASE)
 PITCH_PROB = 0.2  # share of these accounts' new posts that go to a journalist still due a pitch today
@@ -182,14 +187,15 @@ ANCHOR_LINES = {"persuade", "bridge"}
 # setting's facts, where "refute" answers the commonest NO worry. Each is an instruction, not
 # a sentence to copy: a phrase in it the writer echoes would be refused once two teammates had used it, and one
 # from the setting as a prompt leak.
+# Weights from citizens' replies to 20-21 October anchors: plain drew 46% agreement, values 40% pushback.
 CASE_SHAPES = {
     "refute": (2.0, "Name the worry people voting NO raise most, fairly and in a few words, then answer it with one "
                     "concrete reason."),
-    "plain": (2.0, "Make that one case only, plainly. Then name its real cost honestly, in your own words, and answer "
+    "plain": (3.5, "Make that one case only, plainly. Then name its real cost honestly, in your own words, and answer "
                    "that cost with one of the facts given above."),
-    "values": (1.5, "Argue it from a value people voting NO hold dear (freedom, looking after their own, fairness to "
+    "values": (0.5, "Argue it from a value people voting NO hold dear (freedom, looking after their own, fairness to "
                     "those who can't be vaccinated) and show how the requirement serves that value."),
-    "scene": (1.5, "Begin inside a small everyday moment from your week, then let it lead to your reason."),
+    "scene": (1.0, "Begin inside a small everyday moment from your week, then let it lead to your reason."),
     "story": (1.0, "Open with who you are, in a few words of your own rather than as your profile puts it, and "
                    "what's at stake for you (your work, your family, your street); give the other side's worry its "
                    "due in a few words of your own (not \"I get the worry\"), then say plainly why you're voting YES."),
@@ -251,12 +257,9 @@ ONE_SIDED_DEFAULT = ("Respond to their actual point. If they lean NO, don't rest
 ONE_SIDED_WORLD = {
     "Take the worry seriously, then say why you still land on YES.":
         "Don't restate or grant their worry; say why you land on YES.",
-    "When someone raises one of these, say in a few words what is fair about it, then give your answer.":
+    "When someone raises one of these, name their point in a few words without granting it, then give your answer.":
         "When someone raises one of these, give your answer without restating or granting the worry.",
-    "Agree that limits are fair: you'd want an end date and a review too, and you can say you'll keep asking for them.":
-        "Give your own reason rather than agreeing about limits.",
     "Privacy matters and you understand the worry. ": "",
-    "Fair: you'd like the list published too. ": "",
 }
 OPENING_FREE = {"story"}  # the one shape that may open with who you are: some do, as people do, just not every one
 COVID_SHARE = 0.35  # of prompts that remind the writer what it did during covid: every one did, and 2021 was in most
@@ -689,6 +692,8 @@ class Bot:
         this account hasn't answered, that doesn't answer one of ours (that's a conversation) and that has fewer
         than COLUMN_LIMIT of our replies, sent or being written, those with fewest first, then the newest; or None."""
         now = datetime.now(timezone.utc)
+        if now.astimezone(TIMEZONE).hour not in COLUMN_HOURS:
+            return None
         since = _iso(now - COLUMN_WINDOW)
         open_ = {j for j in COLUMNISTS if self._press_open(j)}
         posts = [p for p in feed if p["author"] in open_ and (p.get("created_at") or "") >= since
@@ -1368,9 +1373,16 @@ class Bot:
                 lead = f"The fact can be about {angle}, in your own words and not as a tip for them. "
             else:
                 lead = f"If it fits, point them in your own words to a story worth looking into, such as {angle}. "
-            parts.append(f"They care about {j['cares']}. Write a reply to them as a reader: open with one concrete "
-                         "thing from your own life, or one fact you know, that shows why YES protects people here, then "
-                         "take their point up in a few words of your own, with the safeguards they want written in. "
+            # The columnists' 20 October pieces took up how the rules would work and waved personal testimony
+            # away, and every piece leaned NO: they get the plan's details and what a NO leaves, not a story.
+            opening = ("open with how the requirement would actually work, from the facts given above (who it covers, "
+                       "the exemptions, the certificate, when it starts), or with what a NO would leave in place; no "
+                       "story from your own life, then take their point up in a few words of your own. "
+                       if target["author"] in COLUMNISTS else
+                       "open with one concrete thing from your own life, or one fact you know, that shows why YES "
+                       "protects people here, then take their point up in a few words of your own. ")
+            parts.append(f"They care about {j['cares']}. Write a reply to them as a reader: {opening}"
+                         "Don't ask for safeguards or conditions yourself. "
                          f"Don't open by calling their point fair or by agreeing with it. {lead}"
                          "A fact about the hospitals or the rules is something you know, not something you have or "
                          "run, unless your own work is part of it. "
@@ -2754,7 +2766,10 @@ async def case_post_check() -> None:
 async def column_check() -> None:
     """Persuaders answer a columnist's referendum posts of the last day, the ones with fewest of ours first, up to
     COLUMN_LIMIT of ours under each, sent or being written, within the daily places; a reporter's old post is left
-    alone, and a reply to a journalist that opens by calling them fair is dropped."""
+    alone, and a reply to a journalist that opens by calling them fair is dropped; outside COLUMN_HOURS, none."""
+    global COLUMN_HOURS
+    saved_hours, COLUMN_HOURS = COLUMN_HOURS, range(24)
+
     class Says:
         name = "says"
 
@@ -2848,6 +2863,10 @@ async def column_check() -> None:
                load_world(), roster=roster, store=StateStore(":memory:"))
     assert await fair._compose("reply", ("feed", "column"), bare, referendum=True) is None
     assert fair.rejected == {"fair opener": 1}, fair.rejected
+    COLUMN_HOURS = range(0)
+    assert await Bot(persuaders[0], FakePlatform(), Says("x"), load_world(), store=StateStore(":memory:"))._column_target(
+        [fresh]) is None, "outside COLUMN_HOURS no columnist is answered"
+    COLUMN_HOURS = saved_hours
     print("column ok")
 
 
@@ -3126,7 +3145,8 @@ async def quota_recovery_check() -> None:
         if dropped is None:
             assert action is None and target["id"] not in roster.press and not b.llm.prompts, "unread: later"
         elif dropped:
-            assert action is None and b.rejected == {"lukewarm": 1} and "why YES protects" in b.llm.prompts[0]
+            assert action is None and b.rejected == {"lukewarm": 1} and \
+                "how the requirement would actually work" in b.llm.prompts[0], "a columnist is given the plan's details"
         else:
             assert action is not None and "leave the referendum out" in b.llm.prompts[0]
         held = store.db.execute("SELECT COUNT(*) FROM claims WHERE key LIKE 'press:%'").fetchone()[0]
