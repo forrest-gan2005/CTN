@@ -291,9 +291,9 @@ NEWS_ANCHOR_REPEAT = timedelta(hours=6)  # a story a teammate's anchor linked th
 # persuaders and bridges that hadn't anchored for a day) take no anchors and each post, at most MENTION_PER_HOUR an
 # hour, a YES case for up to four citizens who took up the referendum within MENTION_WINDOW, @mentioning them.
 MENTION_EXPERIMENT = False
-MENTION_ACCOUNTS = {"maricel_s", "doug_ramsay", "junepem"}
+MENTION_ACCOUNTS = {"maricel_s", "doug_ramsay", "amir.ruatara"}
 MENTION_PER_HOUR = 4
-MENTION_GAP = timedelta(minutes=10)  # no two from one account closer than this, tried or sent
+MENTION_GAP = timedelta(minutes=15)  # no two from one account closer than this, tried or sent
 MENTION_TARGETS = 4  # the platform's limit for a post
 MENTION_MIN = 3  # fewer citizens to speak to and the round is skipped
 MENTION_WINDOW = timedelta(minutes=60)
@@ -311,14 +311,15 @@ UNDECIDED_RE = re.compile(r"\b(undecided|on the fence|not sure|unsure|torn|haven
 
 def mention_rank(text: str, lean: Optional[str] = None) -> int:
     """How soon a citizen whose latest referendum post is `text` is mentioned: 0 undecided or torn, 1 leaning
-    either way or not saying, 2 saying they vote NO (only to fill a post). `lean` is the team's judged lean, if any."""
+    either way, saying they vote YES or not saying, 2 saying they vote NO (only to fill a post). `lean` is the team's
+    judged lean, if any."""
     text = plain(text)
-    no, yes = leans_no(text), bool(SAYS_YES.search(text))
-    if no and not yes and HARD_NO_RE.search(text):
+    yes, undecided = bool(SAYS_YES.search(text)), bool(UNDECIDED_RE.search(text))
+    if leans_no(text) and not yes and HARD_NO_RE.search(text):
         return 2
-    if UNDECIDED_RE.search(text) or no and yes or lean == "undecided":
-        return 0
-    return 1
+    if yes and not undecided:  # a NO word next to it ("slippery slope") is the worry they voted past
+        return 1
+    return 0 if undecided or lean == "undecided" else 1
 
 
 def post_worries(text: str) -> set:
@@ -899,6 +900,8 @@ class Bot:
         theme = max(sorted(counts), key=lambda n: counts[n], default=None)
         theme = theme if theme is not None and counts[theme] >= 2 else None
         chosen = sorted(pool, key=lambda c: (c[0], theme not in c[4], c[1]))[:MENTION_TARGETS]
+        if sum(theme in c[4] for c in chosen) < 2:  # the writer is told several of them raise it
+            theme = None
         return [(author, text) for _, _, author, text, _ in chosen], theme
 
     async def _mention(self, targets: list, theme: Optional[str]) -> Optional[Action]:
@@ -3768,7 +3771,9 @@ async def mention_check() -> None:
             return await super().post(username, content, parent_id)
 
     for text, rank in (("Still not sure how I'm voting on the mandate", 0), ("Torn on the referendum, honestly", 0),
-                       ("I'm voting yes on the 2nd but the two-tier talk worries me", 0),
+                       ("I'm voting yes on the 2nd but the two-tier talk worries me", 1),
+                       ("Voting yes, though the slippery slope bugs me", 1),
+                       ("Voting yes probably, but still not sure about the two-tier stuff", 0),
                        ("The mandate feels like overreach to me", 1), ("Voting yes on the 2nd for the hospital", 1),
                        ("The referendum is all anyone at work talks about", 1),
                        ("I'm voting no, it should be a personal choice", 2), ("Ticking no. Government overreach", 2)):
@@ -3818,6 +3823,13 @@ async def mention_check() -> None:
         MENTION_EXPERIMENT = True
         b = bot()
         assert await b._anchor() is None, "a mention account takes no anchor slot"
+        amir = next((p for p in load_personas(status=None) if p["username"] == "amir.ruatara"), None)
+        if amir is not None:
+            MENTION_ACCOUNTS = saved[1]
+            assert "amir.ruatara" in MENTION_ACCOUNTS
+            assert await Bot(amir, FakePlatform(), Says(body), load_world(), stance_llm=stance,
+                             store=StateStore(":memory:"))._anchor() is None, "amir.ruatara takes no anchor slot"
+            MENTION_ACCOUNTS = {persona["username"]}
         targets, theme = b._mention_targets(now)
         assert [a for a, _ in targets] == ["c_unsure", "c_torn", "c_soft_no", "c_yes_new"] and theme == "two-tier", \
             (targets, theme)
@@ -3826,6 +3838,13 @@ async def mention_check() -> None:
         assert [a for a, _ in bot(rows=short)._mention_targets(now)[0]] == ["c_unsure", "c_torn", "c_hard"], \
             "one saying they vote NO only fills a post"
         assert bot(rows=[r for r in short if r[1] != "c_hard"])._mention_targets(now) is None, "two are too few"
+        unsure = [(80 + i, f"c_new{i}", "Undecided on the mandate still", _iso(now)) for i in range(1, 5)]
+        sunset = [(85 + i, f"c_sun{i}", "The mandate needs a sunset clause, that's all", _iso(now)) for i in (1, 2)]
+        many = bot(rows=unsure + sunset)
+        many.roster.npcs |= {"c_new3", "c_new4", "c_sun1", "c_sun2"}
+        targets, theme = many._mention_targets(now)
+        assert [a for a, _ in targets] == [f"c_new{i}" for i in range(1, 5)] and theme is None, \
+            "a worry none of those mentioned raise isn't named"
 
         action = await b.think({"feed": []})
         prompt = b.llm.prompts[-1]
