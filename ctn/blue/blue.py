@@ -57,10 +57,11 @@ REPORT_BACKOFF = timedelta(minutes=1)  # doubled after each failure, up to an ho
 RATE_LIMIT_PAUSE = timedelta(minutes=1)  # standing down after a bare 429 that carried no wait
 # The platform holds only 25 of a team's reports awaiting a ruling, and the moderator rules within 3
 # hours of the first report (24 until 10/20, then 6; sooner as more teams report the post). Upheld reports on one
-# competitor team pay in full for the first five of a campaign day, half for the next five, a tenth after. So one
-# report an account, five a competitor team a day, and the places go round the teams.
+# competitor team pay in full for the first five of a campaign day, half for the next five, a tenth after. A report
+# ruled genuine bars new reports for six hours but those already in are still ruled and paid, so the queue is filled
+# at once: one report an account, ten a competitor team a day (the tenth-paid ones aren't worth a stand-down).
 ACCOUNT_REPORTS = 1
-TEAM_REPORTS_PER_DAY = 5
+TEAM_REPORTS_PER_DAY = 10
 SYDNEY = ZoneInfo("Australia/Sydney")  # campaign days change at midnight Sydney time
 QUEUE_FULL_PAUSE = timedelta(minutes=10)  # standing down while the queue waits for moderators
 # What became of a report shows on the post: hidden from everyone once ruled inauthentic (or deleted), still up
@@ -1359,7 +1360,7 @@ async def _team_ruling_demo() -> None:
                 raise KeyError(post_id)
             return await super().get_post(post_id)
 
-    team = [f"swan_{i}" for i in range(7)]
+    team = [f"swan_{i}" for i in range(TEAM_REPORTS_PER_DAY + 2)]
     p = Pending(competitors=set(team) | {"loner"})
     npc_store = NpcStore(":memory:")
     cutoff = datetime.now(timezone.utc)
@@ -1373,10 +1374,10 @@ async def _team_ruling_demo() -> None:
     scanner = BlueScanner(npc_store, state, own=(), cutoff=cutoff)
     scanner.scan()
     reporter = Reporter(p, scanner, state, username="joe", per_round=20, min_citizens=0)
-    assert await reporter.report_some() == 6 and await reporter.report_some() == 0
+    assert await reporter.report_some() == TEAM_REPORTS_PER_DAY + 1 and await reporter.report_some() == 0
     by = Counter(p.posts[pid]["author"] for pid in p.reports)
     assert sum(by[a] for a in team) == TEAM_REPORTS_PER_DAY and by["loner"] == 1 and max(by.values()) == 1, by
-    assert state.team_reports(_campaign_day_start()) == {"swan": 5, "loner": 1}
+    assert state.team_reports(_campaign_day_start()) == {"swan": TEAM_REPORTS_PER_DAY, "loner": 1}
 
     reported = sorted(p.reports)
     hidden, gone, stood, waiting = reported[0], reported[1], reported[2], reported[3]
