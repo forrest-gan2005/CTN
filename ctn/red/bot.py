@@ -13,7 +13,8 @@ from ctn.infra.llm import FakeLLM, team_llms
 from ctn.infra.news import SITES
 from ctn.infra.state import StateStore
 from ctn.red.rhythm import UniformPacer
-from ctn.text.content import load_journalists, load_personas, load_vaccine_angles, load_world, without_arguments
+from ctn.text.content import (WORDING, load_journalists, load_personas, load_vaccine_angles, load_world,
+                              without_arguments)
 from ctn.text.gifs import GIF_PROMPT, GIF_SHARE, GIF_WORD_RE, GIPHY_URL_RE, GifPool, split_gif, without_gifs
 from ctn.text.guard import (EMOJI_RE, LINK_RE, about_referendum, copies, fresh_phrases, judge_stance, leans_no,
                             looks_like_probe, output_problem, phrases, plain, wrap_external)
@@ -87,7 +88,22 @@ LINE_BRIEF = {
                    "with a life beyond it, never a campaigner."),
     "amplifier": "You are voting YES in the referendum ({why}), but it isn't what you mostly post about.",
 }
-LEAN_GUIDE = {
+# Two wordings, picked by content.WORDING: "granted" (through 21 October 17:50) and "exp3" (since).
+LEAN_GUIDE_GRANTED = {
+    "no": ("They seem to lean NO. Don't argue or lecture: show in your own words that you understand the worry they "
+           "actually raised, share a short bit of your own story or ask them a genuine question about theirs, and give "
+           "your own reason for YES. Answer their specific reason, not a generic one, and leave the choice with them."),
+    "undecided": ("They seem undecided. Give one concrete reason from your own life that speaks to what they care "
+                  "about: the benefit to them first, then to everyone."),
+    "yes": ("They lean YES already. Agree briefly in your own words and, if it fits, say in your own way that you'll "
+            "be voting too."),
+    "team": ("They're on your side. Add something of your own they didn't say, so people reading see more than one "
+             "voice; don't just agree, don't repeat their words, and don't open with their name or your own. One or "
+             "two short sentences, like a comment under a neighbour's post. Leave out what happened to you in 2021, "
+             "and don't grant a NO worry here (a pile of replies that each grant one reads as doubt; saying a limit is "
+             "worth asking for is fine), and never claim the rules come with an end date."),
+}
+LEAN_GUIDE_EXP3 = {
     "no": ("They seem to lean NO. Don't argue or lecture, and don't grant their condition or offer one of your own. "
            "Name the reason they gave in a few words, then answer that reason: what a NO would rule out, or one "
            "fact given above, or your own reason for YES. Leave the choice with them."),
@@ -102,6 +118,7 @@ LEAN_GUIDE = {
              "and don't grant a NO worry or ask for a limit here (a pile of replies that each add a condition reads as "
              "doubt), and never claim the rules come with an end date."),
 }
+LEAN_GUIDE = LEAN_GUIDE_EXP3 if WORDING == "exp3" else LEAN_GUIDE_GRANTED
 # Told only to add "a short story or another reason", three in five teammates' replies under an anchor went back to
 # 2021 and one in seven opened with its writer's name: what each adds is drawn from these instead, by weight.
 TEAM_SHAPES = (
@@ -110,8 +127,10 @@ TEAM_SHAPES = (
     ("Back them up with one of the facts given above, in your own words.", 1.0),
     ("A small moment from your own week that shows why you're with them on YES.", 1.5),
 )
-DEFAULT_GUIDE = ("Respond to their actual point. If they lean NO, name it in a few words without granting it, then give "
-                 "your own reason for voting YES.")
+DEFAULT_GUIDE = (("Respond to their actual point. If they lean NO, name it in a few words without granting it, then "
+                  "give your own reason for voting YES.") if WORDING == "exp3" else
+                 ("Respond to their actual point. If they lean NO, acknowledge their worry in a few words, then give "
+                  "your own reason for voting YES."))
 NPC_REPLY_PREF = 0.8  # how strongly reply targeting prefers citizens over unknown accounts
 INBOX_TTL = timedelta(hours=12)  # answering a much older reply looks odd
 # A four-word run two teammates had used in a week sank 294 drafts in the three hours to 23:00 on 20 October, against
@@ -189,7 +208,9 @@ ANCHOR_LINES = {"persuade", "bridge"}
 # setting's facts, where "refute" answers the commonest NO worry. Each is an instruction, not
 # a sentence to copy: a phrase in it the writer echoes would be refused once two teammates had used it, and one
 # from the setting as a prompt leak.
-# Weights from citizens' replies to 20-21 October anchors: plain drew 46% agreement, values 40% pushback.
+# exp3 weights from citizens' replies to 20-21 October anchors: plain drew 46% agreement, values 40% pushback.
+SHAPE_WEIGHTS = ({"refute": 2.0, "plain": 3.5, "values": 0.5, "scene": 1.0, "story": 1.0} if WORDING == "exp3" else
+                 {"refute": 2.0, "plain": 2.0, "values": 1.5, "scene": 1.5, "story": 1.0})
 CASE_SHAPES = {
     "refute": (2.0, "Name the worry people voting NO raise most, fairly and in a few words, then answer it with one "
                     "concrete reason."),
@@ -202,6 +223,7 @@ CASE_SHAPES = {
                    "what's at stake for you (your work, your family, your street); give the other side's worry its "
                    "due in a few words of your own (not \"I get the worry\"), then say plainly why you're voting YES."),
 }
+CASE_SHAPES = {shape: (SHAPE_WEIGHTS[shape], guide) for shape, (_, guide) in CASE_SHAPES.items()}
 CASE_OPENING = ("Don't open by introducing yourself (\"I'm ...\", \"... here\", \"As a ...\") or with anyone's "
                 "name.")
 # A post on the referendum that also hedges about the vaccine itself ("how long protection lasts is still open")
@@ -262,6 +284,15 @@ ONE_SIDED_WORLD = {
     "When someone raises one of these, name their point in a few words without granting it, then give your answer.":
         "When someone raises one of these, give your answer without restating or granting the worry.",
     "Privacy matters and you understand the worry. ": "",
+} if WORDING == "exp3" else {
+    "Take the worry seriously, then say why you still land on YES.":
+        "Don't restate or grant their worry; say why you land on YES.",
+    "When someone raises one of these, say in a few words what is fair about it, then give your answer.":
+        "When someone raises one of these, give your answer without restating or granting the worry.",
+    "Agree that limits are fair: you'd want an end date and a review too, and you can say you'll keep asking for them.":
+        "Give your own reason rather than agreeing about limits.",
+    "Privacy matters and you understand the worry. ": "",
+    "Fair: you'd like the list published too. ": "",
 }
 OPENING_FREE = {"story"}  # the one shape that may open with who you are: some do, as people do, just not every one
 COVID_SHARE = 0.35  # of prompts that remind the writer what it did during covid: every one did, and 2021 was in most

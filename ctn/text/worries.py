@@ -4,6 +4,7 @@ import re
 from collections import Counter
 from typing import Iterable
 
+from ctn.text.content import WORDING
 from ctn.text.guard import leans_no, plain
 
 # Each worry arguments.md answers: a short label in plain words (never its quote: arguments.md is in the system
@@ -22,9 +23,9 @@ WORRIES = {
     "too new": ("that the vaccine is too new", r"too new|rushed|long[- ]term|side effects?|untested"),
     "choice": ("that it should be a personal choice", r"personal choice|my body|\bchoice\b|coerc"),
 }
-# arguments.md has no answer to this one beyond what is already set, and a post built on it reads as doubt: it is
-# never the one a post is told to answer.
-CONCEDED = {"which places"}
+# Worries the arguments answer only by agreeing (granted: limits are fair, the list should be published; exp3: the list
+# alone, with nothing set to say): a post built on one reads as doubt, so it is never the one a post is told to answer.
+CONCEDED = {"which places"} if WORDING == "exp3" else {"temporary", "which places"}
 PATTERNS = {name: re.compile(rx, re.IGNORECASE) for name, (_, rx) in WORRIES.items()}
 # Words like "overreach" or "two-tier" make leans_no say NO by themselves, so a YES post granting the worry counted.
 SAYS_YES = re.compile(r"\b(vot(e|ing)|tick(ing)?|say(ing)?)\s+yes\b|\byes\s+(from me|vote)\b", re.IGNORECASE)
@@ -79,7 +80,8 @@ if __name__ == "__main__":
           "Vote no. Without an end date this is forever, and it's permanent.",
           "I'm voting no, it should be a personal choice."]
     yes = ["I'm voting YES, though I get the fear of a two-tier island."] * 5
-    assert [name for name, _ in top_worries(no + yes)] == ["id card", "temporary"], top_worries(no + yes)
+    handed = ["id card", "temporary"] if "temporary" not in CONCEDED else ["id card"]
+    assert [name for name, _ in top_worries(no + yes)] == handed, top_worries(no + yes)
     places = ["Voting no, they haven't even said which places."] * 3
     assert "which places" not in dict(top_worries(no + places, at_least=1)), "a worry with no answer is never handed out"
     assert top_worries(yes) == [], "a YES post's mention of a worry isn't one raised"
