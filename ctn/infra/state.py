@@ -306,12 +306,17 @@ class StateStore:
             f"UNION ALL SELECT sent_at, content FROM writes WHERE sent_at >= ? AND status != 'not_sent' AND {gif}",
             (since, since)).fetchall()
 
-    def replies_to(self, author: str, since: str) -> int:
-        """How many replies the whole team has sent `author` since UTC ISO time `since`, leaving out the desk's."""
+    def replies_to(self, author: str, since: str, exclude: str = "") -> int:
+        """How many replies the whole team (but `exclude`) has sent `author` since UTC ISO time `since`, leaving out
+        the desk's."""
         return self.db.execute(
-            "SELECT COUNT(*) FROM history WHERE type = 'reply' AND target_author = ? AND ts >= ?" + NOT_DESK,
-            (author, since),
+            "SELECT COUNT(*) FROM history WHERE type = 'reply' AND target_author = ? AND ts >= ? AND username != ?"
+            + NOT_DESK, (author, since, exclude),
         ).fetchone()[0]
+
+    def claimant(self, key: str) -> Optional[str]:
+        row = self.db.execute("SELECT username FROM claims WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
 
     def answered(self, made_id: int, author: str) -> bool:
         """Whether our post `made_id` was itself a reply to `author`: their reply to it carries a conversation on."""

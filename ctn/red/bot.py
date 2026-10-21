@@ -18,7 +18,7 @@ from ctn.text.gifs import GIF_PROMPT, GIF_SHARE, GIF_WORD_RE, GIPHY_URL_RE, GifP
 from ctn.text.guard import (EMOJI_RE, LINK_RE, about_referendum, copies, fresh_phrases, judge_stance, leans_no,
                             looks_like_probe, output_problem, phrases, plain, wrap_external)
 from ctn.text.semantic import TWIN
-from ctn.text.worries import CONCEDED, PATTERNS as WORRY_PATTERNS, SAYS_YES, WORRIES
+from ctn.text.worries import CONCEDED, PATTERNS as WORRY_PATTERNS, SAYS_YES, WORRIES, says_yes, yes_but
 
 log = logging.getLogger("bot")
 
@@ -388,6 +388,51 @@ SIBLINGS_SHOWN = BOOST_LIMITS["reply"]  # a writer must see every reply its draf
 # broadcast doesn't (Kalla & Broockman 2020; Hackenburg et al., Science 2025), and an RLHF model tends to come
 # round to whoever addresses it (Sharma et al., ICLR 2024), so more replies go to the citizens themselves.
 TEAM_REPLY_PROB = 0.45
+# Dialogue experiment, from 21 October. Since experiment 3 went up, four hours brought no change of mind toward YES
+# while "neither" rose to 39-55 an hour; each hour 30-57 of our replies went to teammates' anchors, 8-20 to NO-leaning
+# and undecided citizens and 1-8 to YES-leaning ones. While DIALOGUE_MODE is on:
+# - a reply goes first to a whitelisted citizen who answered us and leans NO, is undecided or says "yes, but", then to
+#   undecided and soft-NO citizens' referendum posts, then to "yes but" ones (DIALOGUE_ORDER); a hard NO after those;
+#   none to a citizen a teammate @mentioned within MENTION_REPEAT (mention posts work the same pool);
+# - DIALOGUE_ACCOUNTS take no anchors and lift no anchor with a reply or a repost: every step they answer citizens
+#   first, and any whitelisted citizen who answers them is answered back;
+# - one of our accounts talks with a citizen at a time: no reply to a citizen another account replied to within
+#   DIALOGUE_GAP, and one account per citizen per DIALOGUE_GAP slot, held from the pick;
+# - a reply to a NO, undecided or "yes but" citizen that opens by granting their point is drafted once more.
+# Anchor lifts aren't cut by default: the lane ran about 137 writes an hour of its 175, and citizen replies go ahead of
+# lifts in it, so lifts give way only when it fills. DIALOGUE_LIFT_SHARE scales an anchor's reply places and
+# TEAM_REPLY_PROB if they must be cut (0.4 was the first proposal). Each reply's angle ends " dialogue:<bucket>".
+DIALOGUE_MODE = False
+DIALOGUE_LIFT_SHARE = 1.0
+# About 19 citizens take the referendum up an hour (38 posts), too few for more: the clean persuaders and bridges (no
+# hidden post, no account report, not MENTION_ACCOUNTS) with the most replies to citizens and conversations by
+# 21 October 12:00Z, two of each line.
+DIALOGUE_ACCOUNTS = {"maya_t", "priya_n", "maliat30", "tuiyat"}
+DIALOGUE_ORDER = ("undecided", "soft-no", "yes-but")
+CONVERSE_CLASSES = {"undecided", "soft-no", "yes-but", "unknown"}  # a conversation worth answering before the feed
+DIALOGUE_WINDOW = timedelta(minutes=60)  # citizens' referendum posts this recent are answered
+DIALOGUE_GAP = timedelta(hours=1)
+CLASS_LEAN = {"hard-no": "no", "soft-no": "no", "undecided": "undecided", "yes-but": "yes-but", "yes": "yes"}
+DOUBT_RE = re.compile(r"\b(probably|maybe|might|leaning|unless|for now|at the moment|could be (convinced|persuaded)|"
+                      r"change my mind|open to)\b", re.IGNORECASE)
+GRANTS_OPENER_RE = re.compile(r"\b(fair (point|enough|worry)|i (get|hear|understand) (it|you|that)|you'?re right|"
+                              r"good point|that'?s fair|totally|i agree)\b", re.IGNORECASE)
+SENTENCE_END_RE = re.compile(r"(?<=[.!?…])\s+|\n")
+DIALOGUE_GUIDE = {
+    "no": ("They seem to lean NO. Don't argue or lecture. Start from your own reason for YES or from what a NO would "
+           "rule out, and answer their worry in one direction only: never agree with it first, don't restate it, and "
+           "never grant their condition or offer one of your own. Leave the choice with them."),
+    "undecided": ("They seem undecided. Start from your own reason, one concrete thing from your own life that speaks "
+                  "to what they care about, or from what a NO would rule out. Answer any worry they raise in one "
+                  "direction only and never agree with it first. Don't bring up end dates, reviews or which venues "
+                  "count yourself."),
+    "yes-but": ("They lean YES but with a worry or a condition. Start from your own reason for YES or from what a NO "
+                "would rule out, and answer the worry in one direction only: never agree with it first, no 'but', and "
+                "never hand them a condition (an end date, a review, a published list). If it fits, say in your own "
+                "way that you'll be voting too."),
+}
+DIALOGUE_REDRAFT = ("The last draft opened by agreeing with them or granting their point. Open instead with your own "
+                    "reason for YES or with what a NO would rule out, and answer them in one direction only.")
 # Heat falls about 3 points an hour from the start, so an anchor's lift counts most in its first minutes (under S52
 # the first one had 12 of its 30 reposts after 20 minutes). While the newest anchor is under RUSH_WINDOW old, an
 # account that still owes it a like, a repost or a reply gives it that first, and looks round again within RUSH_WAIT
@@ -540,6 +585,51 @@ def arm_world(which: str, world: str) -> str:
     return world
 
 
+def dialogue_class(text: str, lean: Optional[str] = None) -> str:
+    """Where a citizen stands by what `text` says, `lean` (the team's judged lean) filling in where it says nothing:
+    'hard-no' (votes NO, no doubt shown), 'yes-but', 'yes', 'undecided', 'soft-no' or 'unknown'."""
+    text = plain(text)
+    yes, undecided = says_yes(text), bool(UNDECIDED_RE.search(text))
+    if not yes and HARD_NO_RE.search(text) and not undecided and not DOUBT_RE.search(text):
+        return "hard-no"
+    if yes or lean == "yes" and not leans_no(text) and not undecided:
+        return "yes-but" if yes_but(text, leans_yes=True) else "yes"
+    if undecided:
+        return "undecided"
+    if leans_no(text) or HARD_NO_RE.search(text) or lean == "no":
+        return "soft-no"
+    return "undecided" if lean == "undecided" else "unknown"
+
+
+def grants_opener(text: str) -> bool:
+    """The first sentence grants the other side's point ("Fair point on cost, but...", "I get it, honestly")."""
+    return bool(GRANTS_OPENER_RE.search(SENTENCE_END_RE.split(plain(text).strip(), 1)[0]))
+
+
+def lift_replies() -> int:
+    """An anchor's reply places for the team."""
+    return round(BOOST_LIMITS["reply"] * DIALOGUE_LIFT_SHARE) if DIALOGUE_MODE else BOOST_LIMITS["reply"]
+
+
+def reply_guide(which: str, lean: str) -> str:
+    return DIALOGUE_GUIDE[lean] if DIALOGUE_MODE and lean in DIALOGUE_GUIDE else arm_guide(which, lean)
+
+
+_dialogue_noted = None
+
+
+def note_dialogue() -> None:
+    """Logs once a process, and on a change, whether the dialogue experiment is steering replies."""
+    global _dialogue_noted
+    if DIALOGUE_MODE != _dialogue_noted:
+        _dialogue_noted = DIALOGUE_MODE
+        if DIALOGUE_MODE:
+            log.info("dialogue mode on: %d reply places an anchor, team reply share %.2f, accounts %s", lift_replies(),
+                     TEAM_REPLY_PROB * DIALOGUE_LIFT_SHARE, sorted(DIALOGUE_ACCOUNTS))
+        else:
+            log.info("dialogue mode off")
+
+
 def _draw_shape(shapes: Optional[dict] = None) -> str:
     """A case post's shape, by weight among `shapes` (by default the current arm's)."""
     shapes = shapes if shapes is not None else arm_shapes(arm())
@@ -604,6 +694,8 @@ class Bot:
         self.case_worry = None  # the citizens' worry it was told to answer, if any
         self.last_shared = None  # the phrase that sank the last draft, if one did
         self.last_long = None  # the length the last draft ran over, if that sank it
+        self.last_grant = False  # whether the last draft was dropped for granting the citizen's point first
+        self.ungrant = False  # the draft being written follows one dropped so
         self.shorter = None  # the length the draft being written is told to keep under
         self.avoid = []  # phrases the draft being written must not use
         self.conv_tries = {}  # reply to us -> times this process picked it to answer
@@ -634,7 +726,11 @@ class Bot:
         """Bait aimed at our model: the regexes first, then the classifier if one is loaded."""
         return looks_like_probe(text) or (self.injection is not None and self.injection.flags(text))
 
+    def _dialogue_account(self) -> bool:
+        return DIALOGUE_MODE and self.username in DIALOGUE_ACCOUNTS
+
     async def think(self, obs: dict) -> Optional[Action]:
+        note_dialogue()
         taken = self.store.claimed(f"post:{p['id']}" for p in obs["feed"])
         if self.injection is not None:
             self.injection.scores([p.get("content") or "" for p in obs["feed"]])  # one batch, then cached
@@ -664,6 +760,11 @@ class Bot:
             if found is not None:
                 press, context, hold = found
                 return await self._reply(press, "feed", "journalist", context=context, hold=hold, referendum=True)
+        citizen_conv = conv is not None and self.roster.classify(conv["author"]) == "npc"
+        if not self.quiet and self._dialogue_account():  # every step, before anything else of the team's
+            found = await self._dialogue_target(conv if citizen_conv else None, candidates)
+            if found is not None:
+                return await self._dialogue_reply(found, conv)
         if not self.quiet and self.line in ANCHOR_LINES:
             anchor = await self._anchor()
             if anchor is not None:
@@ -694,7 +795,6 @@ class Bot:
         # A known citizen who replied to us is always answered: by 20 October only 52 of the 450 replies to our posts
         # came from known citizens, and we had answered barely a third of them. Accounts that joined after the
         # opening are answered as before, when the feed has no citizen to reply to.
-        citizen_conv = conv is not None and self.roster.classify(conv["author"]) == "npc"
         if not self.quiet and citizen_conv:
             kind = "reply"
         if kind in ("like", "repost", "reply") and not candidates and conv is None:
@@ -710,10 +810,15 @@ class Bot:
             return await self._amplify(kind, candidates)
         if kind == "follow":
             return self._follow()
-        if kind == "reply" and not citizen_conv and random.random() < TEAM_REPLY_PROB:
+        share = DIALOGUE_LIFT_SHARE if DIALOGUE_MODE else 1.0
+        if kind == "reply" and not citizen_conv and random.random() < TEAM_REPLY_PROB * share:
             found = self._team_reply_target()
             if found is not None:
                 return await self._reply(found[0], "feed", "team", hold=found[1], referendum=True, claim=False)
+        if kind == "reply" and DIALOGUE_MODE and not self._dialogue_account():  # those looked at the start
+            found = await self._dialogue_target(conv if citizen_conv else None, candidates)
+            if found is not None:
+                return await self._dialogue_reply(found, conv)
         if kind == "reply":
             if citizen_conv:
                 target, route = conv, "conversation"
@@ -934,6 +1039,72 @@ class Bot:
                  theme or "none", [mention_rank(t, self.roster.leans.get(h, (None,))[0]) for h, t in targets])
         return action
 
+    def _dialogue_citizen(self, author: str) -> bool:
+        """A whitelisted citizen the dialogue buckets may talk with: the papers and journalists have routes of their
+        own."""
+        return (self.roster.classify(author) == "npc" and author not in NEWS_OUTLETS and author not in JOURNALISTS
+                and author not in self._rivals())
+
+    def _dialogue_place(self, author: str, now: datetime) -> Optional[str]:
+        """This account's turn to talk with `author`: the key of the DIALOGUE_GAP slot, newly taken, or "" when it
+        held it already; None while a teammate has the slot or replied to them within DIALOGUE_GAP."""
+        if self.store.replies_to(author, _iso(now - DIALOGUE_GAP), exclude=self.username):
+            return None
+        key = f"talk:{author}:{int(now.timestamp() // DIALOGUE_GAP.total_seconds())}"
+        if self.store.claim(key, self.username):
+            return key
+        return "" if self.store.claimant(key) == self.username else None
+
+    async def _dialogue_target(self, conv: Optional[dict], candidates: list) -> Optional[tuple]:
+        """(post, bucket, class, place) for the next citizen to talk with under DIALOGUE_MODE, or None: `conv`, a
+        whitelisted citizen's reply to us, if they lean NO, are undecided or say "yes, but" (any, for one of
+        DIALOGUE_ACCOUNTS); then whitelisted citizens' referendum posts of the last DIALOGUE_WINDOW by DIALOGUE_ORDER,
+        newest first, none from a citizen a teammate @mentioned within MENTION_REPEAT. `place` as _dialogue_place."""
+        now = datetime.now(timezone.utc)
+        if conv is not None and self._dialogue_citizen(conv["author"]):
+            text = conv.get("content") or ""
+            cls = dialogue_class(text, await self._lean(conv["author"], text))
+            if cls in CONVERSE_CLASSES or self._dialogue_account():
+                place = self._dialogue_place(conv["author"], now)
+                if place is not None:
+                    return conv, "conversation", cls, place
+        posts = {p["id"]: p for p in candidates}
+        if self.citizens is not None:  # the feed holds only the newest thirty
+            rows = [r for r in self.citizens(now - DIALOGUE_WINDOW) if r[0] not in posts and r[0] not in self.seen]
+            taken = self.store.claimed(f"post:{r[0]}" for r in rows)
+            for post_id, author, content, created_at in rows:
+                if f"post:{post_id}" not in taken and not self._probe(content or ""):
+                    posts[post_id] = {"id": post_id, "author": author, "content": content, "created_at": created_at,
+                                      "parent_id": None}
+        mentioned = {h.lower() for text in self.store.mention_texts(_iso(now - MENTION_REPEAT))
+                     for h in MENTION_RE.findall(text)} | self.roster.mentioning
+        pool = [p for p in self._open_targets(list(posts.values())) if self._dialogue_citizen(p["author"])
+                and p["author"].lower() not in mentioned and about_referendum(p.get("content") or "")]
+        ranked, checks = [], 0
+        for p in sorted(pool, key=lambda p: -p["id"]):
+            text = p.get("content") or ""
+            known = self.roster.leans.get(p["author"])
+            fresh = known is not None and now - known[1] < LEAN_TTL
+            cls = dialogue_class(text, known[0] if fresh else None)
+            if cls == "unknown" and not fresh and checks < LEAN_CHECKS:
+                checks += 1
+                cls = dialogue_class(text, await self._lean(p["author"], text))
+            if cls in DIALOGUE_ORDER:
+                ranked.append((DIALOGUE_ORDER.index(cls), -p["id"], p, cls))
+        for _, _, p, cls in sorted(ranked, key=lambda r: r[:2]):
+            place = self._dialogue_place(p["author"], now)
+            if place is not None:
+                return p, cls, cls, place
+        return None
+
+    async def _dialogue_reply(self, found: tuple, conv: Optional[dict]) -> Optional[Action]:
+        post, bucket, cls, place = found
+        if post is conv:
+            self.conv_tries[conv["id"]] = self.conv_tries.get(conv["id"], 0) + 1
+        log.info("%s: dialogue %s reply to %s (#%s, %s)", self.username, bucket, post["author"], post["id"], cls)
+        return await self._reply(post, "conversation" if post is conv else "feed", f"dialogue-{bucket}",
+                                 hold=place or None, dialogue=(bucket, cls))
+
     async def draft(self, target: Optional[dict] = None) -> Optional[Action]:
         """Compose without claiming or publishing: a reply to `target`, or a new post."""
         if target is not None:
@@ -942,10 +1113,11 @@ class Bot:
 
     async def _reply(self, target: dict, source: str, route: str, context: Optional[str] = None,
                      hold: Optional[str] = None, referendum: Optional[bool] = None,
-                     claim: bool = True) -> Optional[Action]:
+                     claim: bool = True, dialogue: Optional[tuple] = None) -> Optional[Action]:
         """`hold` is a quota place taken for this reply, given back unless it is sent; `context` and `referendum`
         what the target answers and whether it takes up the referendum, when already known. With `claim` the post
-        is this account's alone (a teammate's post takes its replies by places instead)."""
+        is this account's alone (a teammate's post takes its replies by places instead). `dialogue` is the
+        (bucket, class) a dialogue pick found."""
         if target["author"] in JOURNALISTS:
             if referendum is None:  # from another route (a journalist answering us): decided as the press route does
                 referendum, context = await self._press_topic(target)
@@ -963,12 +1135,15 @@ class Bot:
             if hold is not None:
                 self.store.release(hold)
             return None
-        action = None
+        action, cls = None, None
         try:
             lean = route if route in ("team", "desk") else "unknown"
             if (route != "desk" and self.roster.classify(target["author"]) == "npc"
                     and target["author"] not in NEWS_OUTLETS):
                 lean = await self._lean(target["author"], target.get("content") or "")
+                if DIALOGUE_MODE:  # what this post says, over the lean judged from their last few
+                    cls = dialogue[1] if dialogue else dialogue_class(target.get("content") or "", lean)
+                    lean = CLASS_LEAN.get(cls, lean)
             action = await self._compose("reply", target=target, topic=(source, lean), context=context,
                                          referendum=referendum)
         finally:
@@ -981,6 +1156,10 @@ class Bot:
         if action is None:
             return None
         action.pick, action.hold = pick, hold
+        if DIALOGUE_MODE:
+            bucket = (dialogue[0] if dialogue else "lift" if route == "team"
+                      else "hard-no" if cls == "hard-no" else "other")
+            action.angle = f"{action.angle or ''} dialogue:{bucket}".strip()
         return action
 
     async def _takes_up_referendum(self, target: dict, lean: Optional[str]) -> bool:
@@ -1041,13 +1220,19 @@ class Bot:
         citizens went for a shared phrase ("tipped me to yes", "the vote on 2")."""
         if referendum is None and target is not None:  # decided once, so a redraft is framed as the first was
             referendum = await self._takes_up_referendum(target, topic[1])
-        avoid, shorter = [], None
+        avoid, shorter, ungrant = [], None, False
         for _ in range(1 + redrafts):
-            self.last_shared, self.last_long, self.avoid, self.shorter = None, None, avoid, shorter
+            self.last_shared, self.last_long, self.last_grant = None, None, False
+            self.avoid, self.shorter, self.ungrant = avoid, shorter, ungrant
             try:
                 action = await self._write(kind, topic, target, context, referendum)
             finally:
-                self.avoid, self.shorter = [], None
+                self.avoid, self.shorter, self.ungrant = [], None, False
+            if self.last_grant:  # drafted again once, told why
+                if ungrant:
+                    return None
+                ungrant = True
+                continue
             if action is not None or self.last_shared is None and self.last_long is None:
                 return action
             if self.last_shared is not None:
@@ -1142,7 +1327,10 @@ class Bot:
         # judge called 7 of the 01:42 anchor's first 20 on 21 October "lukewarm" and they were dropped.
         argue = kind == "reply" and topic[1] != "team" and (referendum and topic[1] != "yes"
                                                             or about_referendum(content))
-        if kind == "reply" and target["author"] in JOURNALISTS and FAIR_OPENER_RE.match(plain(content)):
+        if (DIALOGUE_MODE and kind == "reply" and topic[1] in ("no", "undecided", "yes-but")
+                and self.roster.classify(target["author"]) == "npc" and grants_opener(content)):
+            problem, self.last_grant = "grants opener", True
+        elif kind == "reply" and target["author"] in JOURNALISTS and FAIR_OPENER_RE.match(plain(content)):
             problem = "fair opener"
         else:
             problem = await self._check(content, system,
@@ -1214,7 +1402,7 @@ class Bot:
     async def _anchor(self) -> Optional[Action]:
         """This half-hour's anchor post, if no teammate has written it and this account hasn't anchored lately;
         the place goes back if the draft is dropped or never sent, for a teammate to take."""
-        if MENTION_EXPERIMENT and self.username in MENTION_ACCOUNTS:
+        if MENTION_EXPERIMENT and self.username in MENTION_ACCOUNTS or self._dialogue_account():
             return None
         now = datetime.now(timezone.utc)
         if any(a.topic_kind == "anchor" and datetime.fromisoformat(ts) > now - ANCHOR_REST for ts, a in self.history):
@@ -1265,7 +1453,8 @@ class Bot:
         """(kind, post id): what the anchor in its rush still has a place for and this account hasn't given it,
         nor tried to; replies not from an account gone quiet. Nothing while it is the account's own or under
         BOOST_DELAY old, and nothing for an older anchor then."""
-        order = [k for k in RUSH_ORDER if k != "reply"] if self.quiet else RUSH_ORDER
+        order = ([k for k in RUSH_ORDER if k == "like"] if self._dialogue_account()
+                 else [k for k in RUSH_ORDER if k != "reply"] if self.quiet else RUSH_ORDER)
         now = datetime.now(timezone.utc)
         focus = self._focus(now)
         for _, post_id, content in self._lift_posts(now, RUSH_WINDOW):
@@ -1275,7 +1464,8 @@ class Bot:
                 if (post_id, kind) in self.rushed or kind == "reply" and not content:
                     continue
                 taken = self.store.holders(f"boost:{kind}:{post_id}:")
-                if (self.username not in taken and len(taken) < BOOST_LIMITS[kind]
+                limit = lift_replies() if kind == "reply" else BOOST_LIMITS[kind]
+                if (self.username not in taken and len(taken) < limit
                         and not self.store.acted_on(self.username, kind, post_id)):
                     return kind, post_id
         return None
@@ -1312,13 +1502,15 @@ class Bot:
 
     def _team_reply_target(self, only: Optional[int] = None) -> Optional[tuple]:
         """(post, place) of a teammate's anchor post (post `only`, if given) this account may answer, the place
-        among its BOOST_LIMITS replies taken; or None."""
+        among its lift_replies() taken; or None. None for one of DIALOGUE_ACCOUNTS."""
+        if self._dialogue_account():
+            return None
         for author, post_id, content in self._lift_posts(datetime.now(timezone.utc)):
             if only is not None and post_id != only:
                 continue
             if not content or self.store.acted_on(self.username, "reply", post_id):
                 continue
-            hold = self.store.reserve(f"boost:reply:{post_id}:", self.username, BOOST_LIMITS["reply"])
+            hold = self.store.reserve(f"boost:reply:{post_id}:", self.username, lift_replies())
             if hold is not None:
                 return {"id": post_id, "author": author, "content": LINK_RE.sub("", without_gifs(content)).strip(),
                         "parent_id": None}, hold
@@ -1329,7 +1521,10 @@ class Bot:
         BOOST_LIMITS of ours; the
         place is taken with nothing awaited, so teammates acting at once can't pass the limit. Each kind has its own
         places, one an account: one that answered an anchor may like and repost it too, as people do (live, the
-        first anchor's likes stopped at 20 of 40 once the accounts that had replied or reposted were left)."""
+        first anchor's likes stopped at 20 of 40 once the accounts that had replied or reposted were left). One of
+        DIALOGUE_ACCOUNTS only likes."""
+        if kind != "like" and self._dialogue_account():
+            return None
         for author, post_id, _ in self._lift_posts(datetime.now(timezone.utc)):
             if only is not None and post_id != only or self.store.acted_on(self.username, kind, post_id):
                 continue
@@ -1386,16 +1581,20 @@ class Bot:
                 return Action("follow", line=self.line, target_author=author, target_class="npc")
         return None
 
-    async def _pick_reply_target(self, candidates: list) -> tuple:
-        """(post, route), or (None, None). Only replies to citizens score; prefer them, but still engage unknown
-        (post-start) accounts."""
+    def _open_targets(self, candidates: list) -> list:
+        """The posts among `candidates` whose authors the team may reply to now."""
         now = datetime.now(timezone.utc)
         since, rested = _iso(now - timedelta(hours=24)), _iso(now - CITIZEN_COOLDOWN)
         rivals = self._rivals()
-        open_ = [p for p in candidates if self.store.replies_to(p["author"], since) < MAX_REPLIES_PER_AUTHOR
-                 and not self.store.replies_to(p["author"], rested)  # not pushed by one of us just now
-                 and p["author"] not in JOURNALISTS  # those have their own route, for persuaders and bridges
-                 and p["author"] not in rivals and not self._too_deep(p["id"])]
+        return [p for p in candidates if self.store.replies_to(p["author"], since) < MAX_REPLIES_PER_AUTHOR
+                and not self.store.replies_to(p["author"], rested)  # not pushed by one of us just now
+                and p["author"] not in JOURNALISTS  # those have their own route, for persuaders and bridges
+                and p["author"] not in rivals and not self._too_deep(p["id"])]
+
+    async def _pick_reply_target(self, candidates: list) -> tuple:
+        """(post, route), or (None, None). Only replies to citizens score; prefer them, but still engage unknown
+        (post-start) accounts."""
+        open_ = self._open_targets(candidates)
         topical = [p for p in open_ if about_referendum(p.get("content") or "")]
         if topical and self.line != "amplifier" and random.random() < TOPICAL_REPLY_PROB:
             open_ = topical
@@ -1608,8 +1807,8 @@ class Bot:
             if about_referendum(target.get("content") or "") if referendum is None else referendum:
                 shape = f" {random.choices(*zip(*TEAM_SHAPES))[0]}" if topic[1] == "team" else ""
                 parts.append(
-                    f"{arm_guide(self.writing_arm or arm(), topic[1])}{shape} Never agree that the mandate is unfair and never "
-                    "make their argument for them."
+                    f"{reply_guide(self.writing_arm or arm(), topic[1])}{shape} Never agree that the mandate is unfair "
+                    "and never make their argument for them."
                 )
             else:
                 parts.append("It isn't about the referendum, so just reply like a normal person and leave the "
@@ -1693,6 +1892,8 @@ class Bot:
             parts.append(f"You recently posted these. Do not repeat them or say the same thing again:\n{listed}")
         if self.avoid:
             parts.append("Don't use these words: " + ", ".join(f'"{p}"' for p in self.avoid) + ".")
+        if self.ungrant:
+            parts.append(DIALOGUE_REDRAFT)
         if self.shorter:
             parts.append(f"The last draft ran too long: keep this one well under {self.shorter} characters.")
         worn = self._worn()[0]
@@ -1880,7 +2081,8 @@ class Bot:
                 self._drop(action, f"{shared!r} is already in {SHARED_LIMIT} teammates' posts")
                 return None
             shared = (self._sibling_phrase(action.content, action.post_id)
-                      if action.angle in ("lean:team", "lean:desk") or action.target_author in COLUMNISTS else None)
+                      if (action.angle or "").split(" ")[0] in ("lean:team", "lean:desk")
+                      or action.target_author in COLUMNISTS else None)
             if shared:
                 self._drop(action, f"{shared!r} is already in a teammate's reply to #{action.post_id}")
                 return None
@@ -3917,6 +4119,201 @@ async def mention_check() -> None:
     print("mentions ok")
 
 
+async def dialogue_check() -> None:
+    """DIALOGUE_MODE off changes nothing. On: an anchor's reply places scale by DIALOGUE_LIFT_SHARE; replies go to
+    whitelisted citizens only, a conversation first, then undecided, soft-NO and "yes but" posts, a hard NO after
+    those, none to a citizen a teammate mentioned lately; one account talks with a citizen at a time;
+    DIALOGUE_ACCOUNTS take no anchors and lift none with a reply or a repost, and answer citizens every step; a draft
+    granting a NO, undecided or "yes but" citizen's point first is drafted once more, told why."""
+    class Says:
+        name = "says"
+
+        def __init__(self, *texts: str) -> None:
+            self.texts, self.prompts = list(texts), []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            return self.texts[min(len(self.prompts), len(self.texts)) - 1]
+
+    for text, lean, cls in (("Voting no, end of story, it's a personal choice", None, "hard-no"),
+                            ("Probably voting no, the ID card worries me", None, "soft-no"),
+                            ("The mandate feels like overreach", None, "soft-no"),
+                            ("Not sure how I'm voting on the mandate", "no", "undecided"),
+                            ("I'm voting yes but the ID card worries me", None, "yes-but"),
+                            ("Fine with the mandate as long as it ends", "yes", "yes-but"),
+                            ("Voting yes on the 2nd for my nan", None, "yes"),
+                            ("The mandate vote is soon", "no", "soft-no"),
+                            ("The mandate vote is soon", "undecided", "undecided"),
+                            ("The mandate vote is soon", None, "unknown")):
+        assert dialogue_class(text, lean) == cls, (text, lean, dialogue_class(text, lean))
+    for text, grants in (("Fair point on cost, but the ward filled in a week.", True),
+                         ("I get it, honestly I do. Still yes.", True),
+                         ("That's fair, the list matters.", True),
+                         ("Our ward filled in a week in 2021. I agree it's hard, and I'm voting yes.", False),
+                         ("A NO rules out the requirement for this Assembly; I'm voting yes.", False)):
+        assert grants_opener(text) == grants, text
+
+    now = datetime.now(timezone.utc)
+    personas = load_personas(status=None)
+    persuader = next(p for p in personas if p["line"] == "persuade" and p["username"] not in DIALOGUE_ACCOUNTS
+                     and p["username"] not in MENTION_ACCOUNTS)
+    chatter = next(p for p in personas if p["line"] == "background")  # anchors none, so a step is a reply
+    talker = next(p for p in personas if p["username"] == sorted(DIALOGUE_ACCOUNTS)[0])
+    citizens = {"c_hard", "c_yesbut", "c_soft", "c_und", "c_conv", "c_far", "c_named"}
+    feed = [{"id": 101, "author": "c_hard", "content": "Voting no on the mandate, end of story"},
+            {"id": 102, "author": "c_yesbut", "content": "I'm voting yes but the ID card tracking worries me"},
+            {"id": 103, "author": "c_soft", "content": "The mandate feels like overreach to me"},
+            {"id": 104, "author": "c_und", "content": "Still not sure how I'm voting on the mandate"},
+            {"id": 105, "author": "stranger_1", "content": "Undecided on the mandate, honestly"},
+            {"id": 106, "author": "c_named", "content": "On the fence about the referendum"}]
+    rows = [(90, "c_far", "Torn on the referendum, still reading", _iso(now - timedelta(minutes=20)))]
+
+    def bot(persona: dict, store: StateStore, llm=None) -> Bot:
+        return Bot(persona, FakePlatform(), llm or FakeLLM(0, 0), load_world(), store=store,
+                   roster=Roster(own={persona["username"]}, npcs=citizens),
+                   citizens=lambda since: [r for r in rows if r[3] >= _iso(since)])
+
+    async def chosen(target: dict, source: str, route: str, **kw) -> tuple:
+        return target["author"], route, kw.get("dialogue")
+
+    def anchored(store: StateStore, made_id: int) -> None:
+        store.record("rosa_dives", _iso(now - timedelta(minutes=5)),
+                     Action("post", content="Dive boats sat idle in 2021; I'm voting yes on the mandate.",
+                            topic_kind="anchor", made_id=made_id))
+
+    global DIALOGUE_MODE, DIALOGUE_LIFT_SHARE, ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB, ANCHOR_FALLBACK
+    saved = DIALOGUE_MODE, DIALOGUE_LIFT_SHARE, ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB, ANCHOR_FALLBACK
+    try:
+        ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB, ANCHOR_FALLBACK = {"reply": 1}, 0.0, 0.0, timedelta(0)
+        # Off: places, guides, picks and drafts as before.
+        DIALOGUE_MODE = False
+        assert lift_replies() == BOOST_LIMITS["reply"] and reply_guide("granted", "no") == LEAN_GUIDE["no"]
+        store = StateStore(":memory:")
+        b = bot(chatter, store)
+        b._reply = chosen
+        for _ in range(10):
+            assert not (await b.think({"feed": feed}))[1].startswith("dialogue"), "off: no dialogue picks"
+        off = bot(talker, store)
+        assert await off._anchor() is not None, "off: a dialogue account anchors as ever"
+        anchored(store, 900)
+        assert off._team_reply_target() is not None and off._boost("repost") is not None
+        grant = "Fair point on cost, but my nan's ward filled in a week, so I'm voting yes on the mandate."
+        plain_reply = "My nan's ward filled in a week in 2021, so I'm voting yes on the mandate."
+        target = {"id": 103, "author": "c_soft", "content": "The mandate feels like overreach to me", "parent_id": None}
+        writer = Says(grant, plain_reply)
+        action = await bot(persuader, StateStore(":memory:"), writer)._reply(target, "feed", "lean-hit")
+        assert action.content.startswith("Fair point") and len(writer.prompts) == 1 and action.angle == "lean:no"
+        assert LEAN_GUIDE["no"] in writer.prompts[0]
+
+        # On, lifts: an anchor's reply places scale by DIALOGUE_LIFT_SHARE (none cut by default).
+        DIALOGUE_MODE = True
+        assert lift_replies() == BOOST_LIMITS["reply"]
+        DIALOGUE_LIFT_SHARE = 0.4
+        assert lift_replies() == 10
+        lifters = [p for p in personas if p["line"] == "background"][:lift_replies() + 2]
+        lift = StateStore(":memory:")
+        anchored(lift, 950)
+        got = [bot(p, lift)._team_reply_target() for p in lifters]
+        assert sum(g is not None for g in got) == lift_replies(), "an anchor takes lift_replies() of ours"
+        late = bot(next(p for p in personas if p["line"] == "background" and p not in lifters), lift)
+        assert late._rush() == ("like", 950)
+        late.rushed |= {(950, "like"), (950, "repost")}
+        assert late._rush() is None, "no reply place left in the rush"
+        DIALOGUE_LIFT_SHARE = 1.0
+
+        # On, a dialogue account: no anchor, no lift reply or repost, likes still; citizens first every step.
+        store = StateStore(":memory:")
+        talk = bot(talker, store)
+        assert await talk._anchor() is None, "a dialogue account takes no anchor slot"
+        anchored(store, 960)
+        assert talk._team_reply_target() is None and talk._boost("repost") is None
+        assert talk._rush() == ("like", 960) and talk._boost("like").post_id == 960
+        talk._reply = chosen
+        ACTION_WEIGHTS = {"like": 1}
+        got = await talk.think({"feed": feed})
+        assert got == ("c_named", "dialogue-undecided", ("undecided", "undecided")), got
+
+        # On: the buckets in order, whitelisted citizens only, hard NO left to the usual picks.
+        store = StateStore(":memory:")
+        b = bot(persuader, store)
+        conv = {"id": 200, "author": "c_conv", "content": "hmm, not sure the mandate is worth it", "parent_id": 1}
+        stranger = {"id": 201, "author": "stranger_1", "content": "not sure about the mandate", "parent_id": 1}
+        found = await b._dialogue_target(conv, feed)
+        assert found[:3] == (conv, "conversation", "undecided") and found[3].startswith("talk:c_conv:"), found
+        store.release(found[3])
+        order = []
+        for _ in range(5):
+            found = await b._dialogue_target(stranger, feed)
+            if found is None:
+                break
+            assert found[0]["author"] != "stranger_1"
+            order.append((found[0]["author"], found[1]))
+            store.release(found[3])
+            store.record("mate_1", _iso(now), Action("reply", post_id=found[0]["id"], content="x",
+                                                     target_author=found[0]["author"]))
+        assert order == [("c_named", "undecided"), ("c_und", "undecided"), ("c_far", "undecided"),
+                         ("c_soft", "soft-no"), ("c_yesbut", "yes-but")], order
+        store = StateStore(":memory:")
+        store.record("mate_2", _iso(now - timedelta(hours=3)),
+                     Action("post", content="@c_named @c_far I'm voting yes on the mandate", topic_kind="mention"))
+        for author in ("c_und", "c_soft", "c_yesbut"):
+            store.record("mate_1", _iso(now), Action("reply", post_id=1, content="x", target_author=author))
+        b = bot(chatter, store)
+        assert await b._dialogue_target(None, feed) is None, "mentioned lately, or only a hard NO left"
+        b._reply = chosen
+        ACTION_WEIGHTS = {"reply": 1}
+        picked = await b.think({"feed": feed})
+        assert picked[0] == "c_hard" and not picked[1].startswith("dialogue"), picked
+        hard = {"id": 202, "author": "c_hard", "content": "Voting no on the mandate, end of story", "parent_id": 1}
+        assert await b._dialogue_target(hard, []) is None, "a hard NO answering us waits behind the buckets"
+        assert (await bot(talker, store)._dialogue_target(hard, []))[1] == "conversation", \
+            "a dialogue account answers whoever answers it"
+
+        # On: one account with a citizen at a time.
+        store = StateStore(":memory:")
+        first, second = bot(persuader, store), bot(talker, store)
+        key = first._dialogue_place("c_und", now)
+        assert key and first._dialogue_place("c_und", now) == "" and second._dialogue_place("c_und", now) is None
+        store.release(key)
+        store.record(persuader["username"], _iso(now - timedelta(minutes=30)),
+                     Action("reply", post_id=1, content="x", target_author="c_conv"))
+        assert second._dialogue_place("c_conv", now) is None and first._dialogue_place("c_conv", now) is not None
+        found = await second._dialogue_target(conv, [])
+        assert found[0]["author"] == "c_far", "a teammate is talking with them: the next citizen instead"
+
+        # On: a draft granting the point first is dropped and drafted once more, told why; twice, it goes.
+        for texts, made, drafts in (((grant, plain_reply), True, 2), ((grant, grant, plain_reply), False, 2)):
+            writer = Says(*texts)
+            b = bot(persuader, StateStore(":memory:"), writer)
+            action = await b._reply(target, "feed", "dialogue-soft-no", dialogue=("soft-no", "soft-no"))
+            assert (action is not None) == made and len(writer.prompts) == drafts, (texts, writer.prompts)
+            assert DIALOGUE_GUIDE["no"] in writer.prompts[0] and DIALOGUE_REDRAFT not in writer.prompts[0]
+            assert DIALOGUE_REDRAFT in writer.prompts[1]
+            if made:
+                assert action.angle == "lean:no dialogue:soft-no" and action.content == plain_reply, action
+        writer = Says("Fair point on the ID card, but I'm voting yes on the mandate for my nan's ward.", plain_reply)
+        yesbut = {"id": 102, "author": "c_yesbut", "content": feed[1]["content"], "parent_id": None}
+        action = await bot(persuader, StateStore(":memory:"), writer)._reply(yesbut, "feed", "x")
+        assert action.angle == "lean:yes-but dialogue:other" and DIALOGUE_GUIDE["yes-but"] in writer.prompts[0]
+        assert len(writer.prompts) == 2
+        firm = {"id": 107, "author": "c_named", "content": "Voting yes on the 2nd for my nan", "parent_id": None}
+        writer = Says(grant)
+        action = await bot(persuader, StateStore(":memory:"), writer)._reply(firm, "feed", "x")
+        assert action is not None and len(writer.prompts) == 1, "a firm YES isn't held to it"
+        lift = StateStore(":memory:")
+        anchored(lift, 970)
+        team = bot(persuader, lift, Says("Ferry crews lost a whole season, and that's my reason for yes."))
+        found = team._team_reply_target()
+        action = await team._reply(found[0], "feed", "team", hold=found[1], referendum=True, claim=False)
+        assert action.angle == "lean:team dialogue:lift", action.angle
+    finally:
+        DIALOGUE_MODE, DIALOGUE_LIFT_SHARE, ACTION_WEIGHTS, TEAM_REPLY_PROB, RUSH_PROB, ANCHOR_FALLBACK = saved
+    print("dialogue ok")
+
+
 async def main(real: bool, n_bots: int, seconds: float) -> None:
     llm, judge = team_llms() if real else (FakeLLM(), None)
     p = FakePlatform()
@@ -4025,4 +4422,5 @@ if __name__ == "__main__":
     asyncio.run(quiet_race())
     asyncio.run(notification_durability())
     asyncio.run(mention_check())
+    asyncio.run(dialogue_check())
     asyncio.run(main(args.real, n_bots, args.seconds))

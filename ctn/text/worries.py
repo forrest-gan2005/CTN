@@ -4,7 +4,7 @@ import re
 from collections import Counter
 from typing import Iterable
 
-from ctn.text.guard import leans_no
+from ctn.text.guard import leans_no, plain
 
 # Each worry arguments.md answers: a short label in plain words (never its quote: arguments.md is in the system
 # prompt, and a post repeating eight of its words is dropped as a prompt leak), and the words that mark it.
@@ -28,6 +28,27 @@ CONCEDED = {"which places"}
 PATTERNS = {name: re.compile(rx, re.IGNORECASE) for name, (_, rx) in WORRIES.items()}
 # Words like "overreach" or "two-tier" make leans_no say NO by themselves, so a YES post granting the worry counted.
 SAYS_YES = re.compile(r"\b(vot(e|ing)|tick(ing)?|say(ing)?)\s+yes\b|\byes\s+(from me|vote)\b", re.IGNORECASE)
+YES_ALSO = re.compile(r"\b(i'?m|i am|still) (a |an? )?(firm |soft |solid )?yes\b|\bleaning yes\b", re.IGNORECASE)
+NOT_YES = re.compile(r"\b(not|never|won'?t|wouldn'?t|can'?t|cannot|don'?t)\s+(be\s+)?"
+                     r"(vot(e|ing)|tick(ing)?|say(ing)?)\s+yes\b", re.IGNORECASE)
+# A YES that comes with a worry or a condition: "yes, as long as it ends", "voting yes but the ID card worries me".
+CONDITION_RE = re.compile(r"\bbut\b|\bunless\b|\b(as|so) long as\b|\bonly if\b|\bprovided\b|\bon condition\b|"
+                          r"\bthough\b|\bworr(y|ied|ies|ying)\b|\bconcern(s|ed)?\b|\bnervous\b|\buneasy\b|"
+                          r"\breservations?\b|\bhesita", re.IGNORECASE)
+YES_BUT_WORRIES = ("two-tier", "powers", "temporary", "id card", "which places", "too new")
+
+
+def says_yes(text: str) -> bool:
+    text = plain(text)
+    return bool(SAYS_YES.search(text) or YES_ALSO.search(text)) and not NOT_YES.search(text)
+
+
+def yes_but(text: str, leans_yes: bool = False) -> bool:
+    """Says YES (or is known to lean YES) and names a worry or a condition with it."""
+    text = plain(text)
+    if not (says_yes(text) or leans_yes):
+        return False
+    return bool(CONDITION_RE.search(text)) or any(PATTERNS[name].search(text) for name in YES_BUT_WORRIES)
 
 
 def top_worries(texts: Iterable[str], n: int = 3, at_least: int = 3) -> list:
@@ -57,4 +78,14 @@ if __name__ == "__main__":
     places = ["Voting no, they haven't even said which places."] * 3
     assert "which places" not in dict(top_worries(no + places, at_least=1)), "a worry with no answer is never handed out"
     assert top_worries(yes) == [], "a YES post's mention of a worry isn't one raised"
+    for text, want in (("I'm voting yes but the ID card worries me", True),
+                       ("Yes from me, as long as it ends after the outbreak", True),
+                       ("I'm a yes, though I'd like to see the venue list first", True),
+                       ("Voting yes on the 2nd, my nan is in the ward", False),
+                       ("Not voting yes, it's a two-tier island", False),
+                       ("I won't vote yes unless they add a sunset", False),
+                       ("Voting no, but I get why people want it", False)):
+        assert yes_but(text) == want, text
+    assert yes_but("Fine with it as long as it's temporary", leans_yes=True)
+    assert not says_yes("I'm not voting yes") and says_yes("leaning yes for now")
     print("worries ok")
