@@ -257,7 +257,9 @@
     "examples": [
       "Ferry two hours late again. Half my pepper sat on the wharf in the sun. Love island life but some days.",
       "Our clinic has one nurse. Nearest hospital is a ferry ride away, if the ferry is running. That's why I'm voting yes."
-    ]
+    ],
+    "status": "banned",
+    "replaced_by": "aroha_n"
   },
   {
     "username": "dan_reyes",
@@ -1995,7 +1997,7 @@
     "job": "work as a cleaner at Kingstonia Central Hospital",
     "home": "Kingstonia City",
     "line": "persuade",
-    "status": "reserve",
+    "status": "active",
     "covid": "cleaned the field wards and the corridors lined with beds in 2021, and caught COVID yourself that winter",
     "why_yes": "you saw the corridors full of beds, and you'd rather have a rule early than see that again",
     "style": "straight-talking and warm, no fancy words, sometimes lowercase",
