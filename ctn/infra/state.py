@@ -707,12 +707,15 @@ if __name__ == "__main__":
     assert hist[0][7] == "npc1" and hist[1][5] == "daily" and hist[1][9] == 77 and hist[1][10] == "fake"
     assert s.load_followed("joe") == {"npc1"}
     assert s.replies_to("npc1", "t0") == 2 and s.replies_to("npc1", "t2") == 1
+    assert s.replies_to("npc1", "t0", exclude="joe") == 1 and s.replies_to("npc1", "t0", exclude="rosa") == 1
+    assert s.replies_to("npc1", "t2", exclude="rosa") == 0
 
     assert s.claim("post:5", "joe")
     assert not s.claim("post:5", "rosa")
     assert s.claimed(["post:5", "post:6"]) == {"post:5"}
     s.release("post:5")
     assert s.claim("post:5", "rosa")
+    assert s.claimant("post:5") == "rosa" and s.claimant("post:6") is None
 
     r11, r10 = ({"id": 1, "kind": "reply", "post_id": 11, "actor": "npc1"},
                 {"id": 2, "kind": "reply", "post_id": 10, "actor": "npc2"})

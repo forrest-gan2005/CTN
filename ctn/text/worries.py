@@ -38,9 +38,14 @@ CONDITION_RE = re.compile(r"\bbut\b|\bunless\b|\b(as|so) long as\b|\bonly if\b|\
 YES_BUT_WORRIES = ("two-tier", "powers", "temporary", "id card", "which places", "too new")
 
 
+WRONG_YES = re.compile(r"\b(vot(e|ing)|tick(ing)?|say(ing)?) yes (would be|is|was) (a )?"
+                       r"(mistake|wrong|madness|crazy)\b", re.IGNORECASE)
+
+
 def says_yes(text: str) -> bool:
     text = plain(text)
-    return bool(SAYS_YES.search(text) or YES_ALSO.search(text)) and not NOT_YES.search(text)
+    return (bool(SAYS_YES.search(text) or YES_ALSO.search(text)) and not NOT_YES.search(text)
+            and not WRONG_YES.search(text))
 
 
 def yes_but(text: str, leans_yes: bool = False) -> bool:
@@ -88,4 +93,5 @@ if __name__ == "__main__":
         assert yes_but(text) == want, text
     assert yes_but("Fine with it as long as it's temporary", leans_yes=True)
     assert not says_yes("I'm not voting yes") and says_yes("leaning yes for now")
+    assert not says_yes("Saying yes would be a mistake") and not yes_but("Voting yes is a mistake, but go on")
     print("worries ok")

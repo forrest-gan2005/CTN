@@ -394,8 +394,10 @@ TEAM_REPLY_PROB = 0.45
 # - a reply goes first to a whitelisted citizen who answered us and leans NO, is undecided or says "yes, but", then to
 #   undecided and soft-NO citizens' referendum posts, then to "yes but" ones (DIALOGUE_ORDER); a hard NO after those;
 #   none to a citizen a teammate @mentioned within MENTION_REPEAT (mention posts work the same pool);
-# - DIALOGUE_ACCOUNTS take no anchors and lift no anchor with a reply or a repost: every step they answer citizens
-#   first, and any whitelisted citizen who answers them is answered back;
+# - DIALOGUE_ACCOUNTS take no anchors, lift no anchor with a reply or a repost, and write no press, column or pitch
+#   posts: every step they answer citizens first, any whitelisted citizen who answers them is answered back, and
+#   they reply to no one else;
+# - every reply to a whitelisted citizen, from any route but the papers' and journalists', is paced as below;
 # - one of our accounts talks with a citizen at a time: no reply to a citizen another account replied to within
 #   DIALOGUE_GAP, and one account per citizen per DIALOGUE_GAP slot, held from the pick;
 # - with DIALOGUE_ONE_SIDED on as well, a reply to a NO, undecided or "yes but" citizen takes DIALOGUE_GUIDE, and one
@@ -410,17 +412,20 @@ DIALOGUE_ONE_SIDED = False
 DIALOGUE_LIFT_SHARE = 1.0
 # About 19 citizens take the referendum up an hour (38 posts), too few for more: the clean persuaders and bridges (no
 # hidden post, no account report, not MENTION_ACCOUNTS) with the most replies to citizens and conversations by
-# 21 October 12:00Z, two of each line.
-DIALOGUE_ACCOUNTS = {"maya_t", "priya_n", "maliat30", "tuiyat"}
+# 21 October 12:00Z, two of each line (priya_n, the first, had an anchor on Trending: an exposed account).
+DIALOGUE_ACCOUNTS = {"maya_t", "tama.sutton", "maliat30", "tuiyat"}
 DIALOGUE_ORDER = ("undecided", "soft-no", "yes-but")
 CONVERSE_CLASSES = {"undecided", "soft-no", "yes-but", "unknown"}  # a conversation worth answering before the feed
 DIALOGUE_WINDOW = timedelta(minutes=60)  # citizens' referendum posts this recent are answered
 DIALOGUE_GAP = timedelta(hours=1)
 CLASS_LEAN = {"hard-no": "no", "soft-no": "no", "undecided": "undecided", "yes-but": "yes-but", "yes": "yes"}
+FIRST_NO_RE = re.compile(r"\b(i'?m|i am|i'?ll|i will|i|we'?re|we'?ll|we)\s+(still |definitely |probably |just )?"
+                         r"(vot(e|ing)|tick(ing)?)\s+(no|against)\b|\bno from me\b|"
+                         r"\b(my|our) votes? (is|are|will be) no\b", re.IGNORECASE)
 DOUBT_RE = re.compile(r"\b(probably|maybe|might|leaning|unless|for now|at the moment|could be (convinced|persuaded)|"
                       r"change my mind|open to)\b", re.IGNORECASE)
 GRANTS_OPENER_RE = re.compile(r"\b(fair (point|enough|worry)|i (get|hear|understand) (it|you|that)|you'?re right|"
-                              r"good point|that'?s fair|totally|i agree)\b", re.IGNORECASE)
+                              r"good point|that'?s fair|totally agree|i agree)\b", re.IGNORECASE)
 SENTENCE_END_RE = re.compile(r"(?<=[.!?…])\s+|\n")
 DIALOGUE_GUIDE = {
     "no": ("They seem to lean NO. Don't argue or lecture. Start from your own reason for YES or from what a NO would "
@@ -593,7 +598,7 @@ def dialogue_class(text: str, lean: Optional[str] = None) -> str:
     """Where a citizen stands by what `text` says, `lean` (the team's judged lean) filling in where it says nothing:
     'hard-no' (votes NO, no doubt shown), 'yes-but', 'yes', 'undecided', 'soft-no' or 'unknown'."""
     text = plain(text)
-    yes, undecided = says_yes(text), bool(UNDECIDED_RE.search(text))
+    yes, undecided = says_yes(text) and not FIRST_NO_RE.search(text), bool(UNDECIDED_RE.search(text))
     if not yes and HARD_NO_RE.search(text) and not undecided and not DOUBT_RE.search(text):
         return "hard-no"
     if yes or lean == "yes" and not leans_no(text) and not undecided:
@@ -751,6 +756,14 @@ class Bot:
             and not self._probe(p.get("content") or "")          # competitor bait aimed at our model
         ]
         conv = await self._conversation_target()
+        talker = self._dialogue_account()
+        if DIALOGUE_MODE and conv is not None and (
+                self._dialogue_citizen(conv["author"]) and not self._talk_open(conv["author"])
+                or talker and not self._dialogue_citizen(conv["author"])):
+            conv = None  # a teammate is talking with them, or a dialogue account answers only citizens: not this step
+        if talker:
+            candidates = [p for p in candidates if self._dialogue_citizen(p["author"])]
+        citizen_conv = conv is not None and self.roster.classify(conv["author"]) == "npc"
         if not self.quiet and self.line in DESK_LINES:
             found = await self._desk_target(obs["feed"])
             if found is not None:
@@ -758,7 +771,7 @@ class Bot:
                 self.desk_tries[press["id"]] = self.desk_tries.get(press["id"], 0) + 1
                 return await self._reply(press, "feed", "desk", context=context, hold=hold, referendum=True,
                                          claim=False)
-        if not self.quiet and self.line in PRESS_LINES:
+        if not self.quiet and self.line in PRESS_LINES and not talker:
             found = await self._column_target(obs["feed"])
             if found is not None:
                 press, context, hold = found
@@ -769,8 +782,8 @@ class Bot:
             if found is not None:
                 press, context, hold = found
                 return await self._reply(press, "feed", "journalist", context=context, hold=hold, referendum=True)
-        citizen_conv = conv is not None and self.roster.classify(conv["author"]) == "npc"
-        if not self.quiet and self._dialogue_account():  # every step, before anything else of the team's
+        # A dialogue account, every step, before anchors, mention posts and lifts; it takes no press or column replies.
+        if not self.quiet and talker:
             found = await self._dialogue_target(conv if citizen_conv else None, candidates)
             if found is not None:
                 return await self._dialogue_reply(found, conv)
@@ -824,23 +837,32 @@ class Bot:
             found = self._team_reply_target()
             if found is not None:
                 return await self._reply(found[0], "feed", "team", hold=found[1], referendum=True, claim=False)
-        if kind == "reply" and DIALOGUE_MODE and not self._dialogue_account():  # those looked at the start
+        if kind == "reply" and DIALOGUE_MODE and not talker:  # those looked at the start
             found = await self._dialogue_target(conv if citizen_conv else None, candidates)
             if found is not None:
                 return await self._dialogue_reply(found, conv)
         if kind == "reply":
+            if DIALOGUE_MODE:  # citizens a teammate is talking with are left be
+                candidates = [p for p in candidates
+                              if not self._dialogue_citizen(p["author"]) or self._talk_open(p["author"])]
             if citizen_conv:
                 target, route = conv, "conversation"
             else:  # a citizen in the feed before an account of unknown standing that answered us
                 target, route = await self._pick_reply_target(candidates)
                 if conv is not None and route in (None, "unknown-fallback"):
                     target, route = conv, "conversation"
+            place = None
+            if target is not None and DIALOGUE_MODE and self._dialogue_citizen(target["author"]):
+                place = self._dialogue_place(target["author"], datetime.now(timezone.utc))
+                if place is None:
+                    target = None
             if target is not None:
                 if target is conv:
                     self.conv_tries[conv["id"]] = self.conv_tries.get(conv["id"], 0) + 1
-                return await self._reply(target, "conversation" if target is conv else "feed", route)
+                return await self._reply(target, "conversation" if target is conv else "feed", route,
+                                         hold=place or None)
             # nothing worth replying to; write something instead
-        if not self.quiet and self.line in PRESS_LINES and random.random() < PITCH_PROB:
+        if not self.quiet and self.line in PRESS_LINES and not talker and random.random() < PITCH_PROB:
             place = self._pitch_place()
             if place is not None:  # one draft a step: a pitch that's dropped isn't followed by another post
                 return await self._pitch(place)
@@ -1054,10 +1076,19 @@ class Bot:
         return (self.roster.classify(author) == "npc" and author not in NEWS_OUTLETS and author not in JOURNALISTS
                 and author not in self._rivals())
 
+    def _talk_open(self, author: str, now: Optional[datetime] = None) -> bool:
+        """Whether this account may talk with `author` now: no teammate replied to them within DIALOGUE_GAP, nor
+        holds this DIALOGUE_GAP slot or the last (a reply may wait a quarter of an hour in the write lane)."""
+        now = now or datetime.now(timezone.utc)
+        if self.store.replies_to(author, _iso(now - DIALOGUE_GAP), exclude=self.username):
+            return False
+        slot = int(now.timestamp() // DIALOGUE_GAP.total_seconds())
+        return all(self.store.claimant(f"talk:{author}:{s}") in (None, self.username) for s in (slot - 1, slot))
+
     def _dialogue_place(self, author: str, now: datetime) -> Optional[str]:
         """This account's turn to talk with `author`: the key of the DIALOGUE_GAP slot, newly taken, or "" when it
-        held it already; None while a teammate has the slot or replied to them within DIALOGUE_GAP."""
-        if self.store.replies_to(author, _iso(now - DIALOGUE_GAP), exclude=self.username):
+        held it already; None while _talk_open says no."""
+        if not self._talk_open(author, now):
             return None
         key = f"talk:{author}:{int(now.timestamp() // DIALOGUE_GAP.total_seconds())}"
         if self.store.claim(key, self.username):
@@ -4158,11 +4189,15 @@ async def dialogue_check() -> None:
                             ("Voting yes on the 2nd for my nan", None, "yes"),
                             ("The mandate vote is soon", "no", "soft-no"),
                             ("The mandate vote is soon", "undecided", "undecided"),
-                            ("The mandate vote is soon", None, "unknown")):
+                            ("The mandate vote is soon", None, "unknown"),
+                            ("My neighbour is voting yes but I'm voting no", None, "hard-no"),
+                            ("Saying yes would be a mistake, the mandate is overreach", None, "soft-no")):
         assert dialogue_class(text, lean) == cls, (text, lean, dialogue_class(text, lean))
     for text, grants in (("Fair point on cost, but the ward filled in a week.", True),
                          ("I get it, honestly I do. Still yes.", True),
                          ("That's fair, the list matters.", True),
+                         ("Totally agree, the list matters.", True),
+                         ("Totally fine by me. The ward filled in a week.", False),
                          ("Our ward filled in a week in 2021. I agree it's hard, and I'm voting yes.", False),
                          ("A NO rules out the requirement for this Assembly; I'm voting yes.", False)):
         assert grants_opener(text) == grants, text
@@ -4282,8 +4317,50 @@ async def dialogue_check() -> None:
         assert picked[0] == "c_hard" and not picked[1].startswith("dialogue"), picked
         hard = {"id": 202, "author": "c_hard", "content": "Voting no on the mandate, end of story", "parent_id": 1}
         assert await b._dialogue_target(hard, []) is None, "a hard NO answering us waits behind the buckets"
-        assert (await bot(talker, store)._dialogue_target(hard, []))[1] == "conversation", \
+        assert store.claimant(f"talk:c_hard:{int(now.timestamp() // DIALOGUE_GAP.total_seconds())}") == \
+            chatter["username"], "the usual pick took the citizen's slot"
+        assert (await bot(talker, StateStore(":memory:"))._dialogue_target(hard, []))[1] == "conversation", \
             "a dialogue account answers whoever answers it"
+
+        # On: a dialogue account replies to whitelisted citizens only, on every path, and takes no press route.
+        journalist = sorted(set(JOURNALISTS) - COLUMNISTS)[0]
+        others = [{"id": 301, "author": "stranger_1", "content": "Undecided on the mandate, honestly"},
+                  {"id": 302, "author": "DailyKingstonia", "content": "Referendum: what the mandate means for venues"},
+                  {"id": 303, "author": journalist, "content": "What do readers make of the mandate referendum?"}]
+        store = StateStore(":memory:")
+        talk = bot(talker, store)
+        talk.roster.npcs = citizens | {"DailyKingstonia", journalist}
+        talk.citizens = None  # only what the feed holds
+        talk._reply = chosen
+        platform = talk.platform
+        theirs = await platform.post("stranger_1", "not sure about the mandate")
+        store.ingest_notifications(talk.username, [], [{"post_id": theirs["id"], "actor": "stranger_1"}], _iso(now))
+        for _ in range(5):
+            got = await talk.think({"feed": others})
+            assert not isinstance(got, tuple), ("a dialogue account answered someone else", got)
+        ACTION_WEIGHTS = {"reply": 1}
+        got = await talk.think({"feed": others + [feed[0]]})
+        assert got[0] == "c_hard", ("a hard NO citizen, by the usual picks", got)
+
+        # On: every reply to a citizen is paced, the usual picks and conversations too.
+        store = StateStore(":memory:")
+        slot = int(now.timestamp() // DIALOGUE_GAP.total_seconds())
+        assert store.claim(f"talk:c_hard:{slot - 1}", "mate_1"), "a teammate's reply may still wait in the lane"
+        b = bot(chatter, store)
+        b._reply, b.citizens = chosen, None
+        assert b._dialogue_place("c_hard", now) is None
+        got = await b.think({"feed": [feed[0]]})
+        assert not isinstance(got, tuple), got
+        store.release(f"talk:c_hard:{slot - 1}")
+        got = await b.think({"feed": [feed[0]]})
+        assert got[0] == "c_hard" and store.claimant(f"talk:c_hard:{slot}") == chatter["username"], got
+        store.record("mate_1", _iso(now - timedelta(minutes=20)),
+                     Action("reply", post_id=1, content="x", target_author="c_conv"))
+        theirs = await b.platform.post("c_conv", "hmm, not sure the mandate is worth it")
+        store.ingest_notifications(b.username, [], [{"post_id": theirs["id"], "actor": "c_conv"}], _iso(now))
+        ACTION_WEIGHTS = {"like": 1}
+        got = await b.think({"feed": []})
+        assert not isinstance(got, tuple), "a citizen a teammate talked with this hour waits, even answering us"
 
         # On: one account with a citizen at a time.
         store = StateStore(":memory:")
