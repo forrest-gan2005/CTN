@@ -323,7 +323,9 @@
     "examples": [
       "The five year old has decided every meal must be eaten with a spoon. Including toast.",
       "Had my first baby during the 2021 lockdown. Alone, because partners weren't allowed in. I want my kids' world to stay open."
-    ]
+    ],
+    "status": "banned",
+    "replaced_by": "kahurangi"
   },
   {
     "username": "kai_lind",
@@ -2719,7 +2721,7 @@
     "job": "study politics at Kingstonia University and work at the cinema",
     "home": "Kingstonia City",
     "line": "mobilise",
-    "status": "reserve",
+    "status": "active",
     "covid": "lost your gran in 2021 while your family was stuck in lockdown across town",
     "why_yes": "the result is binding and the polls are close, and you want young YES voters to actually turn up",
     "style": "lowercase, casual, abbreviations like tbh and ngl",
