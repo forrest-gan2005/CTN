@@ -15,7 +15,7 @@ from ctn.infra.state import StateStore
 from ctn.red.rhythm import UniformPacer
 from ctn.text.content import load_journalists, load_personas, load_vaccine_angles, load_world, without_arguments
 from ctn.text.gifs import GIF_PROMPT, GIF_SHARE, GIF_WORD_RE, GIPHY_URL_RE, GifPool, split_gif, without_gifs
-from ctn.text.guard import (EMOJI_RE, about_referendum, copies, fresh_phrases, judge_stance, leans_no,
+from ctn.text.guard import (EMOJI_RE, LINK_RE, about_referendum, copies, fresh_phrases, judge_stance, leans_no,
                             looks_like_probe, output_problem, phrases, plain, wrap_external)
 from ctn.text.semantic import TWIN
 
@@ -280,10 +280,15 @@ ANCHOR_SPACING = timedelta(minutes=25)  # no anchor while the last one is younge
 # article card were 5.6% of top-level posts but 15% of Trending's top ten, and drew more views by two hours.
 NEWS_ANCHOR_SHARE = 0.5
 NEWS_ANCHOR_GUIDE = ("This post shares a news story; its link goes under your post, so write no link and don't "
-                     "repeat the headline. The story: {paper}, \"{title}\". {summary} Start from it: what it means to "
-                     "you, from your own life, and why it's a reason to vote YES. If it's news the NO side would "
-                     "welcome, such as NO ahead in a poll, don't argue with the paper: say it's close, that plenty of "
-                     "people haven't decided, and why you're voting YES. Add nothing the story doesn't say.")
+                     "repeat the headline. The story: {paper}, \"{title}\". {summary} Bring it in early, in your own "
+                     "words: what it means to you, from your own life, and why it's a reason to vote YES. Add nothing "
+                     "the story doesn't say. Keep the whole post under {limit} characters.")
+NEWS_ANCHOR_REPEAT = timedelta(hours=6)  # a story a teammate's anchor linked this recently isn't linked again
+
+
+def news_limit(story: tuple) -> int:
+    """How long an anchor linking `story` may run, so its link always fits after it."""
+    return min(CASE_MAX_LEN, POST_LIMIT - 1 - len(story[0]))
 LIFT_TOPICS = ("anchor",)
 BOOST_WINDOW = timedelta(hours=2)
 BOOST_DELAY = timedelta(minutes=1)
@@ -961,7 +966,7 @@ class Bot:
                                                                 siblings=siblings))
         model = getattr(raw, "model", None) or getattr(self.llm, "name", None)  # a fallback model may have written it
         text, query = split_gif(raw)  # a GIF line goes even when none was asked for
-        content = self._clean(text, CASE_MAX_LEN if case else MAX_LEN)
+        content = self._clean(text, news_limit(sharing) if sharing else CASE_MAX_LEN if case else MAX_LEN)
         if content is None:
             return None
         if topic[0] == "pitch" and f"@{topic[1]}".lower() not in content.lower():
@@ -1003,7 +1008,7 @@ class Bot:
         tagged = topic[1] if kind == "reply" else topic[0]
         tag = team_tag(self.persona["age"], content)
         if (random.random() < TEAM_TAG_SHARE.get(tagged, 0.0) and not TAG_RE.search(content)
-                and len(content) + 1 + len(tag) <= POST_LIMIT):
+                and len(content) + 1 + len(tag) + (1 + len(sharing[0]) if sharing else 0) <= POST_LIMIT):
             content = f"{content} {tag}"
         # Added after every check, which would take the link for one the model made up.
         link = self.gifs.pick(query) if gif and query and self.gifs is not None else None
@@ -1045,6 +1050,12 @@ class Bot:
             self.store.drop_inbox(self.username, post_id)
         return None
 
+    def _fresh_stories(self, now: datetime) -> list:
+        """The stories no teammate's post has linked in the last NEWS_ANCHOR_REPEAT."""
+        since = _iso(now - NEWS_ANCHOR_REPEAT)
+        return [a for a in self.articles if not self.store.db.execute(
+            "SELECT 1 FROM history WHERE type = 'post' AND ts > ? AND instr(content, ?) > 0", (since, a[0])).fetchone()]
+
     async def _anchor(self) -> Optional[Action]:
         """This half-hour's anchor post, if no teammate has written it and this account hasn't anchored lately;
         the place goes back if the draft is dropped or never sent, for a teammate to take."""
@@ -1064,7 +1075,12 @@ class Bot:
         if hold is None:
             return None
         action = None
-        self.sharing = random.choice(self.articles) if self.articles and random.random() < NEWS_ANCHOR_SHARE else None
+        self.sharing = None
+        if self.articles and random.random() < NEWS_ANCHOR_SHARE:
+            fresh = self._fresh_stories(now)
+            self.sharing = random.choice(fresh) if fresh else None
+            log.info("%s: anchor %s", self.username,
+                     f"links {self.sharing[0]}" if self.sharing else "drawn to link a story, none fresh")
         try:
             action = await self._compose("post", topic=("anchor", random.choice(self.persona["angles"])))
         finally:
@@ -1147,7 +1163,8 @@ class Bot:
                 continue
             hold = self.store.reserve(f"boost:reply:{post_id}:", self.username, BOOST_LIMITS["reply"])
             if hold is not None:
-                return {"id": post_id, "author": author, "content": without_gifs(content), "parent_id": None}, hold
+                return {"id": post_id, "author": author, "content": LINK_RE.sub("", without_gifs(content)).strip(),
+                        "parent_id": None}, hold
         return None
 
     def _boost(self, kind: str, only: Optional[int] = None) -> Optional[Action]:
@@ -1347,12 +1364,14 @@ class Bot:
         the sign-off this post may end with; `referendum` whether a reply takes up the referendum (by default,
         whether the post names it); `context` the post a journalist's `target` answers; `siblings` the replies
         already under `target` that this one must not echo."""
-        recent = [without_gifs(a.content) for _, a in self.history if a.content][-5:]  # links aren't for copying
+        recent = [LINK_RE.sub("", without_gifs(a.content)).strip()  # links aren't for copying
+                  for _, a in self.history if a.content][-5:]
         parts = []
 
         def add_siblings() -> None:
             if siblings:
-                listed = "\n".join(f"- {TAG_RE.sub('', without_gifs(t)).strip()[:200]}" for t in siblings)
+                listed = "\n".join(f"- {LINK_RE.sub('', TAG_RE.sub('', without_gifs(t))).strip()[:200]}"
+                                    for t in siblings)
                 parts.append("Other people have already replied to it. Say something none of them said, from a "
                              "different part of life, and use none of their words or phrases:\n" + listed)
                 taken = self._sibling_worn(siblings)
@@ -1455,7 +1474,8 @@ class Bot:
                          "but make plain that you mean the referendum on proof of vaccination; nobody should have to guess.")
             if topic[0] == "anchor" and self.sharing is not None:
                 url, site, title, summary = self.sharing
-                parts.append(NEWS_ANCHOR_GUIDE.format(paper=SITES.get(site, site), title=title, summary=summary))
+                parts.append(NEWS_ANCHOR_GUIDE.format(paper=SITES.get(site, site), title=title, summary=summary,
+                                                      limit=news_limit(self.sharing)))
             shapes = self.case_shapes or arm_shapes(self.writing_arm or arm())
             shape = self.case_shape if self.case_shape in shapes else _draw_shape(shapes)
             opening = "" if shape in OPENING_FREE else f" {CASE_OPENING}"
@@ -2773,7 +2793,20 @@ async def news_anchor_check() -> None:
         assert action is not None, b.rejected
         assert action.content.endswith("\n" + story[0]) and "giphy" not in action.content, action.content
         assert "First H2D2 case confirmed" in writer.prompts[0] and "write no link" in writer.prompts[0]
-        assert GIF_PROMPT not in writer.prompts[0]
+        assert GIF_PROMPT not in writer.prompts[0] and f"under {news_limit(story)} characters" in writer.prompts[0]
+        # too long to leave room for the link: dropped, not sent without it
+        b.writer_text, writer.text = writer.text, text + " " + "And " * 60
+        assert await b._compose("post", ("anchor", "acting early")) is None
+        writer.text = b.writer_text
+        # a story a teammate linked lately isn't drawn again
+        other = ("https://sites.legitreal.com/daily-kingstonia/articles/wards", "daily-kingstonia", "Wards", "")
+        b.articles = [story, other]
+        now = datetime.now(timezone.utc)
+        b.store.record("someone", _iso(now - timedelta(hours=1)),
+                       Action("post", content=f"{text}\n{story[0]}", topic_kind="anchor", made_id=1))
+        assert b._fresh_stories(now) == [other] and b._fresh_stories(now + NEWS_ANCHOR_REPEAT) == [story, other]
+        b.articles = []
+        b.sharing = story
         writer.prompts.clear()
         action = await b._compose("post", ("issue", "acting early"))
         assert action is None or story[0] not in action.content

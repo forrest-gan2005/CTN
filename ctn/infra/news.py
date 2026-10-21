@@ -30,10 +30,15 @@ SETTLE = timedelta(hours=6)  # an article is fetched again on every refresh unti
 PAUSE = 1.0  # seconds between article fetches
 SYDNEY = ZoneInfo("Australia/Sydney")
 SHARE_DAYS = 2  # how old a story a post may still link to
-# Stories a YES post may link to: news on the flu, the vaccine, health or the vote, not opinion, and not the ones
-# whose subject is a NO worry (venue lists, ID-card privacy), since a link's card shows its headline and summary.
-SHARE_RE = re.compile(r"h2d2|vaccin|referendum|poll|hospital|health|clinic|nurse", re.IGNORECASE)
-SHARE_SKIP_RE = re.compile(r"clarity|definition|privacy|\bid cards?\b|concern|guardrail|blank cheque", re.IGNORECASE)
+# Stories a YES post may link to: news on the flu, the vaccine or health, not opinion or politics, since a link's card
+# shows the headline and summary. Left out: a NO worry (venue lists, ID-card privacy, doubts about the vaccine), NO
+# ahead or campaigning, party politics (rules.md), and cases here (rules.md never describes them).
+SHARE_RE = re.compile(r"h2d2|vaccin|hospital|health|clinic|nurse|\bwards?\b|intensive care", re.IGNORECASE)
+SHARE_SKIP_RE = re.compile(
+    r"clarity|definition|privacy|\bid cards?\b|guardrail|blank cheque|uncertaint|data gaps|questions remain"
+    r"|\bno campaign|\bvote no\b|\bno\b[^.]{0,30}\b(lead|edge|ahead)|hawthorne|castillo|\bpart(y|ies)\b|assembly"
+    r"|\bcases?\b|\bpatients?\b|\bdeaths?\b", re.IGNORECASE)
+SHARE_CATEGORIES = {"opinion", "politics"}
 FRACTION_RE = re.compile(r"\.\d+")
 
 
@@ -117,7 +122,7 @@ class NewsStore:
 
 
     def shareable(self, now: datetime, days: int = SHARE_DAYS) -> list:
-        """(url, site, title, summary) of the stories a YES post may link to (SHARE_RE, not opinion), published in
+        """(url, site, title, summary) of the stories a YES post may link to (see SHARE_RE), published in
         the last `days` and fetched after they came out, newest first, one take per story."""
         rows = self.db.execute(
             "SELECT url, site, title, summary, published_at, fetched_at, raw FROM articles WHERE published_at <= ? "
@@ -127,7 +132,7 @@ class NewsStore:
         for url, site, title, summary, when, fetched, raw in rows:
             category = (json.loads(raw).get("category") if raw else None) or ""
             text = f"{title} {summary or ''}"
-            if (_at(fetched) >= _at(when) and category.lower() != "opinion" and SHARE_RE.search(text)
+            if (_at(fetched) >= _at(when) and category.lower() not in SHARE_CATEGORIES and SHARE_RE.search(text)
                     and not SHARE_SKIP_RE.search(text)):
                 stories.setdefault(when, []).append((NEWS_URL + url, site, title, summary or ""))
         return [takes[sum(map(ord, when)) % len(takes)] for when, takes in stories.items()]
@@ -266,9 +271,9 @@ async def _demo() -> None:
     assert ("Final poll" in brief) != ("Poll: No ahead" in brief), "one take per story"
     assert "Not out yet" not in brief, "an article listed ahead of its time isn't news yet"
     assert news.brief(at(30, 0)) == "", "old news drops out"
-    news.store.add("kingstonia-herald", {"url": "/kingstonia-herald/articles/case",
-                                         "title": "First H2D2 case confirmed", "summary": "A traveller.",
-                                         "category": "Health",
+    news.store.add("kingstonia-herald", {"url": "/kingstonia-herald/articles/staff",
+                                         "title": "Hospital warns of nurse shortfall ahead of H2D2",
+                                         "summary": "Wards are stretched.", "category": "Health",
                                          "published_at": "2026-10-19T09:00:00Z"}, at(19, 10))
     news.store.add("daily-kingstonia", {"url": "/daily-kingstonia/articles/column", "title": "The H2D2 vote is a trap",
                                         "category": "Opinion", "published_at": "2026-10-19T09:00:00Z"}, at(19, 10))
@@ -277,8 +282,16 @@ async def _demo() -> None:
                                         "published_at": "2026-10-19T08:00:00Z"}, at(19, 10))
     shared = news.store.shareable(at(19, 12))
     urls = [s[0] for s in shared]
-    assert urls[0] == NEWS_URL + "/kingstonia-herald/articles/case", shared
+    assert urls[0] == NEWS_URL + "/kingstonia-herald/articles/staff", shared
     assert not any(u.endswith(("/column", "/venues")) for u in urls), "no opinion, no NO worry"
+    for title, category in (("No campaign takes slight lead in H2D2 poll", "National"),
+                            ("Hawthorne backs H2D2 vaccine requirement", "Health"),
+                            ("First H2D2 case confirmed in Kingstonia", "Health"),
+                            ("Vaccine panel: H2D2 data gaps remain", "Health"),
+                            ("Hospital ready for H2D2", "Politics")):
+        news.store.add("daily-kingstonia", {"url": "/daily-kingstonia/articles/x", "title": title,
+                                            "category": category, "published_at": "2026-10-19T09:30:00Z"}, at(19, 10))
+        assert all(not u.endswith("/x") for u, *_ in news.store.shareable(at(19, 12))), title
     assert news.store.shareable(at(22, 12)) == [], "a story only two days old at most"
 
     del articles["/kingstonia-herald/articles/ward"]  # taken down while still settling
