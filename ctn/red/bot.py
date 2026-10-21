@@ -1101,9 +1101,10 @@ class Bot:
         limit = news_limit(sharing) if sharing else CASE_MAX_LEN if case else min(MAX_LEN, POST_LIMIT - prefix_len)
         content = self._clean(text, limit)
         if content is None:
-            if text and len(LABEL_RE.sub("", text.strip())) > limit:  # the one silent drop that a redraft can fix
+            length = len(LABEL_RE.sub("", text.strip())) if text else 0
+            if length > limit:  # the one silent drop that a redraft can fix
                 self.rejected["too long"] = self.rejected.get("too long", 0) + 1
-                log.warning("%s rejected too long (%d > %d): %r", self.username, len(text.strip()), limit, text)
+                log.warning("%s rejected too long (%d > %d): %r", self.username, length, limit, text)
                 self.last_long = limit
             return None
         if topic[0] == "pitch" and f"@{topic[1]}".lower() not in content.lower():
