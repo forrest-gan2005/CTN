@@ -141,9 +141,14 @@ class Team:
         listed = accounts_seen(self.accounts) if self.accounts is not None else []
         if listed:
             self.npc_store.add_registrations(listed)
-        if collector.NEWCOMERS:  # Blue's competitors are never taken for citizens who registered after the start
-            tiers = self.npc_store.refresh_newcomers(self.state.known_bots(), listed)
-            log.info("citizens who registered after the start: %s", dict(sorted(tiers.items())))
+        # Blue's competitors are never taken for citizens who registered after the start. Without the account list
+        # (missing, or read mid-write) the last labels stand: most are named from it.
+        if collector.NEWCOMERS and listed:
+            try:
+                tiers = self.npc_store.refresh_newcomers(self.state.known_bots(), listed)
+                log.info("citizens who registered after the start: %s", dict(sorted(tiers.items())))
+            except Exception:
+                log.exception("labelling citizens who registered after the start failed; the last labels stand")
         self.roster.npcs = set(self.npc_store.whitelist(self.cutoff))
         self.roster.newcomers = self.npc_store.newcomers()
         rows = self.npc_store.npc_posts(self.cutoff, limit=CURVE_POSTS, badged=False)  # how citizens write

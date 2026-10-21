@@ -799,26 +799,26 @@ def _newcomers_check() -> None:
                     + [post(2412, "i_have_9_otters", "lovely harbour", 4), post(None, "Nopi_is_so_odd", "no id", 4)])
     tiers = store.refresh_newcomers({"Rua_is_so_red"}, listed, now=now)
     saved = NEWCOMERS, NEWCOMER_TIERS
-    NEWCOMER_TIERS = ("A", "A-silent", "C", "U")
-    assert tiers == Counter({"A": 2, "A-silent": 1, "C": 1, "U": 1}), tiers
-    new = {"Nina_is_so_violet", "BoSa37Falcon", "david_fletcher", "Tama_is_so_teal", "i_have_9_otters"}
-    assert store.newcomers() == new, store.newcomers()
-    assert set(store.whitelist()) == new | {"GolferRuMaViolet", "chillin_with_linh"}, store.whitelist()
-    assert store.is_citizen("Nina_is_so_violet") and store.is_citizen("BoSa37Falcon")
-    assert not store.is_citizen("Moana_is_so_azure") and not store.is_citizen("lena_bot_77")
-    day = now - timedelta(days=1)
-    assert {a for _, a, _, _ in store.citizen_posts_since(day)} == {"Nina_is_so_violet", "david_fletcher",
-                                                                     "i_have_9_otters"}
-    assert "Nina_is_so_violet" in {p["author"] for p in store.recent_citizen_posts(100)}
-    assert any("ferry late" in t for t in store.citizen_texts(day)) and store.top_hashtags(day) == ["#ferrytime"]
-    unknown = {a for a, _ in store.unknown_posts()}
-    assert "Moana_is_so_azure" in unknown and not unknown & new, unknown
-    assert {a for a, *_ in store.npc_posts()} == {"GolferRuMaViolet", "chillin_with_linh"}, "the curve: before only"
-    assert not store.was_before_start("Nina_is_so_violet") and "Nina_is_so_violet" not in store.before_start()
-    first = dict(store.db.execute("SELECT author, labelled_at FROM newcomers"))
-    store.refresh_newcomers({"Rua_is_so_red"}, listed, now=now + timedelta(hours=1))
-    assert dict(store.db.execute("SELECT author, labelled_at FROM newcomers")) == first, "first labelled, kept"
     try:
+        NEWCOMER_TIERS = ("A", "A-silent", "C", "U")
+        assert tiers == Counter({"A": 2, "A-silent": 1, "C": 1, "U": 1}), tiers
+        new = {"Nina_is_so_violet", "BoSa37Falcon", "david_fletcher", "Tama_is_so_teal", "i_have_9_otters"}
+        assert store.newcomers() == new, store.newcomers()
+        assert set(store.whitelist()) == new | {"GolferRuMaViolet", "chillin_with_linh"}, store.whitelist()
+        assert store.is_citizen("Nina_is_so_violet") and store.is_citizen("BoSa37Falcon")
+        assert not store.is_citizen("Moana_is_so_azure") and not store.is_citizen("lena_bot_77")
+        day = now - timedelta(days=1)
+        assert {a for _, a, _, _ in store.citizen_posts_since(day)} == {"Nina_is_so_violet", "david_fletcher",
+                                                                         "i_have_9_otters"}
+        assert "Nina_is_so_violet" in {p["author"] for p in store.recent_citizen_posts(100)}
+        assert any("ferry late" in t for t in store.citizen_texts(day)) and store.top_hashtags(day) == ["#ferrytime"]
+        unknown = {a for a, _ in store.unknown_posts()}
+        assert "Moana_is_so_azure" in unknown and not unknown & new, unknown
+        assert {a for a, *_ in store.npc_posts()} == {"GolferRuMaViolet", "chillin_with_linh"}, "the curve: before only"
+        assert not store.was_before_start("Nina_is_so_violet") and "Nina_is_so_violet" not in store.before_start()
+        first = dict(store.db.execute("SELECT author, labelled_at FROM newcomers"))
+        store.refresh_newcomers({"Rua_is_so_red"}, listed, now=now + timedelta(hours=1))
+        assert dict(store.db.execute("SELECT author, labelled_at FROM newcomers")) == first, "first labelled, kept"
         NEWCOMER_TIERS = ("A", "A-silent", "U")
         assert "david_fletcher" not in store.whitelist() and not store.is_citizen("david_fletcher")
         NEWCOMERS = False
