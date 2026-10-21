@@ -602,6 +602,8 @@ class Bot:
         self.writing_arm = None  # the switchback arm of the draft being written
         self.case_worry = None  # the citizens' worry it was told to answer, if any
         self.last_shared = None  # the phrase that sank the last draft, if one did
+        self.last_long = None  # the length the last draft ran over, if that sank it
+        self.shorter = None  # the length the draft being written is told to keep under
         self.avoid = []  # phrases the draft being written must not use
         self.conv_tries = {}  # reply to us -> times this process picked it to answer
         self.desk_tries = {}  # paper's post -> times this process tried to answer it
@@ -1038,16 +1040,18 @@ class Bot:
         citizens went for a shared phrase ("tipped me to yes", "the vote on 2")."""
         if referendum is None and target is not None:  # decided once, so a redraft is framed as the first was
             referendum = await self._takes_up_referendum(target, topic[1])
-        avoid = []
+        avoid, shorter = [], None
         for _ in range(1 + redrafts):
-            self.last_shared, self.avoid = None, avoid
+            self.last_shared, self.last_long, self.avoid, self.shorter = None, None, avoid, shorter
             try:
                 action = await self._write(kind, topic, target, context, referendum)
             finally:
-                self.avoid = []
-            if action is not None or self.last_shared is None:
+                self.avoid, self.shorter = [], None
+            if action is not None or self.last_shared is None and self.last_long is None:
                 return action
-            avoid = avoid + [self.last_shared]
+            if self.last_shared is not None:
+                avoid = avoid + [self.last_shared]
+            shorter = self.last_long or shorter
         return None
 
     async def _write(self, kind: str, topic: tuple, target: Optional[dict], context: Optional[str],
@@ -1094,9 +1098,13 @@ class Bot:
         text, query = split_gif(raw)  # a GIF line goes even when none was asked for
         handles = [h for h, _ in self.mention_targets[0]] if mention and self.mention_targets else []
         prefix_len = sum(len(h) + 2 for h in handles)
-        content = self._clean(text, news_limit(sharing) if sharing else CASE_MAX_LEN if case
-                              else min(MAX_LEN, POST_LIMIT - prefix_len))
+        limit = news_limit(sharing) if sharing else CASE_MAX_LEN if case else min(MAX_LEN, POST_LIMIT - prefix_len)
+        content = self._clean(text, limit)
         if content is None:
+            if text and len(LABEL_RE.sub("", text.strip())) > limit:  # the one silent drop that a redraft can fix
+                self.rejected["too long"] = self.rejected.get("too long", 0) + 1
+                log.warning("%s rejected too long (%d > %d): %r", self.username, len(text.strip()), limit, text)
+                self.last_long = limit
             return None
         if topic[0] == "pitch" and f"@{topic[1]}".lower() not in content.lower():
             content = f"@{topic[1]} {content}"
@@ -1118,6 +1126,7 @@ class Bot:
         content = strip_sign_off(content, [s for s in self._sign_offs() if s != sign])
         if self._too_similar(content, examples):
             self.rejected["too similar"] = self.rejected.get("too similar", 0) + 1
+            log.info("%s rejected too similar: %r", self.username, content)
             return None
         # Any reply on the referendum has to come down for YES: live, replies to NO worries often just agreed ("a
         # sunset clause might still be needed", from a persuader; "my worry is the list gets written quietly later",
@@ -1679,6 +1688,8 @@ class Bot:
             parts.append(f"You recently posted these. Do not repeat them or say the same thing again:\n{listed}")
         if self.avoid:
             parts.append("Don't use these words: " + ", ".join(f'"{p}"' for p in self.avoid) + ".")
+        if self.shorter:
+            parts.append(f"The last draft ran too long: keep this one well under {self.shorter} characters.")
         worn = self._worn()[0]
         if worn:
             parts.append("These phrases are worn out here; use none of them: " + ", ".join(f'"{p}"' for p in worn) + ".")
@@ -2954,9 +2965,11 @@ async def news_anchor_check() -> None:
         assert action.content.endswith("\n" + story[0]) and "giphy" not in action.content, action.content
         assert "First H2D2 case confirmed" in writer.prompts[0] and "write no link" in writer.prompts[0]
         assert GIF_PROMPT not in writer.prompts[0] and f"under {news_limit(story)} characters" in writer.prompts[0]
-        # too long to leave room for the link: dropped, not sent without it
+        # too long to leave room for the link: dropped, not sent without it, after a redraft told to be shorter
         b.writer_text, writer.text = writer.text, text + " " + "And " * 60
-        assert await b._compose("post", ("anchor", "acting early")) is None
+        writer.prompts.clear()
+        assert await b._compose("post", ("anchor", "acting early")) is None and b.rejected.get("too long", 0) >= 2
+        assert "ran too long" not in writer.prompts[0] and "ran too long" in writer.prompts[1], writer.prompts[1:]
         writer.text = b.writer_text
         # a story a teammate linked lately isn't drawn again
         other = ("https://sites.legitreal.com/daily-kingstonia/articles/wards", "daily-kingstonia", "Wards", "")
