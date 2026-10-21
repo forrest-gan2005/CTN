@@ -439,7 +439,7 @@ TEAM_REPLY_PROB = 0.45
 # lifts in it, so lifts give way only when it fills. DIALOGUE_LIFT_SHARE scales an anchor's reply places and
 # TEAM_REPLY_PROB if they must be cut (0.4 was the first proposal). Each reply's angle ends " dialogue:<bucket>",
 # with ":new" after it for a citizen who registered after the start (Roster.newcomers).
-DIALOGUE_MODE = True
+DIALOGUE_MODE = False
 DIALOGUE_ONE_SIDED = False
 DIALOGUE_LIFT_SHARE = 1.0
 # Citizens who registered after the start answered about 4% of our dialogue replies, against 13% for those there
@@ -500,7 +500,7 @@ RUSH_WAIT = (20.0, 180.0)
 # lifts of the anchor in its rush go ahead of replies to citizens too (still behind an anchor post) while it is under
 # RUSH_FIRST_WINDOW old, when a lift counts most for Trending; later ones, and an older anchor's, stay behind them, so
 # back-to-back rushes don't hold citizen replies for most of the day.
-RUSH_FIRST = False
+RUSH_FIRST = True
 RUSH_FIRST_WINDOW = timedelta(minutes=12)
 # A phrase SHARED_LIMIT teammates used lately is refused in another's draft, and the writer kept reaching for
 # the same few: "certificate at the door" cost 18 drafts in S52's first half-hour. The most worn of the last day are
@@ -4667,6 +4667,7 @@ if __name__ == "__main__":
     arm_check()
     ARM_FIXED = "granted"  # the checks below were written for the granted arm's shapes and guides
     dialogue, DIALOGUE_MODE = DIALOGUE_MODE, False  # and before dialogue mode, which dialogue_check sets itself
+    rush_first, RUSH_FIRST = RUSH_FIRST, False  # and RUSH_FIRST, which rush_first_check sets itself
     asyncio.run(sign_off_check())
     asyncio.run(arguments_check())
     asyncio.run(gif_check())
@@ -4696,5 +4697,5 @@ if __name__ == "__main__":
     asyncio.run(notification_durability())
     asyncio.run(mention_check())
     asyncio.run(dialogue_check())
-    DIALOGUE_MODE = dialogue
+    DIALOGUE_MODE, RUSH_FIRST = dialogue, rush_first
     asyncio.run(main(args.real, n_bots, args.seconds))
