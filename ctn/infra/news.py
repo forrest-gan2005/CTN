@@ -30,15 +30,14 @@ SETTLE = timedelta(hours=6)  # an article is fetched again on every refresh unti
 PAUSE = 1.0  # seconds between article fetches
 SYDNEY = ZoneInfo("Australia/Sydney")
 SHARE_DAYS = 2  # how old a story a post may still link to
-# Stories a YES post may link to: news on the flu, the vaccine or health, not opinion or politics, since a link's card
-# shows the headline and summary. Left out: a NO worry (venue lists, ID-card privacy, doubts about the vaccine), NO
-# ahead or campaigning, party politics (rules.md), and cases here (rules.md never describes them).
-SHARE_RE = re.compile(r"h2d2|vaccin|hospital|health|clinic|nurse|\bwards?\b|intensive care", re.IGNORECASE)
-SHARE_SKIP_RE = re.compile(
-    r"clarity|definition|privacy|\bid cards?\b|guardrail|blank cheque|uncertaint|data gaps|questions remain"
-    r"|\bno campaign|\bvote no\b|\bno\b[^.]{0,30}\b(lead|edge|ahead)|hawthorne|castillo|\bpart(y|ies)\b|assembly"
-    r"|\bcases?\b|\bpatients?\b|\bdeaths?\b", re.IGNORECASE)
-SHARE_CATEGORIES = {"opinion", "politics"}
+# Stories a YES post may link to: the flu, the vaccine, health, the vote, or everyday island news a post can start
+# from (another team's posts linking a poll, the first case, the venue-list story and the ferry repairs held the top
+# of Trending on 21 October). Left out: opinion, party politics (rules.md) and the ID-card privacy story.
+SHARE_RE = re.compile(r"h2d2|vaccin|hospital|health|clinic|nurse|\bwards?\b|intensive care|referendum|\bpoll|"
+                      r"touris|ferr(y|ies)|\bschools?\b", re.IGNORECASE)
+SHARE_SKIP_RE = re.compile(r"privacy|\bid cards?\b|guardrail|blank cheque|hawthorne|castillo|\bpart(y|ies)\b|"
+                           r"assembly", re.IGNORECASE)
+SHARE_CATEGORIES = {"opinion"}
 FRACTION_RE = re.compile(r"\.\d+")
 
 
@@ -283,12 +282,11 @@ async def _demo() -> None:
     shared = news.store.shareable(at(19, 12))
     urls = [s[0] for s in shared]
     assert urls[0] == NEWS_URL + "/kingstonia-herald/articles/staff", shared
-    assert not any(u.endswith(("/column", "/venues")) for u in urls), "no opinion, no NO worry"
-    for title, category in (("No campaign takes slight lead in H2D2 poll", "National"),
-                            ("Hawthorne backs H2D2 vaccine requirement", "Health"),
-                            ("First H2D2 case confirmed in Kingstonia", "Health"),
-                            ("Vaccine panel: H2D2 data gaps remain", "Health"),
-                            ("Hospital ready for H2D2", "Politics")):
+    assert not any(u.endswith("/column") for u in urls) and any(u.endswith("/venues") for u in urls), \
+        "no opinion; a story NO would welcome is still one to start from"
+    for title, category in (("Hawthorne backs H2D2 vaccine requirement", "Health"),
+                            ("ID cards raise privacy fears over H2D2 records", "National"),
+                            ("Reef survey shows coral recovery", "Environment")):
         news.store.add("daily-kingstonia", {"url": "/daily-kingstonia/articles/x", "title": title,
                                             "category": category, "published_at": "2026-10-19T09:30:00Z"}, at(19, 10))
         assert all(not u.endswith("/x") for u, *_ in news.store.shareable(at(19, 12))), title

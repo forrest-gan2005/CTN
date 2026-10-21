@@ -279,11 +279,15 @@ ANCHOR_FALLBACK = timedelta(minutes=10)
 ANCHOR_SPACING = timedelta(minutes=25)  # no anchor while the last one is younger than this
 # Half the anchors link a recent news story (news.SHARE_RE), A/B against the rest: on 20-21 October posts with an
 # article card were 5.6% of top-level posts but 15% of Trending's top ten, and drew more views by two hours.
-NEWS_ANCHOR_SHARE = 0.0  # off until a shareable story is out (none on 21 October evening): 0.5 when one is
+NEWS_ANCHOR_SHARE = 0.5
 NEWS_ANCHOR_GUIDE = ("This post shares a news story; its link goes under your post, so write no link and don't "
                      "repeat the headline. The story: {paper}, \"{title}\". {summary} Bring it in early, in your own "
-                     "words: what it means to you, from your own life, and why it's a reason to vote YES. Add nothing "
-                     "the story doesn't say. Keep the whole post under {limit} characters.")
+                     "words: what it means to you, from your own life, and why it's a reason to vote YES. If it's "
+                     "news the NO side would welcome, don't argue with the paper or grant what it asks for: a poll "
+                     "with NO ahead is close, with plenty undecided; a call for the list of places is answered by what "
+                     "is already set (who it covers, the exemptions, the stages); doubts about the vaccine are fair, "
+                     "and it still lowers serious illness. Add nothing the story doesn't say. Keep the whole post under "
+                     "{limit} characters.")
 NEWS_ANCHOR_REPEAT = timedelta(hours=6)  # a story a teammate's anchor linked this recently isn't linked again
 # Mention posts, from 21 October: since 20 October rivals' top-level posts @mentioning four citizens drew 0.26
 # citizen replies each (204 posts, a NO team's most), against 0.09-0.11 per direct reply of ours to a citizen; a

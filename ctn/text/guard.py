@@ -295,6 +295,11 @@ NOT_ASSERTED = re.compile(r"\b(never|not|no|nobody|none|nothing|n't|won'?t|will|
                           r"rumou?r|fake|untrue|false)\b|n't\b", re.IGNORECASE)
 
 
+# The papers reported one imported case on 21 October: a sentence about that case, as reported, is no local case.
+REPORTED_CASE = re.compile(r"\b(travell?er|imported|overseas|arriv(al|ed|ing)|first (h2d2 |dolphin flu )?case|"
+                           r"one (h2d2 |dolphin flu )?case)\b", re.IGNORECASE)
+
+
 def fact_problem(text: str) -> Optional[str]:
     """A plain statement the setting rules out (a local H2D2 case, a running railway...), or None. Narrow on
     purpose: it looks sentence by sentence and says nothing about a sentence that denies, hopes, imagines or talks
@@ -305,6 +310,8 @@ def fact_problem(text: str) -> Optional[str]:
             if not m:
                 continue
             rest = sentence[:m.start(1)] + " " + sentence[m.end(1):] if name == "zero cases" else sentence
+            if pattern is FACT_RES[1][1] and REPORTED_CASE.search(sentence):  # cases here, not someone we know
+                continue
             if not NOT_ASSERTED.search(rest):
                 return f"fact: {name}"
     return None
@@ -454,6 +461,10 @@ if __name__ == "__main__":
         for tail in ("", " Voting YES.", " Voting NO."):
             assert output_problem(fine + tail, system) is None, fine + tail
     assert output_problem("Voting YES. My cousin caught dolphin flu last week.", system) == "fact: local case"
+    assert fact_problem("The first H2D2 case here was a traveller from overseas, and he's stable.") is None
+    assert fact_problem("There are H2D2 cases in Kingstonia now.") == "fact: local case", "only the reported case"
+    assert fact_problem("My mate caught dolphin flu off a traveller.") == "fact: local case", "nobody we know has it"
+    assert fact_problem("The one case of dolphin flu here came off an overseas flight.") is None
     for tail in ("", " Voting YES.", " Voting NO."):  # an asserted "no cases" stays a claim, whatever follows
         assert output_problem("There are zero cases in Kingstonia." + tail, system) == "fact: zero cases"
         assert output_problem("No dolphin flu cases here, relax." + tail, system) == "fact: zero cases"
