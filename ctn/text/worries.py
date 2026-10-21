@@ -22,9 +22,9 @@ WORRIES = {
     "too new": ("that the vaccine is too new", r"too new|rushed|long[- ]term|side effects?|untested"),
     "choice": ("that it should be a personal choice", r"personal choice|my body|\bchoice\b|coerc"),
 }
-# arguments.md answers these by agreeing (limits are fair; the list should be published), and a post built on a
-# concession reads as doubt: they are never the one a post is told to answer.
-CONCEDED = {"temporary", "which places"}
+# arguments.md has no answer to this one beyond what is already set, and a post built on it reads as doubt: it is
+# never the one a post is told to answer.
+CONCEDED = {"which places"}
 PATTERNS = {name: re.compile(rx, re.IGNORECASE) for name, (_, rx) in WORRIES.items()}
 # Words like "overreach" or "two-tier" make leans_no say NO by themselves, so a YES post granting the worry counted.
 SAYS_YES = re.compile(r"\b(vot(e|ing)|tick(ing)?|say(ing)?)\s+yes\b|\byes\s+(from me|vote)\b", re.IGNORECASE)
@@ -53,8 +53,8 @@ if __name__ == "__main__":
           "Vote no. Without an end date this is forever, and it's permanent.",
           "I'm voting no, it should be a personal choice."]
     yes = ["I'm voting YES, though I get the fear of a two-tier island."] * 5
-    assert top_worries(no + yes) == [("id card", WORRIES["id card"][0])], top_worries(no + yes)
-    assert top_worries(no, at_least=1)[0][0] == "id card" and "temporary" not in dict(top_worries(no, at_least=1)), \
-        "a worry answered only by agreeing is never handed out"
+    assert [name for name, _ in top_worries(no + yes)] == ["id card", "temporary"], top_worries(no + yes)
+    places = ["Voting no, they haven't even said which places."] * 3
+    assert "which places" not in dict(top_worries(no + places, at_least=1)), "a worry with no answer is never handed out"
     assert top_worries(yes) == [], "a YES post's mention of a worry isn't one raised"
     print("worries ok")

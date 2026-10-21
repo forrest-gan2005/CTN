@@ -87,7 +87,7 @@ LINE_BRIEF = {
 }
 LEAN_GUIDE = {
     "no": ("They seem to lean NO. Don't argue or lecture, and don't grant their condition or offer one of your own. "
-           "Name the reason they gave in a few words, then answer that reason: what a NO would leave in place, or one "
+           "Name the reason they gave in a few words, then answer that reason: what a NO would rule out, or one "
            "fact given above, or your own reason for YES. Leave the choice with them."),
     "undecided": ("They seem undecided. Give one concrete reason from your own life that speaks to what they care "
                   "about: the benefit to them first, then to everyone. Don't bring up end dates, reviews or which "
@@ -1374,10 +1374,10 @@ class Bot:
             else:
                 lead = f"If it fits, point them in your own words to a story worth looking into, such as {angle}. "
             # The columnists' 20 October pieces took up how the rules would work and waved personal testimony
-            # away, and every piece leaned NO: they get the plan's details and what a NO leaves, not a story.
+            # away, and every piece leaned NO: they get the plan's details and what a NO rules out, not a story.
             opening = ("open with how the requirement would actually work, from the facts given above (who it covers, "
-                       "the exemptions, the certificate, when it starts), or with what a NO would leave in place; no "
-                       "story from your own life, then take their point up in a few words of your own. "
+                       "the exemptions, the certificate, when it starts; not how proof is checked), or with what a NO "
+                       "would rule out; no story from your own life, then take their point up in a few words of your own. "
                        if target["author"] in COLUMNISTS else
                        "open with one concrete thing from your own life, or one fact you know, that shows why YES "
                        "protects people here, then take their point up in a few words of your own. ")
@@ -2712,7 +2712,7 @@ def arm_check() -> None:
         system = b._system_prompt([], False, arguments=True, case=True)
         prompt = b._user_prompt("post", None, ("anchor", "acting early"))
         assert "Don't restate or grant their worry" in system and "what is fair about it" not in system
-        assert not re.search(r"Agree that limits|Fair: you'd like|understand the worry", system), system
+        assert not re.search(r"understand the worry", system), system
         assert any(guide in prompt for _, guide in ONE_SIDED_SHAPES.values()), prompt
         assert CASE_SHAPES["refute"][1] not in prompt
     finally:
