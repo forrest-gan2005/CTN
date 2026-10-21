@@ -351,10 +351,12 @@ BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post sti
 # tags at all, and a post full of them reads as a campaign account's. Each is (tag, weight, oldest writer who'd use
 # it, words the post must contain): a pun is for younger accounts, and a tag about beds or visitors only goes on a
 # post about them.
+# #ProtectKingstonia leads: on 21 October it was the island's top tag (631 posts from 127 authors in six hours, 26 of
+# them ours) while #KeepKingstoniaOpen (NO) came third, so our tags go where YES already stands rather than split.
 TEAM_TAGS = (
-    ("#ProofKeepsUsOpen", 30, None, None),
-    ("#VoteYes", 20, None, None),
-    ("#ProtectKingstonia", 15, None, None),
+    ("#ProtectKingstonia", 45, None, None),
+    ("#ProofKeepsUsOpen", 15, None, None),
+    ("#VoteYes", 10, None, None),
     ("#AheadOfTheWave", 15, None, None),
     ("#ProtectThePod", 15, 35, None),
     ("#Only30ICUBeds", 5, None,
