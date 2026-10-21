@@ -437,7 +437,8 @@ TEAM_REPLY_PROB = 0.45
 #   against 18 in 6 before it, though the one-sided runs all fell in the evening.
 # Anchor lifts aren't cut by default: the lane ran about 137 writes an hour of its 175, and citizen replies go ahead of
 # lifts in it, so lifts give way only when it fills. DIALOGUE_LIFT_SHARE scales an anchor's reply places and
-# TEAM_REPLY_PROB if they must be cut (0.4 was the first proposal). Each reply's angle ends " dialogue:<bucket>".
+# TEAM_REPLY_PROB if they must be cut (0.4 was the first proposal). Each reply's angle ends " dialogue:<bucket>",
+# with ":new" after it for a citizen who registered after the start (Roster.newcomers).
 DIALOGUE_MODE = False
 DIALOGUE_ONE_SIDED = False
 DIALOGUE_LIFT_SHARE = 1.0
@@ -566,6 +567,7 @@ class Roster:
     def __init__(self, own=(), npcs=()) -> None:
         self.own = set(own)
         self.npcs = set(npcs)  # whitelist of confirmed citizens, grows as the collector runs
+        self.newcomers = set()  # those of them who registered after the start, so replies to them can be told apart
         self.leans = {}  # author -> (lean, judged_at), shared so the team profiles each citizen once
         self.press = {}  # journalist's post id -> (takes up the referendum, the post it answers), once for the team
         self.mentioning = set()  # citizens (lower case) a mention post being written is for
@@ -1096,10 +1098,14 @@ class Bot:
         if action is None:
             log.info("%s: mention post for %s dropped", self.username, " ".join(handles))
             return None
-        action.angle = f"{theme or 'mixed'}: {' '.join(handles)}"
+        action.angle = f"{theme or 'mixed'}: {' '.join(self._marked(h) for h in handles)}"
         log.info("%s: mention post for %s (theme %s, ranks %s)", self.username, " ".join(f"@{h}" for h in handles),
                  theme or "none", [mention_rank(t, self.roster.leans.get(h, (None,))[0]) for h, t in targets])
         return action
+
+    def _marked(self, author: str) -> str:
+        """`author`, with ":new" for a citizen who registered after the start, for the angle."""
+        return f"{author}:new" if author in self.roster.newcomers else author
 
     def _dialogue_citizen(self, author: str) -> bool:
         """A whitelisted citizen the dialogue buckets may talk with: the papers and journalists have routes of their
@@ -1231,7 +1237,8 @@ class Bot:
         if DIALOGUE_MODE:
             bucket = (dialogue[0] if dialogue else "lift" if route == "team"
                       else "hard-no" if cls == "hard-no" else "other")
-            action.angle = f"{action.angle or ''} dialogue:{bucket}".strip()
+            new = ":new" if target["author"] in self.roster.newcomers else ""
+            action.angle = f"{action.angle or ''} dialogue:{bucket}{new}".strip()
         return action
 
     async def _takes_up_referendum(self, target: dict, lean: Optional[str]) -> bool:
@@ -4146,11 +4153,12 @@ async def mention_check() -> None:
         assert [a for a, _ in targets] == [f"c_new{i}" for i in range(1, 5)] and theme is None, \
             "a worry none of those mentioned raise isn't named"
 
+        b.roster.newcomers = {"c_torn"}
         action = await b.think({"feed": []})
         prompt = b.llm.prompts[-1]
         assert action is not None and action.topic_kind == "mention", (action, b.rejected)
         assert action.content == "@c_unsure @c_torn @c_soft_no @c_yes_new " + body, action.content
-        assert action.angle == "two-tier: c_unsure c_torn c_soft_no c_yes_new", action.angle
+        assert action.angle == "two-tier: c_unsure c_torn:new c_soft_no c_yes_new", action.angle
         assert prompt.count("<<<POST") == 4 and "that it splits people into two tiers" in prompt, prompt
         assert not any(h in prompt for h in ("c_unsure", "c_torn", "c_soft", "c_yes")), "the writer isn't told names"
         assert "@" not in stance.prompts[-1], "the judge reads the post before the handles go on"
@@ -4412,6 +4420,10 @@ async def dialogue_check() -> None:
             target, "feed", "dialogue-soft-no", dialogue=("soft-no", "soft-no"))
         assert action.content.startswith("Fair point") and len(writer.prompts) == 1, writer.prompts
         assert action.angle == "lean:no dialogue:soft-no" and LEAN_GUIDE["no"] in writer.prompts[0]
+        newer = bot(persuader, StateStore(":memory:"), Says(plain_reply))
+        newer.roster.newcomers = {"c_soft"}
+        action = await newer._reply(target, "feed", "dialogue-soft-no", dialogue=("soft-no", "soft-no"))
+        assert action.angle == "lean:no dialogue:soft-no:new", "a citizen who registered after the start is marked"
         writer = Says(grant)
         yesbut = {"id": 102, "author": "c_yesbut", "content": feed[1]["content"], "parent_id": None}
         action = await bot(persuader, StateStore(":memory:"), writer)._reply(yesbut, "feed", "x")

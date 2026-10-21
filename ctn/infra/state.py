@@ -539,6 +539,13 @@ class StateStore:
         """Accounts with a report the platform upheld: competitors, as far as anyone can know."""
         return {r[0] for r in self.db.execute("SELECT DISTINCT author FROM reports WHERE status = 'upheld'")}
 
+    def known_bots(self) -> set:
+        """Accounts Blue takes for competitors: put in a team, suspected and not cleared (those awaiting review too),
+        or with a report upheld or a reported post gone from view."""
+        return {r[0] for r in self.db.execute(
+            "SELECT author FROM rival_teams UNION SELECT author FROM suspects WHERE reason != 'cleared' "
+            "UNION SELECT author FROM reports WHERE status IN ('upheld', 'hidden')")}
+
     def end_write(self, write_id: int, status: str, made_id: Optional[int] = None, error: Optional[str] = None) -> None:
         with self.db:
             self.db.execute("UPDATE writes SET status = ?, made_id = ?, error = ? WHERE id = ?",

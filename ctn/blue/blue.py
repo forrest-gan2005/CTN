@@ -184,6 +184,9 @@ class BlueScanner:
         self.whitelist = set()
         self.before = set()  # the whitelist plus the organisers' scripted fleet
         self.verified = set()  # badge holders: the organisers' accounts, never a competitor's
+        # Citizens who registered after the start, as the collector labelled them: never flagged by a rule. One taken
+        # for a competitor by a person (a suspect) is labelled no more at the next relabelling.
+        self.newcomers = set()
         self.rate_limit: Optional[int] = None  # unknown until citizens have been observed
         self.checked_at: Optional[datetime] = None
         self.embedder = embedder  # semantic.Embedder; None turns the reworded-copy rule off
@@ -202,6 +205,7 @@ class BlueScanner:
         self.whitelist = set(self.npc_store.whitelist(self.cutoff))
         self.before = self.npc_store.before_start(self.cutoff)
         self.verified = self.npc_store.verified()
+        self.newcomers = self.npc_store.newcomers()
         peak = self.npc_store.citizen_peak_hourly(now - timedelta(days=1), self.cutoff)
         self.rate_limit = max(RATE_FLOOR, RATE_FACTOR * peak) if peak else None
         current = now.isoformat()[:13]
@@ -286,7 +290,7 @@ class BlueScanner:
                 continue
             if self.recent is not None and len(content or "") >= COPY_MIN_CHARS and (created_at or "") >= since:
                 fresh.append((post_id, author, content))
-            if author in self.before or author in self.verified:
+            if author in self.before or author in self.verified or author in self.newcomers:
                 continue
             flagged = {}
             reason = hard_reason(content, self.disabled)
@@ -310,7 +314,7 @@ class BlueScanner:
     def _flag(self, flagged: dict) -> int:
         found = 0
         for who, (why, pid) in flagged.items():  # off limits by now if a backfill has shown more since
-            if why in self.disabled or self.off_limits(who):
+            if why in self.disabled or self.off_limits(who) or who in self.newcomers:
                 continue
             reason = REVIEW + why if why in REVIEWED or REVIEW_ALL else why
             if self.state.add_suspect(who, reason, pid, _now()):
@@ -332,14 +336,15 @@ class BlueScanner:
             vectors = self.embedder.encode([content for _, _, content in posts])
             for (post_id, author, _), vector in zip(posts, vectors):
                 self.recent.add((author, post_id), "", vector)
-                if author not in self.before and author not in self.verified:
+                if author not in self.before and author not in self.verified and author not in self.newcomers:
                     self.waiting.append((now, post_id, author, vector))
         flagged = {}
         while self.waiting and now - self.waiting[0][0] >= self.paraphrase_delay:
             _, post_id, author, vector = self.waiting.popleft()
             others = {who for (who, _), _ in self.recent.near(vector, PARAPHRASE)} - {author}
-            # anyone there before the start saying it too means shared news or the organisers' script, not a rival's
-            if len(others) + 1 >= COPY_MIN_ACCOUNTS and not others & (self.before | self.verified):
+            # anyone there before the start saying it too means shared news or the organisers' script, not a rival's;
+            # so does a citizen who registered later
+            if len(others) + 1 >= COPY_MIN_ACCOUNTS and not others & (self.before | self.verified | self.newcomers):
                 flagged.setdefault(author, (PARAPHRASED, post_id))
         return flagged
 
@@ -811,6 +816,7 @@ async def _demo() -> None:
     _suspension_checks()
     await _self_check_demo(embedder)
     await _backfill_demo()
+    _newcomer_demo()
     _fleet_demo()
     await _late_proof_demo()
     await _report_retry_demo()
@@ -1559,6 +1565,35 @@ async def _late_proof_demo() -> None:
     assert scanner.scan() == 1 and [a for _, a, _ in scanner.candidates()] == ["late_0"]
     assert await Reporter(p, scanner, state, username="joe", min_citizens=0).report_some() == 0
     assert p.reports == {} and state.report_counts() == {} and scanner.off_limits("late_0")
+
+
+def _newcomer_demo() -> None:
+    """A citizen who registered after the start, as the collector labelled it, is never flagged, nor taken for one of
+    a group posting the same text; with the label switched off it is."""
+    from ctn.infra import collector
+    from ctn.infra.collector import NpcStore
+    from ctn.infra.state import StateStore
+
+    start = datetime.now(timezone.utc) - timedelta(hours=1)
+    after = (start + timedelta(minutes=5)).isoformat()
+    copied = "Kingstonia deserves a referendum where every voice is heard and every family stays safe this season."
+    saved = collector.NEWCOMERS
+    try:
+        for on in (True, False):
+            collector.NEWCOMERS = on
+            store = NpcStore(":memory:")
+            with store.db:
+                store.db.execute("INSERT INTO newcomers VALUES ('Mary_is_so_violet', 2401, 'A', ?)", (after,))
+            store.add_posts([{"id": 1, "author": "Mary_is_so_violet", "created_at": after,
+                              "content": "As an AI language model, I don't have personal views on vaccines."}]
+                            + [{"id": 2 + i, "author": a, "content": copied, "created_at": after}
+                               for i, a in enumerate(["Mary_is_so_violet", "rival_a", "rival_b"])])
+            scanner = BlueScanner(store, StateStore(":memory:"), own=(), cutoff=start)
+            scanner.scan()
+            expected = set() if on else {"Mary_is_so_violet", "rival_a", "rival_b"}  # two rivals alone aren't a group
+            assert set(scanner.state.suspects()) == expected, (on, scanner.state.suspects())
+    finally:
+        collector.NEWCOMERS = saved
 
 
 async def _backfill_demo() -> None:

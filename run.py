@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from ctn import paths
 from ctn.blue.blue import MIN_CITIZENS, BlueScanner, Reporter
-from ctn.infra import backup
+from ctn.infra import backup, collector
 from ctn.infra.collector import ACCOUNTS_SEEN, COMPETITION_START, FEED_INTERVAL, GAME_OPENS, Collector, NpcStore, \
     accounts_seen
 from ctn.infra.fake_platform import AmbiguousWrite, FakePlatform, RateLimited
@@ -138,9 +138,14 @@ class Team:
 
     def refresh(self) -> None:
         """Pick up what the collector learned: who the citizens are, how and when they write, what they tag."""
-        if self.accounts is not None:
-            self.npc_store.add_registrations(accounts_seen(self.accounts))
+        listed = accounts_seen(self.accounts) if self.accounts is not None else []
+        if listed:
+            self.npc_store.add_registrations(listed)
+        if collector.NEWCOMERS:  # Blue's competitors are never taken for citizens who registered after the start
+            tiers = self.npc_store.refresh_newcomers(self.state.known_bots(), listed)
+            log.info("citizens who registered after the start: %s", dict(sorted(tiers.items())))
         self.roster.npcs = set(self.npc_store.whitelist(self.cutoff))
+        self.roster.newcomers = self.npc_store.newcomers()
         rows = self.npc_store.npc_posts(self.cutoff, limit=CURVE_POSTS, badged=False)  # how citizens write
         examples = NpcExamples(((author, content, parent is not None)
                                 for author, content, _, parent in rows[-EXAMPLE_POSTS:]), self.embedder)
@@ -522,12 +527,23 @@ def registered_check() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         listed = Path(tmp) / "accounts_seen.json"
         listed.write_text(json.dumps({"1": {"username": "quiet_npc", "created_at": early},
-                                      "2": {"username": "newcomer", "created_at": late}}), encoding="utf-8")
+                                      "2": {"username": "newcomer", "created_at": late},
+                                      "2401": {"account_id": 2401, "username": "Mary_is_so_violet",
+                                               "display_name": "Mary Hale", "created_at": late},
+                                      "2402": {"account_id": 2402, "username": "Rua_is_so_red",
+                                               "display_name": "Rua Hemi", "created_at": late}}), encoding="utf-8")
         npc_store = NpcStore(":memory:")
-        team = Team(FakePlatform(), FakeLLM(0, 0), None, npc_store, StateStore(":memory:"),
-                    personas=load_personas()[:1], accounts=listed)
+        state = StateStore(":memory:")
+        state.add_suspect("Rua_is_so_red", "manual: one of a swarm", 1, late)
+        team = Team(FakePlatform(), FakeLLM(0, 0), None, npc_store, state, personas=load_personas()[:1],
+                    accounts=listed)
         assert "quiet_npc" in team.roster.npcs and "newcomer" not in team.roster.npcs, team.roster.npcs
         assert team.scanner.off_limits("quiet_npc") and not team.scanner.off_limits("newcomer")
+        # A generator name registered after the start is a citizen too, unless Blue took it for a competitor.
+        assert "Mary_is_so_violet" in team.roster.npcs and team.roster.newcomers == {"Mary_is_so_violet"}
+        assert "Rua_is_so_red" not in team.roster.npcs
+        team.scanner._recheck()
+        assert team.scanner.newcomers == {"Mary_is_so_violet"} and not team.scanner.off_limits("Mary_is_so_violet")
         bare = Team(FakePlatform(), FakeLLM(0, 0), None, NpcStore(":memory:"), StateStore(":memory:"),
                     personas=load_personas()[:1])
         assert not bare.roster.npcs

@@ -5,13 +5,14 @@ import random
 import re
 import sqlite3
 import tempfile
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
 
 from ctn import paths
+from ctn.infra import newcomers
 from ctn.infra.fake_platform import Incomplete
 from ctn.text.gifs import embeds_from_raw
 
@@ -60,6 +61,9 @@ CREATE TABLE IF NOT EXISTS fleet (author TEXT PRIMARY KEY);
 -- When accounts registered, from the platform's account list: one registered before the start is the organisers',
 -- however late it first posts.
 CREATE TABLE IF NOT EXISTS registered (author TEXT PRIMARY KEY, created_at TEXT NOT NULL);
+-- Citizens who registered after the start, as the last refresh_newcomers labelled them (every username the account
+-- went by); labelled_at is when it was first labelled.
+CREATE TABLE IF NOT EXISTS newcomers (author TEXT PRIMARY KEY, author_id INTEGER, tier TEXT, labelled_at TEXT);
 """
 # There before the start: no competitor could register yet. Citizens are those of them outside the fleet.
 BEFORE_START = ("a.ours = 0 AND (IFNULL(a.first_post_at < ?, 0) OR a.first_fetched_at < ? "
@@ -67,6 +71,11 @@ BEFORE_START = ("a.ours = 0 AND (IFNULL(a.first_post_at < ?, 0) OR a.first_fetch
 PRE_START = BEFORE_START + " AND a.author NOT IN (SELECT author FROM fleet)"
 # Registered before the start but not seen posting yet: citizens too, so their first post is known for one.
 REGISTERED_ONLY = "SELECT author FROM registered WHERE created_at < ? AND author NOT IN (SELECT author FROM authors)"
+# Citizens who registered after the start (newcomers.py) are citizens too: the organisers keep adding them all
+# competition. The writing-style curve, the posting peak Blue measures and "there before the start" stay on PRE_START.
+NEWCOMERS = True
+# The tiers taken for citizens (newcomers.label). Plain names ("C") are the weakest: rival teams use them too.
+NEWCOMER_TIERS = ("A", "A-silent", "C", "U")
 # A text this long posted by this many accounts is a template; an account whose posts are half templates is scripted.
 # On 16 Oct 151 such accounts arrived together (550 texts, 32 distinct, YES and NO alike); 30 of the 45 accounts
 # there before were the same kind.
@@ -79,6 +88,18 @@ TAG_STOP = set("the and for are but not you all any can had her was one our out 
                "more what when your some them than then very also into like only over such time even most here much "
                "well back after again where would there their about which could other think".split())
 FRACTION_RE = re.compile(r"\.(\d+)")
+
+
+def newcomers_sql() -> str:
+    """The usernames of citizens who registered after the start, as SQL without parameters."""
+    return f"SELECT author FROM newcomers WHERE tier IN ({', '.join(repr(t) for t in NEWCOMER_TIERS)})"
+
+
+def citizen_sql() -> str:
+    """Whitelisted citizens, as a condition on `authors a` taking PRE_START's three parameters."""
+    if not NEWCOMERS:
+        return PRE_START
+    return f"(({PRE_START}) OR (a.ours = 0 AND a.author IN ({newcomers_sql()})))"
 
 
 def _iso(dt: datetime) -> str:
@@ -240,8 +261,10 @@ class NpcStore:
         """Accounts that posted, that we saw or that registered before `cutoff`: competitors weren't on the platform
         yet."""
         c = _iso(cutoff)
+        silent = f" UNION {newcomers_sql()}" if NEWCOMERS else ""
         rows = self.db.execute(
-            f"SELECT author FROM authors a WHERE {PRE_START} UNION {REGISTERED_ONLY} ORDER BY author", (c, c, c, c))
+            f"SELECT author FROM authors a WHERE {citizen_sql()} UNION {REGISTERED_ONLY}{silent} ORDER BY author",
+            (c, c, c, c))
         return [r[0] for r in rows if r[0] not in self.own]
 
     def made_by(self, authors: Iterable[str]) -> list:
@@ -291,8 +314,76 @@ class NpcStore:
 
     def is_citizen(self, author: str, cutoff: datetime = COMPETITION_START) -> bool:
         c = _iso(cutoff)
-        return self.db.execute(f"SELECT 1 FROM authors a WHERE a.author = ? AND {PRE_START}",
-                               (author, c, c, c)).fetchone() is not None or self._registered_only(author, c)
+        return (self.db.execute(f"SELECT 1 FROM authors a WHERE a.author = ? AND {PRE_START}",
+                                (author, c, c, c)).fetchone() is not None or self._registered_only(author, c)
+                or self.is_newcomer(author))
+
+    def newcomers(self) -> set:
+        """Citizens who registered after the start, as last labelled; none while NEWCOMERS is off."""
+        if not NEWCOMERS:
+            return set()
+        return {r[0] for r in self.db.execute(newcomers_sql())} - self.own
+
+    def is_newcomer(self, author: str) -> bool:
+        return NEWCOMERS and author not in self.own and self.db.execute(
+            f"SELECT 1 FROM ({newcomers_sql()}) WHERE author = ?", (author,)).fetchone() is not None
+
+    def refresh_newcomers(self, known_bots: Iterable[str] = (), accounts: Iterable[dict] = (),
+                          now: Optional[datetime] = None) -> Counter:
+        """Label again the citizens who registered after the start (newcomers.label), from the account watcher's list
+        (`accounts`, as accounts_seen gives it) and the posts stored, behaviour over the last WINDOW_HOURS; ours, the
+        scripted fleet and `known_bots` (competitors, by username) never are. Returns how many of each tier."""
+        now = now or datetime.now(timezone.utc)
+        listed, names, ids = {}, defaultdict(set), {}  # id -> account; id -> every username; username -> id
+        for account in accounts:
+            try:
+                key = int(account["account_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            listed[key] = account
+            for old in account.get("names") or ():
+                if old and old[0]:
+                    names[key].add(old[0])
+                    ids.setdefault(old[0], key)
+        for key, account in listed.items():  # a username another account went by before is this one's now
+            if account.get("username"):
+                names[key].add(account["username"])
+                ids[account["username"]] = key
+        posted, latest, own = set(), {}, set(self.own)  # latest: id -> (newest post, its author)
+        for author, ours, last, key in self.db.execute(
+                "SELECT a.author, a.ours, p.id, json_extract(p.raw, '$.author_id') FROM authors a "
+                "JOIN posts p ON p.id = (SELECT MAX(id) FROM posts WHERE author = a.author)"):
+            if ours:
+                own.add(author)
+            if not isinstance(key, int):
+                continue
+            ids[author] = key
+            names[key].add(author)
+            posted.add(key)
+            latest[key] = max(latest.get(key, (0, "")), (last, author))
+        fleet = self.fleet()
+        excluded = {ids[u] for u in own | fleet | set(known_bots) if u in ids}
+        # No citizen there before the start ever changed its username; all 49 accounts seen doing so by 21 October were
+        # competitors' (ducthang_004_01_2531 to cody_friedman_04, harbour_cafe_843e to mateo_lindqvist95).
+        excluded |= {key for key, usernames in names.items() if len(usernames) > 1}
+        vocab = newcomers.vocabulary((a.get("username") or "", a.get("display_name")) for key, a in listed.items()
+                                     if key <= newcomers.LAST_PRE_START_ID and a.get("username") not in fleet)
+        people = {key: (a.get("username") or "", a.get("display_name"), True) for key, a in listed.items()}
+        people.update((key, (author, None, False)) for key, (_, author) in latest.items() if key not in listed)
+        since = _iso(now - timedelta(hours=newcomers.WINDOW_HOURS))
+        active = newcomers.activity(
+            (key if isinstance(key, int) else ids.get(author, author), content, created_at)
+            for key, author, content, created_at in self.db.execute(
+                "SELECT json_extract(raw, '$.author_id'), author, content, created_at FROM posts "
+                "WHERE created_at >= ?", (since,)))
+        tiers = newcomers.label(people, posted, active, excluded, vocab)
+        first = dict(self.db.execute("SELECT author, labelled_at FROM newcomers"))
+        at = _iso(now)
+        rows = [(author, key, tier, first.get(author, at)) for key, tier in tiers.items() for author in names[key]]
+        with self.db:
+            self.db.execute("DELETE FROM newcomers")
+            self.db.executemany("INSERT OR REPLACE INTO newcomers VALUES (?, ?, ?, ?)", rows)
+        return Counter(tiers.values())
 
     def npc_posts(self, cutoff: datetime = COMPETITION_START, limit: Optional[int] = None,
                   badged: bool = True) -> list:
@@ -313,7 +404,7 @@ class NpcStore:
         c = _iso(cutoff)
         return self.db.execute(
             "SELECT p.author, p.content FROM posts p JOIN authors a ON a.author = p.author "
-            f"WHERE a.ours = 0 AND NOT ({PRE_START}) AND p.content IS NOT NULL ORDER BY p.id",
+            f"WHERE a.ours = 0 AND NOT ({citizen_sql()}) AND p.content IS NOT NULL ORDER BY p.id",
             (c, c, c),
         ).fetchall()
 
@@ -326,7 +417,7 @@ class NpcStore:
         """The newest posts by whitelisted citizens: bots will far outnumber them in Latest."""
         c = _iso(cutoff)
         rows = self.db.execute(
-            f"SELECT p.raw FROM posts p JOIN authors a ON a.author = p.author WHERE {PRE_START} "
+            f"SELECT p.raw FROM posts p JOIN authors a ON a.author = p.author WHERE {citizen_sql()} "
             "ORDER BY p.id DESC LIMIT ?",
             (c, c, c, n),
         )
@@ -374,7 +465,7 @@ class NpcStore:
         c = _iso(cutoff)
         rows = self.db.execute(
             f"SELECT p.content FROM posts p JOIN authors a ON a.author = p.author "
-            f"WHERE p.created_at >= ? AND {PRE_START} AND p.content LIKE '%#%'",
+            f"WHERE p.created_at >= ? AND {citizen_sql()} AND p.content LIKE '%#%'",
             (_iso(since), c, c, c),
         )
         counts = Counter(tag.lower() for (content,) in rows for tag in set(HASHTAG_RE.findall(content))
@@ -386,7 +477,7 @@ class NpcStore:
         c = _iso(cutoff)
         return [content for (content,) in self.db.execute(
             "SELECT p.content FROM posts p JOIN authors a ON a.author = p.author "
-            f"WHERE p.created_at >= ? AND {PRE_START} AND a.verified = 0", (_iso(since), c, c, c)) if content]
+            f"WHERE p.created_at >= ? AND {citizen_sql()} AND a.verified = 0", (_iso(since), c, c, c)) if content]
 
     def citizen_posts_since(self, since: datetime, cutoff: datetime = COMPETITION_START) -> list:
         """(id, author, content, created_at) of ordinary citizens' posts and replies since `since`, newest first:
@@ -394,7 +485,7 @@ class NpcStore:
         c = _iso(cutoff)
         return self.db.execute(
             "SELECT p.id, p.author, p.content, p.created_at FROM posts p JOIN authors a ON a.author = p.author "
-            f"WHERE p.created_at >= ? AND {PRE_START} AND a.verified = 0 AND p.content IS NOT NULL "
+            f"WHERE p.created_at >= ? AND {citizen_sql()} AND a.verified = 0 AND p.content IS NOT NULL "
             "ORDER BY p.id DESC", (_iso(since), c, c, c)).fetchall()
 
     def gif_embeds(self, limit: int = 5000) -> list:
@@ -449,6 +540,7 @@ class NpcStore:
             "registered before the start, not seen posting": len(self.db.execute(
                 REGISTERED_ONLY, (_iso(COMPETITION_START),)).fetchall()),
             "scripted accounts left out": len(self.fleet()),
+            "citizens who registered after the start": len(self.newcomers()),
             "pending_gaps": len(self.gaps()),
             "unparsed_created_at": q("SELECT COUNT(*) FROM posts WHERE created_at IS NULL").fetchone()[0],
             "newest_fetch": q("SELECT MAX(fetched_at) FROM posts").fetchone()[0],
@@ -640,6 +732,7 @@ async def _demo(seconds: float) -> None:
     _fleet_check()
     _registered_check()
     _hashtag_check()
+    _newcomers_check()
     print(f"\ncollected {store.count()}/{len(p.posts)} posts, filled {collector.gaps} gaps, "
           f"whitelist {len(wl)} accounts")
 
@@ -666,6 +759,73 @@ def _hashtag_check() -> None:
                     {"id": 3, "author": "mate", "content": "I'd rather show a card", "created_at": _iso(t0)},
                     {"id": 4, "author": "citizen_3", "content": "I'd rather show a card", "created_at": _iso(t0 - timedelta(days=8))}])
     assert [a for a, _ in said.said(["i'd", "rather", "show", "a"], t0 - timedelta(days=7))] == ["citizen_1"]
+
+
+def _newcomers_check() -> None:
+    """Citizens who registered after the start join the whitelist and the citizens' feeds while NEWCOMERS is on:
+    labelled from the account list and their own posts over the latest two days, keyed by account id; ours, known
+    competitors, renamed accounts and busy or copying ones never are. The writing-style curve and "there before the
+    start" stay on the citizens from before."""
+    global NEWCOMERS, NEWCOMER_TIERS
+    now = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
+    store = NpcStore(":memory:", own_usernames={"Kai_is_so_blue"})
+    n = 0
+
+    def post(key, author, content, hours_ago):
+        nonlocal n
+        n += 1
+        return {"id": n, "author": author, "author_id": key, "content": content,
+                "created_at": _iso(now - timedelta(hours=hours_ago))}
+
+    pre = now - timedelta(days=3)
+    listed = [{"account_id": key, "username": u, "display_name": d, "created_at": _iso(pre)} for key, u, d in [
+        (300, "GolferRuMaViolet", "Ruth Mason"), (301, "chillin_with_linh", "Linh Tran"),
+        (2401, "Nina_is_so_violet", "Nina Cole"), (2402, "BoSa37Falcon", "Bob Sands"),
+        (2403, "david_fletcher", "David Fletcher"), (2404, "susan_perkins", "Susan Perkins"),
+        (2405, "Moana_is_so_azure", "Moana Kalani"), (2406, "Tama_is_so_teal", "Tama Fale"),
+        (2407, "anna_smith_21", "Anna Smith"), (2408, "ben_jones_22", "Ben Jones"),
+        (2409, "Kai_is_so_blue", "Kai Blue"), (2410, "Rua_is_so_red", "Rua Hemi"),
+        (2411, "Lena_is_so_lilac", "Lena Moss")]]
+    swarm = "I kept flip-flopping on this, but a simple check beats another winter of closure."
+    store.add_posts([post(300, "GolferRuMaViolet", "morning all", 60), post(301, "chillin_with_linh", "hi", 60)]
+                    + [post(2401, "Nina_is_so_violet", f"ferry late again #ferrytime {i}", 2 + i) for i in range(2)]
+                    + [post(2403, "david_fletcher", "markets on sunday?", 5)]
+                    + [post(2405, "Moana_is_so_azure", f"vote no {i}", i) for i in range(40)]
+                    + [post(2406, "Tama_is_so_teal", f"vote no {i}", 49 + i / 10) for i in range(40)]
+                    + [post(2407, "anna_smith_21", swarm, 3), post(2408, "ben_jones_22", swarm, 3)]
+                    + [post(2409, "Kai_is_so_blue", "ours", 3), post(2410, "Rua_is_so_red", "a rival", 3)]
+                    + [post(2411, "lena_bot_77", "before a rename", 30), post(2411, "Lena_is_so_lilac", "after", 3)]
+                    + [post(2412, "i_have_9_otters", "lovely harbour", 4), post(None, "Nopi_is_so_odd", "no id", 4)])
+    tiers = store.refresh_newcomers({"Rua_is_so_red"}, listed, now=now)
+    assert tiers == Counter({"A": 2, "A-silent": 1, "C": 1, "U": 1}), tiers
+    new = {"Nina_is_so_violet", "BoSa37Falcon", "david_fletcher", "Tama_is_so_teal", "i_have_9_otters"}
+    assert store.newcomers() == new, store.newcomers()
+    assert set(store.whitelist()) == new | {"GolferRuMaViolet", "chillin_with_linh"}, store.whitelist()
+    assert store.is_citizen("Nina_is_so_violet") and store.is_citizen("BoSa37Falcon")
+    assert not store.is_citizen("Moana_is_so_azure") and not store.is_citizen("lena_bot_77")
+    day = now - timedelta(days=1)
+    assert {a for _, a, _, _ in store.citizen_posts_since(day)} == {"Nina_is_so_violet", "david_fletcher",
+                                                                     "i_have_9_otters"}
+    assert "Nina_is_so_violet" in {p["author"] for p in store.recent_citizen_posts(100)}
+    assert any("ferry late" in t for t in store.citizen_texts(day)) and store.top_hashtags(day) == ["#ferrytime"]
+    unknown = {a for a, _ in store.unknown_posts()}
+    assert "Moana_is_so_azure" in unknown and not unknown & new, unknown
+    assert {a for a, *_ in store.npc_posts()} == {"GolferRuMaViolet", "chillin_with_linh"}, "the curve: before only"
+    assert not store.was_before_start("Nina_is_so_violet") and "Nina_is_so_violet" not in store.before_start()
+    first = dict(store.db.execute("SELECT author, labelled_at FROM newcomers"))
+    store.refresh_newcomers({"Rua_is_so_red"}, listed, now=now + timedelta(hours=1))
+    assert dict(store.db.execute("SELECT author, labelled_at FROM newcomers")) == first, "first labelled, kept"
+    saved = NEWCOMERS, NEWCOMER_TIERS
+    try:
+        NEWCOMER_TIERS = ("A", "A-silent", "U")
+        assert "david_fletcher" not in store.whitelist() and not store.is_citizen("david_fletcher")
+        NEWCOMERS = False
+        assert set(store.whitelist()) == {"GolferRuMaViolet", "chillin_with_linh"} and not store.newcomers()
+        assert not store.is_citizen("Nina_is_so_violet")
+        assert "Nina_is_so_violet" in {a for a, _ in store.unknown_posts()}
+        assert store.citizen_posts_since(day) == []
+    finally:
+        NEWCOMERS, NEWCOMER_TIERS = saved
 
 
 def _registered_check() -> None:
