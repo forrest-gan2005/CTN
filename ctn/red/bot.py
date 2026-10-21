@@ -330,7 +330,10 @@ TEAM_REPLY_PROB = 0.45
 # over a quarter-hour or so. An account tries each once an anchor, so a dropped reply isn't redrafted over and over.
 RUSH_WINDOW = timedelta(minutes=30)
 RUSH_PROB = 0.9
-RUSH_ORDER = ("like", "reply", "repost")
+# Reposts before replies (21 October): a reply waits on a draft and is often sunk by a shared phrase, so under the
+# reply-first order an anchor had 15 reposts at 25 minutes against 26 the night before, and no daytime anchor
+# reached the top ten.
+RUSH_ORDER = ("like", "repost", "reply")
 LIFT_ORDER = 1e-7  # per post id, for the write lane; post ids stay well under a million
 RUSH_WAIT = (20.0, 180.0)
 # The anchor post, then the reposts and replies lifting it in its rush, jump the write lane's queue: under S53 the
@@ -1589,9 +1592,9 @@ class Bot:
         elif action.type in ("repost", "reply") and action.post_id is not None and \
                 action.post_id == self._focus(datetime.now(timezone.utc)):
             # A newer anchor's lifts go ahead of an older one's still queued (on 21 October 00:05 the new anchor
-            # had none at 15 minutes while 22 replies to the last one went out), and its replies ahead of its
-            # reposts. The fraction stays well under the gap to CITIZEN.
-            priority = LIFT - action.post_id * LIFT_ORDER - (LIFT_ORDER / 2 if action.type == "reply" else 0)
+            # had none at 15 minutes while 22 replies to the last one went out), and its reposts ahead of its
+            # replies. The fraction stays well under the gap to CITIZEN.
+            priority = LIFT - action.post_id * LIFT_ORDER - (LIFT_ORDER / 2 if action.type == "repost" else 0)
         else:
             priority = NORMAL
         token = WRITE_PRIORITY.set(priority)
@@ -2542,7 +2545,7 @@ async def rush_check() -> None:
     kinds = [(kind, post_id, CITIZEN < p < NORMAL and LIFT - 0.01 < p <= LIFT or p) for kind, post_id, p in noting.sent]
     assert kinds == [("repost", 904, True), ("repost", 902, NORMAL), ("reply", 904, True), ("reply", 9, NORMAL),
                      ("reply", 8, CITIZEN), ("post", None, ANCHOR), ("post", None, NORMAL)], noting.sent
-    assert noting.sent[2][2] < noting.sent[0][2], "an anchor's replies go ahead of its reposts"
+    assert noting.sent[0][2] < noting.sent[2][2], "an anchor's reposts go ahead of its replies"
     two.record("lena_brook", _iso(datetime.now(timezone.utc)),
                Action("post", content="x", topic_kind="anchor", made_id=1904))
     await lifter.act(Action("repost", post_id=1904))
