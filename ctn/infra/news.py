@@ -36,7 +36,10 @@ SHARE_DAYS = 2  # how old a story a post may still link to
 SHARE_RE = re.compile(r"h2d2|vaccin|hospital|health|clinic|nurse|\bwards?\b|intensive care|referendum|\bpoll|"
                       r"touris|ferr(y|ies)|\bschools?\b", re.IGNORECASE)
 SHARE_SKIP_RE = re.compile(r"privacy|\bid cards?\b|guardrail|blank cheque|hawthorne|castillo|\bpart(y|ies)\b|"
-                           r"assembly", re.IGNORECASE)
+                           r"assembly|\bvote no\b|launch\w*[^.]{0,20}\bno campaign|"
+                           # rules.md knows one case: any story of more isn't one to link until it's updated
+                           r"\b(second|third|new|more|further) (h2d2 )?cases?\b|contacts? (have )?test(ed)? positive",
+                           re.IGNORECASE)
 SHARE_CATEGORIES = {"opinion"}
 FRACTION_RE = re.compile(r"\.\d+")
 
@@ -285,6 +288,8 @@ async def _demo() -> None:
     assert not any(u.endswith("/column") for u in urls) and any(u.endswith("/venues") for u in urls), \
         "no opinion; a story NO would welcome is still one to start from"
     for title, category in (("Hawthorne backs H2D2 vaccine requirement", "Health"),
+                            ("Tourism Board launches Vote No campaign", "Business"),
+                            ("Second H2D2 case confirmed as contacts test positive", "Health"),
                             ("ID cards raise privacy fears over H2D2 records", "National"),
                             ("Reef survey shows coral recovery", "Environment")):
         news.store.add("daily-kingstonia", {"url": "/daily-kingstonia/articles/x", "title": title,
