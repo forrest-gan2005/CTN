@@ -257,6 +257,20 @@ class StateStore:
             "AND content IS NOT NULL UNION ALL SELECT username, content FROM writes WHERE sent_at >= ? "
             "AND username != ? AND status IN ('sending', 'pending')", (since, exclude, since, exclude)).fetchall()
 
+    def mention_texts(self, since: str) -> list:
+        """Texts of the team's posts and replies with an @ in them since UTC ISO time `since`, counting ones still
+        being sent and ones that may be live."""
+        return [r[0] for r in self.db.execute(
+            "SELECT content FROM history WHERE type IN ('post', 'reply') AND ts >= ? AND instr(content, '@') > 0 "
+            "UNION ALL SELECT content FROM writes WHERE sent_at >= ? AND status IN ('sending', 'pending') "
+            "AND instr(content, '@') > 0", (since, since))]
+
+    def posted(self, username: str, topic_kind: str, since: str) -> list:
+        """UTC ISO times of this account's posts on `topic_kind` since `since`, oldest first."""
+        return [r[0] for r in self.db.execute(
+            "SELECT ts FROM history WHERE username = ? AND type = 'post' AND topic_kind = ? AND ts >= ? ORDER BY ts",
+            (username, topic_kind, since))]
+
     def acted_on(self, username: str, kind: str, post_id: int) -> bool:
         """Whether this account has liked, reposted or replied to (`kind`) this post as far as history shows, or
         has a reply to it that went out or may have; history alone survives a restore that loses the quota place."""

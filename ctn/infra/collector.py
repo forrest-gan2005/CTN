@@ -388,6 +388,15 @@ class NpcStore:
             "SELECT p.content FROM posts p JOIN authors a ON a.author = p.author "
             f"WHERE p.created_at >= ? AND {PRE_START} AND a.verified = 0", (_iso(since), c, c, c)) if content]
 
+    def citizen_posts_since(self, since: datetime, cutoff: datetime = COMPETITION_START) -> list:
+        """(id, author, content, created_at) of ordinary citizens' posts and replies since `since`, newest first:
+        verified accounts and the scripted fleet left out."""
+        c = _iso(cutoff)
+        return self.db.execute(
+            "SELECT p.id, p.author, p.content, p.created_at FROM posts p JOIN authors a ON a.author = p.author "
+            f"WHERE p.created_at >= ? AND {PRE_START} AND a.verified = 0 AND p.content IS NOT NULL "
+            "ORDER BY p.id DESC", (_iso(since), c, c, c)).fetchall()
+
     def gif_embeds(self, limit: int = 5000) -> list:
         """The GIF embeds on the newest posts that aren't ours: the GIFs people here actually post."""
         rows = self.db.execute("SELECT raw FROM posts WHERE ours = 0 AND raw LIKE '%giphy%' ORDER BY id DESC LIMIT ?",
