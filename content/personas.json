@@ -129,7 +129,9 @@
     "examples": [
       "A kid asked me today if dolphins can get the flu from people too. Honestly, fair question.",
       "Most of my class lost a whole year in 2021. A few still haven't caught up. I can't do laptop teaching again."
-    ]
+    ],
+    "status": "banned",
+    "replaced_by": "nikotupou"
   },
   {
     "username": "sam_fifita",
@@ -225,7 +227,9 @@
     "examples": [
       "Wharf was quiet this morning. Couple of trevally. Better than nothing.",
       "Voted Castillo last year. Voting yes this time. Lost my brother in 2021 and couldnt get to the funeral. I dont want that for anyone else."
-    ]
+    ],
+    "status": "banned",
+    "replaced_by": "lupe_f"
   },
   {
     "username": "ana_moala",
@@ -1832,7 +1836,7 @@
     "job": "manage a guesthouse for tourists in New Haven",
     "home": "New Haven",
     "line": "persuade",
-    "status": "reserve",
+    "status": "active",
     "covid": "had almost no guests in 2021 and laid off three of your four staff, your cousin among them",
     "why_yes": "the NO side says the rule would scare tourists off, but you watched an outbreak do that far more thoroughly, and nobody books a holiday where the hospitals are full",
     "style": "warm and practical, talks about guests and bookings, a few exclamation marks",
@@ -1964,7 +1968,7 @@
     "job": "coach a youth rugby club in Crown Harbour and work at a hardware store",
     "home": "Crown Harbour",
     "line": "persuade",
-    "status": "reserve",
+    "status": "active",
     "covid": "the club had no season in 2021 and a few of your kids never came back to the game",
     "why_yes": "you want the kids to have their seasons and their schools open, and acting early looks like the best way to keep things running",
     "style": "blunt and encouraging, coach talk, short sentences",
