@@ -497,9 +497,11 @@ RUSH_WAIT = (20.0, 180.0)
 # minutes after it was up.
 # Since dialogue mode went on, replies to citizens doubled by day and the rush's lifts wait behind them in the lane: an
 # anchor had 1-8 team replies in its first 25 minutes instead of 15-23, and fell off Trending. With RUSH_FIRST on, the
-# lifts of the anchor in its rush go ahead of replies to citizens too (still behind an anchor post); an older
-# anchor's lifts stay behind them.
+# lifts of the anchor in its rush go ahead of replies to citizens too (still behind an anchor post) while it is under
+# RUSH_FIRST_WINDOW old, when a lift counts most for Trending; later ones, and an older anchor's, stay behind them, so
+# back-to-back rushes don't hold citizen replies for most of the day.
 RUSH_FIRST = False
+RUSH_FIRST_WINDOW = timedelta(minutes=12)
 # A phrase SHARED_LIMIT teammates used lately is refused in another's draft, and the writer kept reaching for
 # the same few: "certificate at the door" cost 18 drafts in S52's first half-hour. The most worn of the last day are
 # listed in every prompt as ones to leave alone.
@@ -2107,11 +2109,13 @@ class Bot:
         elif action.type == "reply" and self.roster.classify(action.target_author) == "npc":
             priority = CITIZEN  # under S54 one waited behind a rush's 50 lifts, about 18 minutes
         elif action.type in ("repost", "reply") and action.post_id is not None and \
-                action.post_id == self._focus(datetime.now(timezone.utc)):
+                action.post_id == self._focus(now := datetime.now(timezone.utc)):
             # A newer anchor's lifts go ahead of an older one's still queued (on 21 October 00:05 the new anchor
             # had none at 15 minutes while 22 replies to the last one went out), and its reposts ahead of its
             # replies. The fraction stays well under the gap to CITIZEN; with RUSH_FIRST, between ANCHOR and CITIZEN.
-            priority = ((CITIZEN - 0.5 if RUSH_FIRST else LIFT) - action.post_id * LIFT_ORDER
+            early = RUSH_FIRST and any(post_id == action.post_id for _, post_id, _ in
+                                       self.store.team_posts(LIFT_TOPICS, _iso(now - RUSH_FIRST_WINDOW), ""))
+            priority = ((CITIZEN - 0.5 if early else LIFT) - action.post_id * LIFT_ORDER
                         - (LIFT_ORDER / 2 if action.type == "repost" else 0))
         else:
             priority = NORMAL
@@ -3170,6 +3174,14 @@ async def rush_first_check() -> None:
         for action in (Action("repost", post_id=999_999), Action("reply", post_id=999_999, content="x")):
             await b.act(action)
         assert all(ANCHOR < p < CITIZEN for _, p in laned.sent) and laned.sent[0][1] < laned.sent[1][1], laned.sent
+        late = StateStore(":memory:")  # past RUSH_FIRST_WINDOW, still in its rush: back behind citizen replies
+        late.record("rosa_dives", _iso(now - RUSH_FIRST_WINDOW - timedelta(minutes=3)),
+                    Action("post", content="x", topic_kind="anchor", made_id=906))
+        RUSH_FIRST, laned = True, Laned()
+        b = Bot(persona, laned, FakeLLM(0, 0), load_world(), store=late)
+        assert b._focus(now) == 906
+        await b.act(Action("repost", post_id=906))
+        assert CITIZEN < laned.sent[0][1] <= LIFT, laned.sent
     finally:
         RUSH_FIRST = saved
     print("rush first ok")
