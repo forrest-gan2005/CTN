@@ -74,8 +74,9 @@ REGISTERED_ONLY = "SELECT author FROM registered WHERE created_at < ? AND author
 # Citizens who registered after the start (newcomers.py) are citizens too: the organisers keep adding them all
 # competition. The writing-style curve, the posting peak Blue measures and "there before the start" stay on PRE_START.
 NEWCOMERS = True
-# The tiers taken for citizens (newcomers.label). Plain names ("C") are the weakest: rival teams use them too.
-NEWCOMER_TIERS = ("A", "A-silent", "C", "U")
+# The tiers taken for citizens (newcomers.label). Plain names ("C") are left out: YES swarms use them too, and
+# about one in ten so labelled is a bot.
+NEWCOMER_TIERS = ("A", "A-silent", "U")
 # A text this long posted by this many accounts is a template; an account whose posts are half templates is scripted.
 # On 16 Oct 151 such accounts arrived together (550 texts, 32 distinct, YES and NO alike); 30 of the 45 accounts
 # there before were the same kind.
@@ -797,6 +798,8 @@ def _newcomers_check() -> None:
                     + [post(2411, "lena_bot_77", "before a rename", 30), post(2411, "Lena_is_so_lilac", "after", 3)]
                     + [post(2412, "i_have_9_otters", "lovely harbour", 4), post(None, "Nopi_is_so_odd", "no id", 4)])
     tiers = store.refresh_newcomers({"Rua_is_so_red"}, listed, now=now)
+    saved = NEWCOMERS, NEWCOMER_TIERS
+    NEWCOMER_TIERS = ("A", "A-silent", "C", "U")
     assert tiers == Counter({"A": 2, "A-silent": 1, "C": 1, "U": 1}), tiers
     new = {"Nina_is_so_violet", "BoSa37Falcon", "david_fletcher", "Tama_is_so_teal", "i_have_9_otters"}
     assert store.newcomers() == new, store.newcomers()
@@ -815,7 +818,6 @@ def _newcomers_check() -> None:
     first = dict(store.db.execute("SELECT author, labelled_at FROM newcomers"))
     store.refresh_newcomers({"Rua_is_so_red"}, listed, now=now + timedelta(hours=1))
     assert dict(store.db.execute("SELECT author, labelled_at FROM newcomers")) == first, "first labelled, kept"
-    saved = NEWCOMERS, NEWCOMER_TIERS
     try:
         NEWCOMER_TIERS = ("A", "A-silent", "U")
         assert "david_fletcher" not in store.whitelist() and not store.is_citizen("david_fletcher")

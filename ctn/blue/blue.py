@@ -290,12 +290,15 @@ class BlueScanner:
                 continue
             if self.recent is not None and len(content or "") >= COPY_MIN_CHARS and (created_at or "") >= since:
                 fresh.append((post_id, author, content))
-            if author in self.before or author in self.verified or author in self.newcomers:
+            if author in self.before or author in self.verified:
                 continue
             flagged = {}
             reason = hard_reason(content, self.disabled)
             if reason:
                 flagged[author] = (reason, post_id)
+            if author in self.newcomers:  # a citizen by name and pace: only a hard tell outweighs that
+                found += self._flag(flagged, newcomers_too=True)
+                continue
             if created_at and self.rate_limit is not None:
                 hour = (author, created_at[:13])
                 self.hourly[hour] += 1
@@ -311,10 +314,10 @@ class BlueScanner:
             found += self._flag(flagged)
         return found + self._flag(self._paraphrased(fresh))
 
-    def _flag(self, flagged: dict) -> int:
+    def _flag(self, flagged: dict, newcomers_too: bool = False) -> int:
         found = 0
         for who, (why, pid) in flagged.items():  # off limits by now if a backfill has shown more since
-            if why in self.disabled or self.off_limits(who) or who in self.newcomers:
+            if why in self.disabled or self.off_limits(who) or (who in self.newcomers and not newcomers_too):
                 continue
             reason = REVIEW + why if why in REVIEWED or REVIEW_ALL else why
             if self.state.add_suspect(who, reason, pid, _now()):
@@ -1568,8 +1571,8 @@ async def _late_proof_demo() -> None:
 
 
 def _newcomer_demo() -> None:
-    """A citizen who registered after the start, as the collector labelled it, is never flagged, nor taken for one of
-    a group posting the same text; with the label switched off it is."""
+    """A citizen who registered after the start, as the collector labelled it, is not taken for one of a group posting
+    the same text, and only a hard tell flags it; with the label switched off the group is flagged too."""
     from ctn.infra import collector
     from ctn.infra.collector import NpcStore
     from ctn.infra.state import StateStore
@@ -1590,7 +1593,8 @@ def _newcomer_demo() -> None:
                                for i, a in enumerate(["Mary_is_so_violet", "rival_a", "rival_b"])])
             scanner = BlueScanner(store, StateStore(":memory:"), own=(), cutoff=start)
             scanner.scan()
-            expected = set() if on else {"Mary_is_so_violet", "rival_a", "rival_b"}  # two rivals alone aren't a group
+            # two rivals alone aren't a group
+            expected = {"Mary_is_so_violet"} if on else {"Mary_is_so_violet", "rival_a", "rival_b"}
             assert set(scanner.state.suspects()) == expected, (on, scanner.state.suspects())
     finally:
         collector.NEWCOMERS = saved
