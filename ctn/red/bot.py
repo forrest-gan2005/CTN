@@ -288,7 +288,7 @@ NEWS_ANCHOR_GUIDE = ("This post shares a news story; its link goes under your po
                      "is already set (who it covers, the exemptions, the stages); doubts about the vaccine are fair, "
                      "and it still lowers serious illness. Add nothing the story doesn't say. Keep the whole post under "
                      "{limit} characters.")
-NEWS_SLACK = 60  # the writer is told this much less than the cap: drafts ran 7-70 characters over the one they were told
+NEWS_SLACK = 60  # the writer is told this much under the cap: drafts ran 7-70 characters over what they were told
 NEWS_ANCHOR_REPEAT = timedelta(hours=6)  # a story a teammate's anchor linked this recently isn't linked again
 # Mention posts, from 21 October: since 20 October rivals' top-level posts @mentioning four citizens drew 0.26
 # citizen replies each (204 posts, a NO team's most), against 0.09-0.11 per direct reply of ours to a citizen; a
@@ -2969,7 +2969,8 @@ async def news_anchor_check() -> None:
         assert action is not None, b.rejected
         assert action.content.endswith("\n" + story[0]) and "giphy" not in action.content, action.content
         assert "First H2D2 case confirmed" in writer.prompts[0] and "write no link" in writer.prompts[0]
-        assert GIF_PROMPT not in writer.prompts[0] and f"under {news_limit(story) - NEWS_SLACK} characters" in writer.prompts[0]
+        told = f"under {news_limit(story) - NEWS_SLACK} characters"
+        assert GIF_PROMPT not in writer.prompts[0] and told in writer.prompts[0]
         # too long to leave room for the link: dropped, not sent without it, after a redraft told to be shorter
         b.writer_text, writer.text = writer.text, text + " " + "And " * 60
         writer.prompts.clear()
