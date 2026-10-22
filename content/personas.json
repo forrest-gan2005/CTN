@@ -801,7 +801,7 @@
     "job": "work as a mechanic at a workshop in Crown Harbour",
     "home": "Crown Harbour",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "kept the workshop open in 2021 but half your customers vanished",
     "why_yes": "you'd rather keep an outbreak out than lose half your customers for another year",
     "style": "plain and practical, full sentences, no slang",
@@ -820,7 +820,8 @@
       "you'd back youth service if it were voluntary and paid properly",
       "you think skilled workers from overseas should find it easier to come and stay"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "wattsa"
   },
   {
     "username": "tane_halsey",
@@ -1594,7 +1595,7 @@
     "job": "work in a call centre for the power company",
     "home": "Crown Harbour",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "took calls from your bedroom through 2021 while people panicked about their bills",
     "why_yes": "you heard how much 2021 hurt people on the phone every day, and you don't want a repeat",
     "style": "upbeat, a little scattered, jumps between thoughts",
