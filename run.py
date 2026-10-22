@@ -1688,6 +1688,10 @@ if __name__ == "__main__":
         from ctn.red import bot as bot_module
         # Pitches and anchor posts have their own checks; these expect a step's action to be the kind they set.
         bot_module.PITCH_PROB, bot_module.ANCHOR_LINES = 0.0, set()
+        # The checks below were written before these; ctn.red.bot's own checks cover them, and smoke() runs with them.
+        pinned = bot_module.CITIZEN_TARGETING, bot_module.STORY_REPLIES, bot_module.CITIZEN_DAILY_REPLIES
+        bot_module.CITIZEN_TARGETING, bot_module.STORY_REPLIES = False, False
+        bot_module.CITIZEN_DAILY_REPLIES = bot_module.MAX_REPLIES_PER_AUTHOR
         log_file_check()
         schedule_check()
         registered_check()
@@ -1704,6 +1708,7 @@ if __name__ == "__main__":
         asyncio.run(lock_check())
         asyncio.run(news_check())
         asyncio.run(examples_check())
+        bot_module.CITIZEN_TARGETING, bot_module.STORY_REPLIES, bot_module.CITIZEN_DAILY_REPLIES = pinned
         asyncio.run(smoke())
     else:
         asyncio.run(rehearse(args.seconds, args.real))
