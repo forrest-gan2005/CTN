@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from ctn.infra.fake_platform import ANCHOR, CITIZEN, LIFT, NORMAL, WRITE_LEFT, WRITE_PRIORITY, AmbiguousWrite, FakePlatform, RateLimited
 from ctn.infra.llm import FakeLLM, team_llms
-from ctn.infra.news import SITES
+from ctn.infra.news import SHARE_PREFER_RE, SITES, NewsStore
 from ctn.infra.state import StateStore
 from ctn.red.rhythm import UniformPacer
 from ctn.text.content import (WORDING, load_journalists, load_personas, load_vaccine_angles, load_world,
@@ -317,8 +317,17 @@ NEWS_ANCHOR_GUIDE = ("This post shares a news story; its link goes under your po
                      "news the NO side would welcome, don't argue with the paper or grant what it asks for: a poll "
                      "with NO ahead is close, with plenty undecided; a call for the list of places is answered by what "
                      "is already set (who it covers, the exemptions, the stages); doubts about the vaccine are fair, "
-                     "and it still lowers serious illness. Add nothing the story doesn't say. Keep the whole post under "
-                     "{limit} characters.")
+                     "and it still lowers serious illness. Add nothing the story doesn't say.{note} Keep the whole post "
+                     "under {limit} characters.")
+# A story the YES case needs framed with care, and how (world.md: Kingstonia Central has 40 unfilled nursing posts).
+NEWS_STORY_NOTES = (
+    (re.compile(r"\bnurses\b|nursing arrivals", re.IGNORECASE),
+     " On the nurses: 25 arriving over four months is welcome, so say so, but it isn't the answer to an outbreak. "
+     "Beyond the story you may say one known fact: Kingstonia Central has about 40 nursing posts unfilled now, and "
+     "an outbreak could come before the new nurses are all here. The requirement means fewer people seriously ill "
+     "at once, so the staff there can cope. Give no other numbers."),
+)
+NEWS_ANCHOR_PREFER = 3  # weight in the draw of a news.SHARE_PREFER_RE story (the first case, the nurses), others 1
 NEWS_SLACK = 60  # the writer is told this much under the cap: drafts ran 7-70 characters over what they were told
 NEWS_ANCHOR_REPEAT = timedelta(hours=6)  # a story a teammate's anchor linked this recently isn't linked again
 # Mention posts, from 21 October: since 20 October rivals' top-level posts @mentioning four citizens drew 0.26
@@ -366,6 +375,20 @@ def post_worries(text: str) -> set:
 def news_limit(story: tuple) -> int:
     """How long an anchor linking `story` may run, so its link always fits after it."""
     return min(CASE_MAX_LEN, POST_LIMIT - 1 - len(story[0]))
+
+
+def story_note(story: tuple) -> str:
+    """What NEWS_STORY_NOTES says to frame `story`, or nothing."""
+    text = f"{story[2]} {story[3]}"
+    return "".join(note for pattern, note in NEWS_STORY_NOTES if pattern.search(text))
+
+
+def draw_story(stories: list) -> Optional[tuple]:
+    """One of `stories` to link, the first case and the nurses NEWS_ANCHOR_PREFER times as likely as the rest."""
+    if not stories:
+        return None
+    weights = [NEWS_ANCHOR_PREFER if SHARE_PREFER_RE.search(f"{s[2]} {s[3]}") else 1 for s in stories]
+    return random.choices(stories, weights)[0]
 LIFT_TOPICS = ("anchor",)
 BOOST_WINDOW = timedelta(hours=2)
 BOOST_DELAY = timedelta(minutes=1)
@@ -1512,8 +1535,7 @@ class Bot:
         action = None
         self.sharing = None
         if self.articles and random.random() < NEWS_ANCHOR_SHARE:
-            fresh = self._fresh_stories(now)
-            self.sharing = random.choice(fresh) if fresh else None
+            self.sharing = draw_story(self._fresh_stories(now))
             log.info("%s: anchor %s", self.username,
                      f"links {self.sharing[0]}" if self.sharing else "drawn to link a story, none fresh")
         try:
@@ -1936,6 +1958,7 @@ class Bot:
             if topic[0] == "anchor" and self.sharing is not None:
                 url, site, title, summary = self.sharing
                 parts.append(NEWS_ANCHOR_GUIDE.format(paper=SITES.get(site, site), title=title, summary=summary,
+                                                      note=story_note(self.sharing),
                                                       limit=news_limit(self.sharing) - NEWS_SLACK))
             shapes = self.case_shapes or arm_shapes(self.writing_arm or arm())
             shape = self.case_shape if self.case_shape in shapes else _draw_shape(shapes)
@@ -3363,6 +3386,45 @@ async def news_anchor_check() -> None:
         b.store.record("someone", _iso(now - timedelta(hours=1)),
                        Action("post", content=f"{text}\n{story[0]}", topic_kind="anchor", made_id=1))
         assert b._fresh_stories(now) == [other] and b._fresh_stories(now + NEWS_ANCHOR_REPEAT) == [story, other]
+        # stories making NO's case aren't offered; the first case and the nurses are, and drawn more often
+        papers = NewsStore(":memory:")
+        when = datetime(2026, 10, 22, 1, 30, tzinfo=timezone.utc)
+        for i, (title, summary) in enumerate((
+                ("Kingstonia University professor warns of 'vaccines forever' risk", "Uncertain booster requirements "
+                 "for H2D2 could lead to permanent pharmaceutical contracts."),
+                ("Tourism operators demand clarity on 'public space' definitions ahead of referendum", "Tourism "
+                 "industry leaders seek specific details on which venues and visitors would be affected."),
+                ("First H2D2 case confirmed in Kingstonia", "Health authorities confirm a stable imported case."),
+                ("Regional recruitment agreement to bring 25 nurses to Kingstonian hospitals", "25 nurses will arrive "
+                 "via a Pacific recruitment agreement."),
+                ("New nursing arrivals to bolster hospital staffing", "25 new nurses will arrive over four months."),
+                ("Outer-island ferry service reduced as engine repairs begin", "Two weeks of reduced capacity."))):
+            papers.add("daily-kingstonia", {"url": f"/daily-kingstonia/articles/s{i}", "title": title,
+                                            "summary": summary, "category": "Health",
+                                            "published_at": (when + timedelta(minutes=i)).isoformat()},
+                       when + timedelta(hours=1))
+        offered = papers.shareable(when + timedelta(hours=2))
+        titles = {s[2] for s in offered}
+        assert not any("forever" in t or "clarity" in t for t in titles), titles
+        assert {"First H2D2 case confirmed in Kingstonia", "New nursing arrivals to bolster hospital staffing",
+                "Outer-island ferry service reduced as engine repairs begin"} <= titles, titles
+        ferry = next(s for s in offered if "ferry" in s[2])
+        nurses = next(s for s in offered if "nursing" in s[2])
+        state = random.getstate()
+        random.seed(7)
+        drawn = [draw_story([ferry, nurses]) for _ in range(2000)]
+        random.setstate(state)
+        assert 0.7 < drawn.count(nurses) / len(drawn) < 0.8, drawn.count(nurses)
+        assert draw_story([]) is None
+        assert "40 nursing posts" in story_note(nurses) and story_note(ferry) == ""
+        b.sharing = nurses
+        writer.prompts.clear()
+        await b._compose("post", ("anchor", "acting early"))
+        assert "40 nursing posts" in writer.prompts[0] and "fewer people seriously ill" in writer.prompts[0]
+        b.sharing = ferry
+        writer.prompts.clear()
+        await b._compose("post", ("anchor", "acting early"))
+        assert "40 nursing posts" not in writer.prompts[0]
         b.articles = []
         b.sharing = story
         writer.prompts.clear()

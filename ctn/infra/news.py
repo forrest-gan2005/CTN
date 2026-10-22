@@ -32,7 +32,7 @@ SYDNEY = ZoneInfo("Australia/Sydney")
 SHARE_DAYS = 2  # how old a story a post may still link to
 # Stories a YES post may link to: the flu, the vaccine, health, the vote, or everyday island news a post can start
 # from (another team's posts linking a poll, the first case, the venue-list story and the ferry repairs held the top
-# of Trending on 21 October). Left out: opinion, party politics (rules.md) and the ID-card privacy story.
+# of Trending on 21 October). Left out: opinion, party politics (rules.md) and stories making NO's case (SHARE_NO_RE).
 SHARE_RE = re.compile(r"h2d2|vaccin|hospital|health|clinic|nurse|\bwards?\b|intensive care|referendum|\bpoll|"
                       r"touris|ferr(y|ies)|\bschools?\b", re.IGNORECASE)
 SHARE_SKIP_RE = re.compile(r"privacy|\bid cards?\b|guardrail|blank cheque|hawthorne|castillo|\bpart(y|ies)\b|"
@@ -41,6 +41,13 @@ SHARE_SKIP_RE = re.compile(r"privacy|\bid cards?\b|guardrail|blank cheque|hawtho
                            r"\b(second|third|new|more|further) (h2d2 )?cases?\b|contacts? (have )?test(ed)? positive|test\w* positive|"
                            r"cluster|(community|local) transmission[^.]{0,20}\b(confirmed|found|detected)",
                            re.IGNORECASE)
+# Nor one whose headline or summary carries a NO argument: on 22 October anchors linked the "vaccines forever"
+# professor and the tourism operators' call for "clarity" on which places, putting NO's case under a YES post.
+SHARE_NO_RE = re.compile(r"\bforever\b|permanent|\bboosters?\b|pharma\w*|blank cheque|guardrail|sunset clause|"
+                         r"\bin the dark\b|without a map|clarity|definitions?\b|\bspecify\b|which (venues|places)|"
+                         r"privacy|surveillance|overreach", re.IGNORECASE)
+# Stories an anchor draws more often than the rest (NEWS_ANCHOR_PREFER in bot.py): the first case, the nurses arriving.
+SHARE_PREFER_RE = re.compile(r"\bfirst (h2d2 )?case\b|\bnurses\b|nursing arrivals", re.IGNORECASE)
 SHARE_CATEGORIES = {"opinion"}
 FRACTION_RE = re.compile(r"\.\d+")
 
@@ -136,7 +143,7 @@ class NewsStore:
             category = (json.loads(raw).get("category") if raw else None) or ""
             text = f"{title} {summary or ''}"
             if (_at(fetched) >= _at(when) and category.lower() not in SHARE_CATEGORIES and SHARE_RE.search(text)
-                    and not SHARE_SKIP_RE.search(text)):
+                    and not SHARE_SKIP_RE.search(text) and not SHARE_NO_RE.search(text)):
                 stories.setdefault(when, []).append((NEWS_URL + url, site, title, summary or ""))
         return [takes[sum(map(ord, when)) % len(takes)] for when, takes in stories.items()]
 
@@ -286,9 +293,16 @@ async def _demo() -> None:
     shared = news.store.shareable(at(19, 12))
     urls = [s[0] for s in shared]
     assert urls[0] == NEWS_URL + "/kingstonia-herald/articles/staff", shared
-    assert not any(u.endswith("/column") for u in urls) and any(u.endswith("/venues") for u in urls), \
-        "no opinion; a story NO would welcome is still one to start from"
+    assert not any(u.endswith("/column") or u.endswith("/venues") for u in urls), "no opinion, no NO argument"
     for title, category in (("Hawthorne backs H2D2 vaccine requirement", "Health"),
+                            ("Kingstonia University professor warns of 'vaccines forever' risk", "Health"),
+                            ("Kingstonia University professor warns of 'permanent' vaccine contracts", "Health"),
+                            ("Tourism operators demand clarity on 'public space' definitions ahead of referendum",
+                             "Business"),
+                            ("Tourism operators seek clarity on 'public space' definitions ahead of referendum",
+                             "National"),
+                            ("Voting in the Dark: The Referendum Without a Map", "National"),
+                            ("H2D2 referendum lacks the guardrails we need", "Health"),
                             ("Tourism Board launches Vote No campaign", "Business"),
                             ("Second H2D2 case confirmed as contacts test positive", "Health"),
                             ("ID cards raise privacy fears over H2D2 records", "National"),
@@ -296,6 +310,26 @@ async def _demo() -> None:
         news.store.add("daily-kingstonia", {"url": "/daily-kingstonia/articles/x", "title": title,
                                             "category": category, "published_at": "2026-10-19T09:30:00Z"}, at(19, 10))
         assert all(not u.endswith("/x") for u, *_ in news.store.shareable(at(19, 12))), title
+    for title, summary, category in (
+            ("New nursing arrivals to bolster hospital staffing", "Minister Tomas Reyes-Hale announced 25 new nurses "
+             "will arrive over four months to assist Kingstonia City and Crown Harbour hospitals.", "Health"),
+            ("Regional recruitment agreement to bring 25 nurses to Kingstonian hospitals", "Health Minister Tomas "
+             "Reyes-Hale announced that 25 nurses will arrive via a Pacific recruitment agreement to address staffing "
+             "shortages in Kingstonia City and Crown Harbour.", "Health"),
+            ("First H2D2 case confirmed in Kingstonia via international traveller", "Health Ministry confirms first "
+             "H2D2 case in a traveller; no evidence of community transmission reported.", "Health"),
+            ("Outer-island ferry service reduced as engine repairs begin", "Ferry service to the outer islands faces "
+             "a two-week period of reduced capacity due to urgent engine repairs.", "Business"),
+            ("Advisory panel finds H2D2 vaccine shows strong immune response despite data gaps", "A medicines "
+             "advisory panel reports that while the H2D2 vaccine shows strong immune responses, uncertainties remain "
+             "regarding transmission prevention and long-term side effects.", "Health"),
+            ("No campaign takes slight lead in latest H2D2 referendum poll", "The 'No' campaign has moved ahead of "
+             "the 'Yes' campaign in the latest national poll, though nearly 30% of voters remain undecided.",
+             "Politics")):
+        news.store.add("daily-kingstonia", {"url": "/daily-kingstonia/articles/y", "title": title, "summary": summary,
+                                            "category": category, "published_at": "2026-10-19T09:40:00Z"}, at(19, 10))
+        assert any(u.endswith("/y") for u, *_ in news.store.shareable(at(19, 12))), title
+        assert bool(SHARE_PREFER_RE.search(title)) == ("nurs" in title or "First" in title), title
     assert news.store.shareable(at(22, 12)) == [], "a story only two days old at most"
 
     del articles["/kingstonia-herald/articles/ward"]  # taken down while still settling
