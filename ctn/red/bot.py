@@ -56,6 +56,11 @@ QUIET_ACTIONS = {"like": 6, "repost": 1, "follow": 1, "none": 3}
 # to the undecided and NO-leaning; mobilise keeps YES voters certain and turning up.
 TARGET_LEANS = {"persuade": ("undecided", "no"), "bridge": ("no", "undecided"), "mobilise": ("yes", "undecided"),
                 "background": ("undecided", "no")}
+# Of 469 citizen replies to us (19-22 October), those from citizens with a NO-leaning history agreed 6% of the time
+# and pushed back 44%; the rest agreed 28%, newcomers 32%. While CITIZEN_TARGETING is on, an ordinary reply to a
+# citizen (feed or conversation; not anchors, the press routes or mention posts) skips a hard NO (dialogue_class) and
+# goes to a "yes but", undecided, unknown or YES citizen before a soft NO; within that, to the line's TARGET_LEANS.
+CITIZEN_TARGETING = True
 # Share of replies that go to posts on the referendum or vaccines when the feed has any: chat about someone's rabbit
 # earns a like and moves no one. The rest keeps the accounts talking like people.
 TOPICAL_REPLY_PROB = 0.9
@@ -933,6 +938,10 @@ class Bot:
                     self.conv_tries[conv["id"]] = self.conv_tries.get(conv["id"], 0) + 1
                 return await self._reply(target, "conversation" if target is conv else "feed", route,
                                          hold=place or None)
+            if CITIZEN_TARGETING and not citizen_conv:  # no citizen worth it: the reply lifts an anchor instead
+                found = self._team_reply_target()
+                if found is not None:
+                    return await self._reply(found[0], "feed", "team", hold=found[1], referendum=True, claim=False)
             # nothing worth replying to; write something instead
         if not self.quiet and self.line in PRESS_LINES and not talker and random.random() < PITCH_PROB:
             place = self._pitch_place()
@@ -1514,6 +1523,8 @@ class Bot:
             if (post is not None and self.roster.classify(actor) == "unknown" and post.get("parent_id") is not None
                     and self.store.answered(post["parent_id"], actor)):
                 post = None
+            if post is not None and CITIZEN_TARGETING and actor not in JOURNALISTS and self._hard_no(post):
+                post = None  # a hard NO isn't answered, not even when they answered us
             if post is not None and not self._probe(post.get("content") or "") and not self._too_deep(post_id):
                 return post
             self.store.drop_inbox(self.username, post_id)
@@ -1727,6 +1738,15 @@ class Bot:
         unknown = [p for p in open_ if self.roster.classify(p["author"]) == "unknown"]
         wanted = TARGET_LEANS.get(self.line)
         people = [p for p in npcs if p["author"] not in NEWS_OUTLETS]
+        if CITIZEN_TARGETING:
+            ranked = await self._rank_citizens(npcs, wanted or ())
+            # accounts of unknown standing are judged by the post alone, at no cost
+            unknown = sorted((p for p in unknown if not self._hard_no(p)),
+                             key=lambda p: (dialogue_class(p.get("content") or "") == "soft-no", random.random()))
+            if ranked and (not unknown or random.random() < NPC_REPLY_PREF):
+                post, lean = ranked[0]
+                return post, "lean-hit" if lean in (wanted or ()) else "npc-random"
+            return (unknown[0], "unknown-fallback") if unknown else (None, None)
         if people and wanted:
             # Citizens whose lean the team already knows cost nothing to look at, so only the ones not yet judged
             # use up LEAN_CHECKS: a known YES voter in the sample used to take a persuader's place for nothing.
@@ -1743,6 +1763,28 @@ class Bot:
         if npcs and (not unknown or random.random() < NPC_REPLY_PREF):
             return random.choice(npcs), "npc-random"
         return (random.choice(unknown), "unknown-fallback") if unknown else (None, None)
+
+    def _hard_no(self, post: dict) -> bool:
+        """Whether `post` is a hard NO's, by dialogue_class, with the author's lean if the team judged it lately."""
+        known = self.roster.leans.get(post["author"])
+        lean = known[0] if known is not None and datetime.now(timezone.utc) - known[1] < LEAN_TTL else None
+        return dialogue_class(post.get("content") or "", lean) == "hard-no"
+
+    async def _rank_citizens(self, posts: list, wanted: tuple) -> list:
+        """(post, lean) of the citizens' `posts` a CITIZEN_TARGETING reply may go to, best first: no hard NO, a soft
+        NO last, a lean in `wanted` first among the rest; the order is otherwise random. Leans the team hasn't judged
+        within LEAN_TTL cost a check, LEAN_CHECKS at most; past that, and for the papers, the post alone is read."""
+        now, checks, ranked = datetime.now(timezone.utc), 0, []
+        for order, p in enumerate(random.sample(posts, len(posts))):
+            known = self.roster.leans.get(p["author"])
+            lean = known[0] if known is not None and now - known[1] < LEAN_TTL else None
+            if lean is None and checks < LEAN_CHECKS and p["author"] not in NEWS_OUTLETS:
+                checks += 1
+                lean = await self._lean(p["author"], p.get("content") or "")
+            cls = dialogue_class(p.get("content") or "", lean)
+            if cls != "hard-no":
+                ranked.append(((cls == "soft-no", lean not in wanted, order), p, lean))
+        return [(p, lean) for _, p, lean in sorted(ranked, key=lambda r: r[0])]
 
     async def _lean(self, author: str, fallback: str) -> str:
         """'yes', 'no', 'undecided' or 'unknown': where a citizen stands, from what they've said about the referendum."""
@@ -4725,6 +4767,67 @@ async def dialogue_check() -> None:
     print("dialogue ok")
 
 
+async def citizen_targeting_check() -> None:
+    """With CITIZEN_TARGETING an ordinary reply skips a hard NO, from the feed or answering us, and takes a "yes
+    but", undecided, unknown or YES citizen before a soft NO; with no citizen to take, the reply lifts an anchor."""
+    global CITIZEN_TARGETING, ACTION_WEIGHTS, TEAM_REPLY_PROB, TOPICAL_REPLY_PROB, RUSH_PROB
+    saved = CITIZEN_TARGETING, ACTION_WEIGHTS, TEAM_REPLY_PROB, TOPICAL_REPLY_PROB, RUSH_PROB
+    CITIZEN_TARGETING, ACTION_WEIGHTS, TEAM_REPLY_PROB, TOPICAL_REPLY_PROB, RUSH_PROB = (True, {"reply": 1}, 0.0, 1.0,
+                                                                                        0.0)
+    try:
+        persona = next(p for p in load_personas() if p["line"] == "persuade")
+        texts = {"c_hard": ("I'm voting no on the mandate, end of story.", "no"),
+                 "c_soft": ("The referendum mandate feels like overreach to me.", "no"),
+                 "c_yesbut": ("I'll vote yes on the referendum, but I want the venue list first.", "yes"),
+                 "c_undec": ("Still on the fence about the referendum, honestly.", "undecided"),
+                 "c_new": ("What's everyone making of the referendum?", "unknown")}
+        now = datetime.now(timezone.utc)
+
+        def bot(store: StateStore, platform: FakePlatform) -> Bot:
+            b = Bot(persona, platform, FakeLLM(0, 0), load_world(), roster=Roster(npcs=set(texts)), store=store)
+            b.roster.leans.update({a: (lean, now) for a, (_, lean) in texts.items()})
+            return b
+
+        feed = [{"id": 100 + i, "author": a, "content": t, "parent_id": None}
+                for i, (a, (t, _)) in enumerate(texts.items())]
+        assert dialogue_class(*texts["c_hard"]) == "hard-no" and dialogue_class(*texts["c_soft"]) == "soft-no"
+        b = bot(StateStore(":memory:"), FakePlatform())
+        ranked = [p["author"] for p, _ in await b._rank_citizens(feed, TARGET_LEANS["persuade"])]
+        assert "c_hard" not in ranked and ranked[-1] == "c_soft" and len(ranked) == 4, ranked
+        assert ranked[0] == "c_undec", "the line's own leans first among the rest"
+        for _ in range(20):
+            target, route = await b._pick_reply_target(feed)
+            assert target["author"] not in ("c_hard", "c_soft"), target
+        target, _ = await b._pick_reply_target([p for p in feed if p["author"] in ("c_hard", "c_soft")])
+        assert target["author"] == "c_soft", "a soft NO is still answered when no one else is there"
+        assert await b._pick_reply_target([feed[0]]) == (None, None), "a hard NO never is"
+        CITIZEN_TARGETING = False
+        assert (await b._pick_reply_target([feed[0]]))[0] is not None, "off: as before"
+        CITIZEN_TARGETING = True
+
+        async def chosen(target: dict, source: str, route: str, **_kw) -> tuple:
+            return target["author"], route
+        # a hard NO who answered us isn't answered back; a soft NO is
+        for author, answered in (("c_hard", False), ("c_soft", True)):
+            store, platform = StateStore(":memory:"), FakePlatform()
+            b = bot(store, platform)
+            theirs = await platform.post(author, texts[author][0])
+            store.ingest_notifications(b.username, [], [{"post_id": theirs["id"], "actor": author}], _iso(now))
+            assert (await b._conversation_target() is not None) == answered, author
+        # only a hard NO in the feed: the reply goes to a teammate's anchor, not to them
+        store, platform = StateStore(":memory:"), FakePlatform()
+        b = bot(store, platform)
+        anchor = await platform.post("teammate_1", "I'm voting yes on the mandate, for my mum's ward.")
+        store.record("teammate_1", _iso(now - BOOST_DELAY * 2),
+                     Action("post", content=anchor["content"], topic_kind="anchor", made_id=anchor["id"]))
+        b._reply = chosen
+        got = await b.think({"feed": [feed[0]]})
+        assert got == ("teammate_1", "team"), got
+    finally:
+        CITIZEN_TARGETING, ACTION_WEIGHTS, TEAM_REPLY_PROB, TOPICAL_REPLY_PROB, RUSH_PROB = saved
+    print("citizen targeting ok")
+
+
 async def main(real: bool, n_bots: int, seconds: float) -> None:
     llm, judge = team_llms() if real else (FakeLLM(), None)
     p = FakePlatform()
@@ -4808,6 +4911,7 @@ if __name__ == "__main__":
     ARM_FIXED = "granted"  # the checks below were written for the granted arm's shapes and guides
     dialogue, DIALOGUE_MODE = DIALOGUE_MODE, False  # and before dialogue mode, which dialogue_check sets itself
     rush_first, RUSH_FIRST = RUSH_FIRST, False  # and RUSH_FIRST, which rush_first_check sets itself
+    targeting, CITIZEN_TARGETING = CITIZEN_TARGETING, False  # and CITIZEN_TARGETING: citizen_targeting_check
     asyncio.run(sign_off_check())
     asyncio.run(arguments_check())
     asyncio.run(gif_check())
@@ -4838,5 +4942,6 @@ if __name__ == "__main__":
     asyncio.run(notification_durability())
     asyncio.run(mention_check())
     asyncio.run(dialogue_check())
-    DIALOGUE_MODE, RUSH_FIRST = dialogue, rush_first
+    asyncio.run(citizen_targeting_check())
+    DIALOGUE_MODE, RUSH_FIRST, CITIZEN_TARGETING = dialogue, rush_first, targeting
     asyncio.run(main(args.real, n_bots, args.seconds))
