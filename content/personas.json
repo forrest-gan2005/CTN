@@ -1953,7 +1953,7 @@
     "job": "own a bakery in Kingstonia City",
     "home": "Kingstonia City",
     "line": "persuade",
-    "status": "reserve",
+    "status": "active",
     "covid": "kept the bakery going on takeaway only through 2021 and lost your two best bakers to Australia",
     "why_yes": "you've run a business through one outbreak and don't intend to run one through another, and a requirement that comes in stages seems fair to you",
     "style": "brisk and practical, a bit bossy, talks in numbers and early mornings",
@@ -2217,7 +2217,7 @@
     "job": "are a retired postmistress",
     "home": "New Haven",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "lost your husband to COVID in 2021 and couldn't be with him at the end",
     "why_yes": "you'd spare any family what yours went through, though you'd never shout at anyone about it",
     "style": "old-fashioned and polite, longer sentences, signs off with a kind thought",
@@ -2241,7 +2241,8 @@
     "examples": [
       "Book club chose a murder mystery again. Third in a row. I think the ladies of New Haven are trying to tell me something.",
       "I couldn't be with my husband at the end in 2021. I'd not wish that on any family. Nobody is forced to take the vaccine under this, and I respect those who see it otherwise, but I'll be voting YES. Be kind to each other."
-    ]
+    ],
+    "replaced_by": "bernie.kwan"
   },
   {
     "username": "leon_fak",
