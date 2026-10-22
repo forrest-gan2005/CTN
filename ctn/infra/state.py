@@ -510,6 +510,15 @@ class StateStore:
         return self.db.execute("SELECT COUNT(*) FROM reply_picks WHERE post_id = ? AND outcome IS NULL AND picked_at >= ?",
                                (post_id, since)).fetchone()[0]
 
+    def picked_for(self, author: str, since: str, open_since: str) -> int:
+        """Replies to `author` picked since UTC ISO time `since` that may reach them or have: still being written
+        (picked since `open_since`; an older open pick is one a stopped run left), or written and not known never to
+        have gone out."""
+        return self.db.execute(
+            "SELECT COUNT(*) FROM reply_picks p LEFT JOIN writes w ON w.id = p.write_id WHERE p.author = ? "
+            "AND p.picked_at >= ? AND (p.outcome IS NULL AND p.picked_at >= ? OR p.outcome = 'written' "
+            "AND COALESCE(w.status, '') NOT IN ('not_sent', 'not_found'))", (author, since, open_since)).fetchone()[0]
+
     def dropped(self, post_id: int) -> tuple:
         """(replies to this post picked and then dropped by any of our accounts, when the latest was picked)."""
         return self.db.execute("SELECT COUNT(*), MAX(picked_at) FROM reply_picks WHERE post_id = ? "
@@ -788,6 +797,13 @@ if __name__ == "__main__":
         again.end_pick(again.pick("bob", "column", 60, "lisa", "npc", "2026-10-20T13:09:00+00:00"), "dropped")
         again.pick("cat", "column", 60, "lisa", "npc", "2026-10-20T13:10:00+00:00")  # still being written
         assert again.dropped(60) == (2, "2026-10-20T13:09:00+00:00") and again.dropped(61) == (0, None)
+        # replies on their way to an author, or gone: open (lately), written and possibly out; not dropped or refused
+        day, hour = "2026-10-20T00:00:00+00:00", "2026-10-20T13:00:00+00:00"
+        assert again.picked_for("lisa", day, hour) == 1, "cat's, still being written"
+        assert again.picked_for("lisa", day, "2026-10-20T13:30:00+00:00") == 0, "left open by a stopped run"
+        assert again.picked_for("ghost", day, hour) == 1 and again.picked_for("ghost2", day, hour) == 0, \
+            "a pending write may be out; a refused one isn't"
+        assert again.picked_for("npc2", day, hour) == 0 and again.picked_for("ghost", "2026-10-21", hour) == 0
     replies = StateStore(":memory:")
     replies.record("ana", "2026-10-20T13:00:00+00:00", A("reply", post_id=77, content="first"))
     sending = replies.begin_write("joe", "reply", 77, "second", "2026-10-20T13:01:00+00:00")

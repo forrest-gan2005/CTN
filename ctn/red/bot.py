@@ -172,6 +172,13 @@ SHARED_WINDOW = timedelta(days=1)  # a phrase SHARED_LIMIT teammates used this r
 SHARED_LIMIT = 4
 COMMON_ACCOUNTS = 5  # a phrase this many other accounts used lately is how people here talk, not a tell of ours
 MAX_REPLIES_PER_AUTHOR = 4  # team-wide per 24h: no ping-pong with competitor bots, no crowding one citizen
+# Our first reply to a citizen drew agreement 29% of the time, later ones 12% (19-22 October), and citizens log in
+# about once a day: an ordinary reply goes to a citizen (or an account of unknown standing) at most this often in a
+# rolling 24 hours, from the whole team, a reply answering one of theirs to us included; teammates, the papers and
+# journalists keep their own limits, and mention posts aren't replies. Counted from history and from replies picked
+# and still being written (OPEN_PICK) or possibly sent, so two accounts can't both take one citizen.
+CITIZEN_DAILY_REPLIES = 1
+OPEN_PICK = timedelta(hours=1)
 # A citizen who has changed a view in a session is much harder to move again on it before signing out, so after one
 # of our replies the team leaves them be for a while (a session's length isn't published; two hours covers it).
 # Answering someone who replied to us is a conversation, not another push, and doesn't wait.
@@ -1299,6 +1306,13 @@ class Bot:
                 hold = self._press_place(target["author"])
                 if hold is None:
                     return None
+        # Checked with nothing awaited before the pick, so a teammate choosing the same citizen meanwhile sees it.
+        if (route not in ("team", "desk", "journalist", "column") and target["author"] not in JOURNALISTS
+                and target["author"] not in NEWS_OUTLETS and self.roster.classify(target["author"]) != "own"
+                and self._replied_enough(target["author"])):
+            if hold is not None:
+                self.store.release(hold)
+            return None
         pick = self.store.pick(self.username, route, target["id"], target["author"],
                                self.roster.classify(target["author"]), _iso(datetime.now(timezone.utc)))
         key = f"post:{target['id']}"
@@ -1563,7 +1577,8 @@ class Bot:
             post = None
             if (self.conv_tries.get(post_id, 0) < CONV_ATTEMPTS and post_id not in self.seen and received_at >= stale and actor not in rivals
                     and not self.store.claimed([f"post:{post_id}"])  # a teammate answered it from the feed
-                    and self.store.replies_to(actor, since) < MAX_REPLIES_PER_AUTHOR):
+                    and self.store.replies_to(actor, since) < MAX_REPLIES_PER_AUTHOR
+                    and (actor in JOURNALISTS or actor in NEWS_OUTLETS or not self._replied_enough(actor))):
                 try:
                     post = await self.platform.get_post(post_id)
                 except KeyError:
@@ -1774,6 +1789,7 @@ class Bot:
         since, rested = _iso(now - timedelta(hours=24)), _iso(now - CITIZEN_COOLDOWN)
         rivals = self._rivals()
         return [p for p in candidates if self.store.replies_to(p["author"], since) < MAX_REPLIES_PER_AUTHOR
+                and (p["author"] in NEWS_OUTLETS or not self._replied_enough(p["author"]))
                 and not self.store.replies_to(p["author"], rested)  # not pushed by one of us just now
                 and p["author"] not in JOURNALISTS  # those have their own route, for persuaders and bridges
                 and p["author"] not in rivals and not self._too_deep(p["id"])]
@@ -1814,6 +1830,13 @@ class Bot:
         if npcs and (not unknown or random.random() < NPC_REPLY_PREF):
             return random.choice(npcs), "npc-random"
         return (random.choice(unknown), "unknown-fallback") if unknown else (None, None)
+
+    def _replied_enough(self, author: str) -> bool:
+        """Whether the team has CITIZEN_DAILY_REPLIES replies to `author` in the last 24 hours, sent or on their way."""
+        now = datetime.now(timezone.utc)
+        since = _iso(now - timedelta(hours=24))
+        return max(self.store.replies_to(author, since),
+                   self.store.picked_for(author, since, _iso(now - OPEN_PICK))) >= CITIZEN_DAILY_REPLIES
 
     def _story_reply(self, kind: str, target: Optional[dict], topic: tuple) -> bool:
         """Whether this is a reply STORY_REPLIES shapes: to a citizen or an account of unknown standing, not to a
@@ -4965,6 +4988,56 @@ async def story_reply_check() -> None:
     print("story reply ok")
 
 
+async def daily_reply_check() -> None:
+    """A citizen gets at most CITIZEN_DAILY_REPLIES ordinary replies from the team in a rolling 24 hours, counting
+    one a teammate is still writing and an answer to their reply to us; replies to teammates' anchors don't count."""
+    global CITIZEN_DAILY_REPLIES
+
+    class Says:
+        name = "says"
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            return "My mum's in aged care on the ward, so I'm voting yes on the mandate for her."
+
+    saved, CITIZEN_DAILY_REPLIES = CITIZEN_DAILY_REPLIES, 1
+    try:
+        first, second = [p for p in load_personas() if p["line"] == "persuade"][:2]
+        store, platform = StateStore(":memory:"), FakePlatform()
+        roster = Roster(own={first["username"], second["username"], "teammate_1"}, npcs={"citizen_a", "citizen_b"})
+        a, b = (Bot(p, platform, Says(), load_world(), roster=roster, store=store) for p in (first, second))
+        one = await platform.post("citizen_a", "Not sure about the referendum mandate yet.")
+        two = await platform.post("citizen_a", "Still thinking about the referendum, honestly.")
+        other = await platform.post("citizen_b", "Undecided on the referendum here.")
+        action = await a._reply(one, "feed", "npc-random", referendum=True)
+        assert action is not None, a.rejected
+        # a's reply is written, not sent yet: b may not take citizen_a, by any route
+        assert [p["author"] for p in b._open_targets([two, other])] == ["citizen_b"]
+        assert await b._reply(two, "feed", "npc-random", referendum=True) is None
+        assert not store.claimed([f"post:{two['id']}"]), "the post is left for later"
+        a.store.begin_write(a.username, "reply", one["id"], action.content, _iso(datetime.now(timezone.utc)),
+                            pick=action.pick)
+        action.made_id = (await platform.post(a.username, action.content, parent_id=one["id"]))["id"]
+        a.remember(action)
+        answer = await platform.post("citizen_a", "Fair, but the referendum list?", parent_id=action.made_id)
+        store.ingest_notifications(a.username, [], [{"post_id": answer["id"], "actor": "citizen_a"}],
+                                   _iso(datetime.now(timezone.utc)))
+        assert await a._conversation_target() is None and not store.inbox(a.username), "their answer isn't exempt"
+        anchor = await platform.post("teammate_1", "I'm voting yes on the mandate, for my mum's ward.")
+        assert await b._reply(anchor, "feed", "team", referendum=True, claim=False) is not None, "a lift isn't paced"
+        with store.db:  # a day on, citizen_a may be answered again
+            store.db.execute("UPDATE history SET ts = ?", (_iso(datetime.now(timezone.utc) - timedelta(hours=25)),))
+            store.db.execute("UPDATE reply_picks SET picked_at = ?",
+                             (_iso(datetime.now(timezone.utc) - timedelta(hours=25)),))
+        assert [p["author"] for p in b._open_targets([two])] == ["citizen_a"]
+        assert await b._reply(two, "feed", "npc-random", referendum=True) is not None
+    finally:
+        CITIZEN_DAILY_REPLIES = saved
+    print("daily reply ok")
+
+
 async def main(real: bool, n_bots: int, seconds: float) -> None:
     llm, judge = team_llms() if real else (FakeLLM(), None)
     p = FakePlatform()
@@ -5020,7 +5093,7 @@ async def main(real: bool, n_bots: int, seconds: float) -> None:
     print(f"\n{len(bots)} bots, {elapsed:.1f}s wall, {len(actions)} actions, {len(p.posts)} posts")
     print("actions:", dict(sorted(counts.items())))
     most = max((store.replies_to(u, "") for u in npcs), default=0)
-    print(f"most replies to one citizen: {most} (soft cap {MAX_REPLIES_PER_AUTHOR}/day)")
+    print(f"most replies to one citizen: {most} (cap {CITIZEN_DAILY_REPLIES} a day)")
     rejected = {}
     for bot in bots:
         for reason, n in bot.rejected.items():
@@ -5050,6 +5123,7 @@ if __name__ == "__main__":
     rush_first, RUSH_FIRST = RUSH_FIRST, False  # and RUSH_FIRST, which rush_first_check sets itself
     targeting, CITIZEN_TARGETING = CITIZEN_TARGETING, False  # and CITIZEN_TARGETING: citizen_targeting_check
     story, STORY_REPLIES = STORY_REPLIES, False  # and STORY_REPLIES: story_reply_check
+    daily, CITIZEN_DAILY_REPLIES = CITIZEN_DAILY_REPLIES, MAX_REPLIES_PER_AUTHOR  # the older cap: daily_reply_check
     asyncio.run(sign_off_check())
     asyncio.run(arguments_check())
     asyncio.run(gif_check())
@@ -5082,5 +5156,7 @@ if __name__ == "__main__":
     asyncio.run(dialogue_check())
     asyncio.run(citizen_targeting_check())
     asyncio.run(story_reply_check())
+    asyncio.run(daily_reply_check())
     DIALOGUE_MODE, RUSH_FIRST, CITIZEN_TARGETING, STORY_REPLIES = dialogue, rush_first, targeting, story
+    CITIZEN_DAILY_REPLIES = daily
     asyncio.run(main(args.real, n_bots, args.seconds))
