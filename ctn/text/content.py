@@ -20,6 +20,7 @@ STATUSES = {"active", "reserve", "banned"}  # banned: suspended by the platform,
 # an hour, with 3-5 moving away), so the two are compared at the same hours of the day before either is dropped.
 WORDING = "exp3"
 ARGUMENTS = {"granted": "arguments-granted.md", "exp3": "arguments.md"}
+ARGUMENTS_REPLY = "arguments-reply.md"  # exp3's, for replies to citizens: see reply_world
 
 
 def load_world() -> str:
@@ -27,6 +28,13 @@ def load_world() -> str:
         (CONTENT_DIR / name).read_text(encoding="utf-8").strip()
         for name in ("world.md", "rules.md", ARGUMENTS[WORDING])
     )
+
+
+def reply_world(world: str) -> str:
+    """The world with the answers a reply to a citizen gives (bot.STORY_REPLIES): no "a NO rules out", no "the people
+    decide", no "not on the ballot"."""
+    arguments = (CONTENT_DIR / ARGUMENTS[WORDING]).read_text(encoding="utf-8").strip()
+    return world.replace(arguments, (CONTENT_DIR / ARGUMENTS_REPLY).read_text(encoding="utf-8").strip())
 
 
 def without_arguments(world: str) -> str:

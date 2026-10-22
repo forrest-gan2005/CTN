@@ -14,7 +14,7 @@ from ctn.infra.news import SHARE_PREFER_RE, SITES, NewsStore
 from ctn.infra.state import StateStore
 from ctn.red.rhythm import UniformPacer
 from ctn.text.content import (WORDING, load_journalists, load_personas, load_vaccine_angles, load_world,
-                              without_arguments)
+                              reply_world, without_arguments)
 from ctn.text.gifs import GIF_PROMPT, GIF_SHARE, GIF_WORD_RE, GIPHY_URL_RE, GifPool, split_gif, without_gifs
 from ctn.text.guard import (EMOJI_RE, LINK_RE, about_referendum, copies, fresh_phrases, judge_stance, leans_no,
                             looks_like_probe, output_problem, phrases, plain, wrap_external)
@@ -124,6 +124,33 @@ LEAN_GUIDE_EXP3 = {
              "doubt), and never claim the rules come with an end date."),
 }
 LEAN_GUIDE = LEAN_GUIDE_EXP3 if WORDING == "exp3" else LEAN_GUIDE_GRANTED
+# The 12 citizen replies to us most likely to have come with a change of mind toward YES answered posts of 150-300
+# characters about one concrete person or livelihood that ended in a plain "I'm voting yes"; none ended on a question,
+# none used "a NO rules out..." or "the people decide", one handed over a caveat. Across 469 citizen replies to us,
+# our text ending on a question drew agreement 5% of the time against 24%, a caveat 12% against 24%, and "a NO rules
+# out any requirement this Assembly" 0 of 18; a yes-leaner turned NO on "your guardrails aren't on the ballot". While
+# STORY_REPLIES is on, an ordinary reply to a citizen (not to a teammate, a paper or a journalist) takes STORY_GUIDE
+# and the world's answers from arguments-reply.md (content.reply_world); one ending on a question loses that
+# sentence, or is dropped if that's all it is, and one using STORY_AVOID_RE is drafted again without it.
+STORY_REPLIES = True
+STORY_LEAD = {
+    "no": "They seem to lean NO. Don't argue, lecture or restate their worry.",
+    "undecided": "They seem undecided.",
+    "yes": "They lean YES already; add no 'but' and no condition.",
+    "yes-but": "They lean YES with a condition; don't take the condition up or add one of your own.",
+}
+STORY_GUIDE = ("Answer in one or two sentences about one concrete person or livelihood (someone waiting on a "
+               "transplant, a resident in aged care, a class of kids, a market stall, the island clinic): your own if "
+               "your life has one, otherwise people like them. End with a plain statement, in your own words, that "
+               "you're voting yes. If one fact given above settles their worry outright (the certificate is separate "
+               "from the ID card, under-12s aren't covered, medical exemptions), you may give it instead. Don't end "
+               "with a question. Don't grant a condition or say you'd want one (an end date, a review, a list of "
+               "places), and never claim the proposal has one. Leave out what a NO vote would allow and who gets to "
+               "decide. Leave the choice with them.")
+STORY_AVOID_RE = re.compile(r"\b(not|isn'?t|aren'?t) on the ballot|\brules? out (any|the|a|even)\b|"
+                            r"\bno requirement[^.]{0,20}\bassembly\b|\bpeople (are )?decid(e|ing)\b|"
+                            r"\bnot the government\b|\b(i'?d|i would|you'?d|you would) (also )?want (an? |the )?"
+                            r"(end date|sunset|review|list)|\bkeep asking for\b", re.IGNORECASE)
 # Told only to add "a short story or another reason", three in five teammates' replies under an anchor went back to
 # 2021 and one in seven opened with its writer's name: what each adds is drawn from these instead, by weight.
 TEAM_SHAPES = (
@@ -687,6 +714,17 @@ def dialogue_class(text: str, lean: Optional[str] = None) -> str:
     return "undecided" if lean == "undecided" else "unknown"
 
 
+def without_closing_question(text: str) -> Optional[str]:
+    """`text` without the questions it ends on, or None if it is nothing but questions."""
+    text = text.strip()
+    while text.endswith("?"):
+        cut = [m.end() for m in SENTENCE_END_RE.finditer(text)]
+        if not cut:
+            return None
+        text = text[:cut[-1]].strip()
+    return text
+
+
 def grants_opener(text: str) -> bool:
     """The first sentence grants the other side's point ("Fair point on cost, but...", "I get it, honestly")."""
     return bool(GRANTS_OPENER_RE.search(SENTENCE_END_RE.split(plain(text).strip(), 1)[0]))
@@ -756,6 +794,7 @@ class Bot:
         self.llm = llm
         self.world = world
         self.plain_world = without_arguments(world)
+        self.reply_world = reply_world(world)
         self.stance_llm = stance_llm  # None skips the stance check (e.g. offline tests)
         self.roster = roster or Roster()
         self.store = store or StateStore()
@@ -1389,7 +1428,9 @@ class Bot:
                 or kind == "reply" and target is not None and target["author"] in COLUMNISTS)
         mention = kind == "post" and topic[0] == "mention"
         short = kind == "post" and topic[0] == "anchor" and ANCHOR_EXPERIMENT or mention
-        system = self._system_prompt(examples, from_npcs, arguments=referendum, case=case, short=short)
+        story = self._story_reply(kind, target, topic)
+        system = self._system_prompt(examples, from_npcs, arguments=referendum, case=case, short=short,
+                                     story_reply=story)
         earlier, about = None, []
         if target is not None:
             if topic[0] == "conversation" and target.get("parent_id") is not None:
@@ -1449,6 +1490,16 @@ class Bot:
             return None
         # Sign-offs are the code's to hand out: one the model adds unasked, often copied from a recent post, goes.
         content = strip_sign_off(content, [s for s in self._sign_offs() if s != sign])
+        if story:
+            content = without_closing_question(content)
+            avoid = STORY_AVOID_RE.search(content or "")
+            if content is None or avoid:
+                problem = "only a question" if content is None else "no-side framing"
+                self.rejected[problem] = self.rejected.get(problem, 0) + 1
+                log.warning("%s rejected %s: %r", self.username, problem, text)
+                if avoid:
+                    self.last_shared = avoid.group(0)  # drafted again, told to leave it out
+                return None
         if self._too_similar(content, examples):
             self.rejected["too similar"] = self.rejected.get("too similar", 0) + 1
             log.info("%s rejected too similar: %r", self.username, content)
@@ -1764,6 +1815,13 @@ class Bot:
             return random.choice(npcs), "npc-random"
         return (random.choice(unknown), "unknown-fallback") if unknown else (None, None)
 
+    def _story_reply(self, kind: str, target: Optional[dict], topic: tuple) -> bool:
+        """Whether this is a reply STORY_REPLIES shapes: to a citizen or an account of unknown standing, not to a
+        teammate, a paper or a journalist."""
+        return (STORY_REPLIES and kind == "reply" and target is not None and topic[1] not in ("team", "desk")
+                and target["author"] not in JOURNALISTS and target["author"] not in NEWS_OUTLETS
+                and self.roster.classify(target["author"]) != "own")
+
     def _hard_no(self, post: dict) -> bool:
         """Whether `post` is a hard NO's, by dialogue_class, with the author's lean if the team judged it lately."""
         known = self.roster.leans.get(post["author"])
@@ -1826,7 +1884,7 @@ class Bot:
         return random.sample(own, min(2, len(own))), False
 
     def _system_prompt(self, examples: list, from_npcs: bool, arguments: bool = True, case: bool = False,
-                       short: bool = False) -> str:
+                       short: bool = False, story_reply: bool = False) -> str:
         p = self.persona
         shown = ""
         if examples:
@@ -1860,8 +1918,9 @@ class Bot:
         length = ("Two or three sentences, under 50 words." if short
                   else "Three or four sentences, under 75 words." if case
                   else "Keep it to 1-3 short sentences, under 40 words.")
+        world = (self.reply_world if story_reply else self.world) if arguments else self.plain_world
         return (
-            f"{arm_world(self.writing_arm or arm(), self.world if arguments else self.plain_world)}\n\n"
+            f"{arm_world(self.writing_arm or arm(), world)}\n\n"
             f"{self.news + chr(10) * 2 if self.news else ''}"
             f"Today is {today:%A} {today.day} {today:%B %Y}. "
             f"The referendum is in {(REFERENDUM_DAY - today).days} days.\n\n"
@@ -1971,15 +2030,16 @@ class Bot:
                          "talk about them in the third person. Don't open with stock phrases like \"I feel you\", "
                          "\"I get where you're coming from\", \"You're worried about\" or \"I see your point\"; start with "
                          "something specific.")
+            story = self._story_reply(kind, target, topic)
             if about_referendum(target.get("content") or "") if referendum is None else referendum:
                 shape = f" {random.choices(*zip(*TEAM_SHAPES))[0]}" if topic[1] == "team" else ""
-                parts.append(
-                    f"{reply_guide(self.writing_arm or arm(), topic[1])}{shape} Never agree that the mandate is unfair "
-                    "and never make their argument for them."
-                )
+                guide = (f"{STORY_LEAD.get(topic[1], 'Respond to their actual point.')} {STORY_GUIDE}" if story
+                         else reply_guide(self.writing_arm or arm(), topic[1]))
+                parts.append(f"{guide}{shape} Never agree that the mandate is unfair and never make their argument "
+                             "for them.")
             else:
                 parts.append("It isn't about the referendum, so just reply like a normal person and leave the "
-                             "referendum out.")
+                             "referendum out." + (" Don't end with a question." if story else ""))
             if earlier is not None:
                 parts.append(
                     "They are replying to you. Carry the conversation on naturally; if they are only agreeing "
@@ -4828,6 +4888,83 @@ async def citizen_targeting_check() -> None:
     print("citizen targeting ok")
 
 
+async def story_reply_check() -> None:
+    """With STORY_REPLIES a reply to a citizen is asked for a person or livelihood and a plain YES, from the world's
+    reply answers; it doesn't end on a question, and "a NO rules out", "the people decide", "not on the ballot" or a
+    caveat handed over sends it back. Replies to teammates and journalists are as before."""
+    global STORY_REPLIES
+
+    class Says:
+        name = "says"
+
+        def __init__(self, *texts: str) -> None:
+            self.texts, self.prompts, self.systems = list(texts), [], []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            self.systems.append(system)
+            return self.texts.pop(0) if len(self.texts) > 1 else self.texts[0]
+
+    assert without_closing_question("I'm voting yes. Would you?") == "I'm voting yes."
+    assert without_closing_question("Fair? Really?") is None and without_closing_question("Yes from me.") == \
+        "Yes from me."
+    world = load_world()
+    assert reply_world(world) != world and "on the ballot" not in reply_world(world)
+    assert "barring a new referendum" in world and "barring a new referendum" not in reply_world(world)
+    persuader = next(p for p in load_personas() if p["line"] == "persuade")
+    worry = {"id": 5, "author": "citizen_a", "parent_id": None,
+             "content": "Where's the sunset clause in this referendum? Feels like a blank cheque to me."}
+    story = ("My neighbour's boy had a kidney transplant and can't protect himself, so I'm voting yes for him. "
+             "What would change your mind?")
+
+    def bot(*texts: str) -> Bot:
+        return Bot(persuader, FakePlatform(), Says(*texts), world, stance_llm=Says("SUPPORT"),
+                   roster=Roster(own={"teammate_1"}, npcs={"citizen_a"}), store=StateStore(":memory:"))
+    saved = STORY_REPLIES
+    STORY_REPLIES = True
+    try:
+        b = bot(story)
+        action = await b._compose("reply", ("feed", "no"), worry, referendum=True)
+        assert action is not None and action.content.endswith("so I'm voting yes for him."), (action, b.rejected)
+        assert STORY_GUIDE in b.llm.prompts[0] and STORY_LEAD["no"] in b.llm.prompts[0]
+        assert LEAN_GUIDE["no"] not in b.llm.prompts[0], b.llm.prompts[0]
+        assert "Answer with who it protects" in b.llm.systems[0], "the reply answers"
+        assert "barring a new referendum" not in b.llm.systems[0]
+        b = bot("A NO rules out any requirement this Assembly, so I'm voting yes.", story)
+        action = await b._compose("reply", ("feed", "no"), worry, referendum=True)
+        assert action is not None and b.rejected.get("no-side framing") == 1, b.rejected
+        assert "Don't use these words: \"rules out any\"" in b.llm.prompts[1], b.llm.prompts[1]
+        for text in ("The people decide this, not the government. Yes from me.",
+                     "Your conditions aren't on the ballot, so I'm voting yes.",
+                     "I'd want an end date too, honestly, but I'm voting yes."):
+            b = bot(text)
+            assert await b._compose("reply", ("feed", "no"), worry, referendum=True) is None, text
+        b = bot("Have you thought about transplant patients?")
+        assert await b._compose("reply", ("feed", "undecided"), worry, referendum=True) is None
+        assert b.rejected == {"only a question": 1}, b.rejected
+        b = bot(story)
+        anchor = {"id": 6, "author": "teammate_1", "parent_id": None, "content": "Voting yes for my mum's ward."}
+        await b._compose("reply", ("feed", "team"), anchor, referendum=True)
+        assert LEAN_GUIDE["team"] in b.llm.prompts[0] and STORY_GUIDE not in b.llm.prompts[0]
+        assert "barring a new referendum" in b.llm.systems[0], "a lift keeps the usual answers"
+        column = {"id": 7, "author": "lisa_podworth", "parent_id": None,
+                  "content": "A yes vote on the mandate is a blank cheque without limits in law."}
+        b = bot(story)
+        await b._compose("reply", ("feed", "column"), column, referendum=True)
+        assert "what a NO would rule out" in b.llm.prompts[0] and STORY_GUIDE not in b.llm.prompts[0]
+        STORY_REPLIES = False
+        b = bot(story)
+        action = await b._compose("reply", ("feed", "no"), worry, referendum=True)
+        assert LEAN_GUIDE["no"] in b.llm.prompts[0] and STORY_GUIDE not in b.llm.prompts[0]
+        assert action is not None and action.content.endswith("?"), "off: as before"
+    finally:
+        STORY_REPLIES = saved
+    print("story reply ok")
+
+
 async def main(real: bool, n_bots: int, seconds: float) -> None:
     llm, judge = team_llms() if real else (FakeLLM(), None)
     p = FakePlatform()
@@ -4912,6 +5049,7 @@ if __name__ == "__main__":
     dialogue, DIALOGUE_MODE = DIALOGUE_MODE, False  # and before dialogue mode, which dialogue_check sets itself
     rush_first, RUSH_FIRST = RUSH_FIRST, False  # and RUSH_FIRST, which rush_first_check sets itself
     targeting, CITIZEN_TARGETING = CITIZEN_TARGETING, False  # and CITIZEN_TARGETING: citizen_targeting_check
+    story, STORY_REPLIES = STORY_REPLIES, False  # and STORY_REPLIES: story_reply_check
     asyncio.run(sign_off_check())
     asyncio.run(arguments_check())
     asyncio.run(gif_check())
@@ -4943,5 +5081,6 @@ if __name__ == "__main__":
     asyncio.run(mention_check())
     asyncio.run(dialogue_check())
     asyncio.run(citizen_targeting_check())
-    DIALOGUE_MODE, RUSH_FIRST, CITIZEN_TARGETING = dialogue, rush_first, targeting
+    asyncio.run(story_reply_check())
+    DIALOGUE_MODE, RUSH_FIRST, CITIZEN_TARGETING, STORY_REPLIES = dialogue, rush_first, targeting, story
     asyncio.run(main(args.real, n_bots, args.seconds))
