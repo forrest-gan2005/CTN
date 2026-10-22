@@ -120,8 +120,9 @@ class AccountStore:
         return dict(self.db.execute("SELECT username, account_id FROM accounts WHERE account_id IS NOT NULL"))
 
 
-# The three feeds allow a team 10 reads a minute between them (SDK 0.5.0): every feed request waits its turn.
-FEED_GAP = 6.5
+# The three feeds allow a team 10 reads a minute between them (SDK 0.5.0): every feed request waits its turn. At 6.5 s
+# apart 50-450 reads an hour still met a 429 (21-22 October), so 7 s.
+FEED_GAP = 7.0
 # Posts, replies and reposts share a route the platform allows a team 3 times a minute: spaced out ahead, so that
 # accounts writing at once queue instead of running into 429s and losing drafts (live, 12 in 19 minutes).
 WRITE_GAP = 20.5
@@ -1348,7 +1349,7 @@ async def _feed_pace_demo() -> None:
     await asyncio.gather(*(q.feed_latest(n=5) for _ in range(4)))
     assert len(sent) == 5 and sent[1] >= sent[0] + 10 and spaced(sent[1:]), sent  # out of the wait, one by one
 
-    waiting = asyncio.ensure_future(q.feed_latest(n=5))  # next turn is 6.5 s off
+    waiting = asyncio.ensure_future(q.feed_latest(n=5))  # next turn is FEED_GAP off
     await asyncio.sleep(0)
     waiting.cancel()
     try:
