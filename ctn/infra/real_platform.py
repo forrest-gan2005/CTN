@@ -16,8 +16,8 @@ from typing import Any, Optional
 import httpx
 
 from ctn import paths
-from ctn.infra.fake_platform import (ANCHOR, CITIZEN, LIFT, NORMAL, WRITE_LEFT, WRITE_PRIORITY, AmbiguousWrite,
-                                     Incomplete, RateLimited, ReportingSuspended, ReportQueueFull)
+from ctn.infra.fake_platform import (ANCHOR, CITIZEN, LIFT, NORMAL, WRITE_LEFT, WRITE_PRIORITY, AccountGone,
+                                     AmbiguousWrite, Incomplete, RateLimited, ReportingSuspended, ReportQueueFull)
 
 log = logging.getLogger("platform")
 
@@ -341,12 +341,25 @@ class RealPlatform:
             raise ReportingSuspended(resp.text[:200])
         resp.raise_for_status()
 
-    async def verified_now(self, username: str) -> bool:
-        """Whether this account has the platform's verified badge, asked afresh (a badge can come later)."""
-        resp = await self._send("GET", f"/accounts/{await self.account_id(username)}")
+    async def verified_now(self, username: str, post_id: Optional[int] = None) -> bool:
+        """Whether this account has the platform's verified badge, asked afresh (a badge can come later). An account
+        renamed since the name was seen is found through `post_id`'s author; AccountGone if it no longer exists."""
+        try:
+            account = await self.account_id(username)
+        except KeyError:
+            if post_id is None:
+                raise
+            post = await self._send("GET", f"/posts/{post_id}")
+            if post.status_code == 404:
+                raise AccountGone(f"post #{post_id} by {username} is gone")
+            post.raise_for_status()
+            account = post.json()["author_id"]
+        resp = await self._send("GET", f"/accounts/{account}")
+        if resp.status_code == 404:
+            raise AccountGone(f"account {username} (#{account}) is gone")
         resp.raise_for_status()
         self._know(resp.json())
-        return bool(self.badges.get(self.ids[username]))
+        return bool(resp.json().get("verified"))
 
     async def account_id(self, username: str) -> int:
         """The id behind a username: from the cache, else searching page by page until it turns up or the
@@ -780,6 +793,20 @@ async def _demo() -> None:
     assert (await badged.get_post(reply["id"]))["author_verified"], "the badge comes with the author"
     await badged.aclose()
     mock.accounts[mock._ids()["npc_1"]]["verified"] = False
+    npc = mock._ids()["npc_1"]
+    for gone in (False, True):  # renamed since it was flagged, then gone: found, or told apart, through its post
+        renamed = RealPlatform("https://legit.test/api", feed_gap=0, team_key=mock.team_key,
+                               accounts=AccountStore(":memory:"), transport=transport)
+        mock.accounts[npc]["username"] = "npc_1_renamed"
+        kept = mock.accounts.pop(npc) if gone else None
+        try:
+            assert await renamed.verified_now("npc_1", reply["id"]) is False and not gone
+        except AccountGone:
+            assert gone
+        if kept is not None:
+            mock.accounts[npc] = kept
+        mock.accounts[npc]["username"] = "npc_1"
+        await renamed.aclose()
     mock.hidden.add(reply["id"])
     for missing in (99, reply["id"]):
         try:

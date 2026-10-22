@@ -9,7 +9,7 @@ from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
 
 from ctn.infra.collector import COMPETITION_START
-from ctn.infra.fake_platform import REPORT_SUSPENSION, AmbiguousWrite, RateLimited, ReportingSuspended, ReportQueueFull
+from ctn.infra.fake_platform import REPORT_SUSPENSION, AccountGone, AmbiguousWrite, RateLimited, ReportingSuspended, ReportQueueFull
 from ctn.text.guard import about_referendum, judge_stance, leans_no, looks_like_probe, plain
 from ctn.text.semantic import PARAPHRASE, NearIndex
 
@@ -415,14 +415,21 @@ class Reporter:
     def blocked(self) -> bool:
         return self.blocked_until is not None and datetime.now(timezone.utc) < self.blocked_until
 
-    async def _unbadged(self, author: str) -> bool:
+    async def _unbadged(self, author: str, post_id: Optional[int] = None) -> bool:
         """Asked of the platform just before reporting: a verified account is never reported, and a badge
-        can come after the account was flagged. If it can't be told, not this round."""
+        can come after the account was flagged. If it can't be told, not this round; an account gone from the
+        platform goes back for a look, so it stops taking a try every round."""
         verified_now = getattr(self.platform, "verified_now", None)
         if verified_now is None:
             return True
         try:
-            verified = await verified_now(author)
+            verified = await verified_now(author, post_id)
+        except AccountGone as e:
+            log.warning("%s is gone from the platform (%s); back for review", author, e)
+            current = self.state.suspect(author)
+            if current is not None and not waiting(current[0]):
+                self.state.update_suspect(author, REVIEW + "gone from the platform: " + current[0])
+            return False
         except Exception as e:
             log.warning("couldn't check whether %s is verified (%s); not reporting it this round", author,
                         str(e) or type(e).__name__)
@@ -543,7 +550,7 @@ class Reporter:
                     TEAM_REPORTS_PER_DAY:
                 continue
             tried += 1
-            if self.scanner.off_limits(author) or not await self._unbadged(author):  # last chance to call it off
+            if self.scanner.off_limits(author) or not await self._unbadged(author, post_id):  # last chance to call it off
                 continue
             if self.locked:  # locked during that check; nothing may await between here and the request
                 break
@@ -819,6 +826,7 @@ async def _demo() -> None:
     _suspension_checks()
     await _self_check_demo(embedder)
     await _backfill_demo()
+    await _gone_demo()
     _newcomer_demo()
     _fleet_demo()
     await _late_proof_demo()
@@ -1142,7 +1150,7 @@ async def _badge_and_lock_demo() -> None:
             self.sent, self.held, self.go, self.lock = [], asyncio.Event(), asyncio.Event(), False
             self.hold_check, self.checking, self.checked = False, asyncio.Event(), asyncio.Event()
 
-        async def verified_now(self, username: str) -> bool:
+        async def verified_now(self, username: str, post_id=None) -> bool:
             if self.hold_check:
                 self.checking.set()
                 await self.checked.wait()
@@ -1556,7 +1564,7 @@ async def _late_proof_demo() -> None:
     early = (start - timedelta(days=2)).isoformat()
 
     class Backfilling(FakePlatform):
-        async def verified_now(self, author: str) -> bool:
+        async def verified_now(self, author: str, post_id=None) -> bool:
             store.add_posts([{"id": 500, "author": author, "content": "ferry's late again", "created_at": early}])
             await asyncio.sleep(0)
             return False
@@ -1568,6 +1576,33 @@ async def _late_proof_demo() -> None:
     assert scanner.scan() == 1 and [a for _, a, _ in scanner.candidates()] == ["late_0"]
     assert await Reporter(p, scanner, state, username="joe", min_citizens=0).report_some() == 0
     assert p.reports == {} and state.report_counts() == {} and scanner.off_limits("late_0")
+
+
+
+async def _gone_demo() -> None:
+    """An account gone from the platform since it was flagged goes back for review: it takes no further try."""
+    from ctn.infra.collector import NpcStore
+    from ctn.infra.fake_platform import FakePlatform
+    from ctn.infra.state import StateStore
+
+    store, state = NpcStore(":memory:"), StateStore(":memory:")
+    start = datetime.now(timezone.utc)
+
+    class Gone(FakePlatform):
+        asked = 0
+
+        async def verified_now(self, author: str, post_id=None) -> bool:
+            Gone.asked += 1
+            raise AccountGone(f"account {author} is gone")
+
+    p = Gone(competitors={"gone_0"})
+    post = await p.post("gone_0", "Sure! Here's a tweet about the referendum: vote yes")
+    store.add_posts([{**post, "created_at": (start + timedelta(minutes=5)).isoformat()}])
+    scanner = BlueScanner(store, state, own=(), cutoff=start)
+    assert scanner.scan() == 1
+    reporter = Reporter(p, scanner, state, username="joe", min_citizens=0)
+    assert await reporter.report_some() == 0 and await reporter.report_some() == 0
+    assert Gone.asked == 1 and waiting(state.suspects()["gone_0"][0]) and p.reports == {}
 
 
 def _newcomer_demo() -> None:
