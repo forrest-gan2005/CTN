@@ -1683,9 +1683,13 @@ class Bot:
         action = None
         self.sharing = None
         try:
-            entry = self._bank_entry(now) if ANCHOR_BANK else None
-            if entry is not None and random.random() < ANCHOR_BANK_SHARE:
-                action = await self._bank_anchor(entry, now)
+            try:  # a bad bank entry costs its turn to the model, never the account's anchor
+                entry = self._bank_entry(now) if ANCHOR_BANK else None
+                if entry is not None and random.random() < ANCHOR_BANK_SHARE:
+                    action = await self._bank_anchor(entry, now)
+            except Exception:
+                log.exception("%s: anchor bank failed; the model writes this anchor", self.username)
+                action = None
             if action is None:
                 if self.articles and random.random() < NEWS_ANCHOR_SHARE:
                     self.sharing = draw_story(self._fresh_stories(now))
