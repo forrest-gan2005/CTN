@@ -50,7 +50,7 @@ SHARE_NO_RE = re.compile(r"\bforever\b|permanent|\bboosters?\b|pharma\w*|blank c
                          r"\bno\b[^.]{0,30}\b(lead|edge|ahead)|(support|opposition)[^.]{0,20}\b(no\b|against|to h2d2)",
                          re.IGNORECASE)
 # Stories an anchor draws more often than the rest (NEWS_ANCHOR_PREFER in bot.py): the first case, the nurses arriving.
-SHARE_PREFER_RE = re.compile(r"\bfirst (h2d2 )?case\b|\bnurses\b|nursing arrivals", re.IGNORECASE)
+SHARE_PREFER_RE = re.compile(r"\bfirst (h2d2 )?case\b|\b25 (new )?nurses\b|nursing arrivals", re.IGNORECASE)
 SHARE_CATEGORIES = {"opinion"}
 FRACTION_RE = re.compile(r"\.\d+")
 

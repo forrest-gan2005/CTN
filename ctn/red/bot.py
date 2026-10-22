@@ -365,7 +365,7 @@ NEWS_ANCHOR_GUIDE = ("This post shares a news story; its link goes under your po
                      "under {limit} characters.")
 # A story the YES case needs framed with care, and how (world.md: Kingstonia Central has 40 unfilled nursing posts).
 NEWS_STORY_NOTES = (
-    (re.compile(r"\bnurses\b|nursing arrivals", re.IGNORECASE),
+    (re.compile(r"\b25 (new )?nurses\b|nursing arrivals", re.IGNORECASE),  # not any story naming nurses
      " On the nurses: 25 arriving over four months is welcome, so say so, but it isn't the answer to an outbreak. "
      "Beyond the story you may say one known fact: Kingstonia Central has about 40 nursing posts unfilled now, and "
      "an outbreak could come before the new nurses are all here. The requirement means fewer people seriously ill "
@@ -937,7 +937,7 @@ class Bot:
 
         weights = QUIET_ACTIONS if self.quiet else LINE_ACTIONS.get(self.line, ACTION_WEIGHTS)
         kind = random.choices(list(weights), weights=list(weights.values()))[0]
-        # A known citizen who replied to us is always answered: by 20 October only 52 of the 450 replies to our posts
+        # A known citizen who replied to us is answered (within CITIZEN_DAILY_REPLIES a day): by 20 October only 52 of the 450 replies to our posts
         # came from known citizens, and we had answered barely a third of them. Accounts that joined after the
         # opening are answered as before, when the feed has no citizen to reply to.
         if not self.quiet and citizen_conv:
