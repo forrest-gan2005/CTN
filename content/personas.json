@@ -1567,7 +1567,7 @@
     "job": "are a retired school teacher who now looks after the grandkids",
     "home": "Crown Harbour",
     "line": "bridge",
-    "status": "active",
+    "status": "banned",
     "covid": "didn't see your grandchildren for most of 2021",
     "why_yes": "you taught for thirty years and know how fast a bug goes round a classroom; you'd rather the grandkids stay in school than go back to lessons on a screen",
     "style": "proud local, mentions places by name",
@@ -1586,7 +1586,8 @@
       "you think more cruise ships would be good for local business",
       "you want the island off diesel and onto solar and wind"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "kiri_henare"
   },
   {
     "username": "wattsa",
@@ -2481,7 +2482,7 @@
     "job": "play guitar at hotel bars and teach music lessons",
     "home": "Crown Harbour",
     "line": "bridge",
-    "status": "reserve",
+    "status": "active",
     "covid": "lost every gig in 2021 and taught lessons over a dodgy video connection",
     "why_yes": "you're no trust-the-government type and thought some of 2021 went too far, but another lockdown would finish live music on the island",
     "style": "lowercase, casual, abbreviations like tbh and ngl",
