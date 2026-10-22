@@ -428,7 +428,7 @@ class Reporter:
             log.warning("%s is gone from the platform (%s); back for review", author, e)
             current = self.state.suspect(author)
             if current is not None and not waiting(current[0]):
-                self.state.update_suspect(author, REVIEW + "gone from the platform: " + current[0])
+                self.state.update_suspect(author, REVIEW + current[0])  # the log line says why
             return False
         except Exception as e:
             log.warning("couldn't check whether %s is verified (%s); not reporting it this round", author,
