@@ -171,6 +171,11 @@ DESK_LIMITS = {"outlet": 3, "journalist": 3}
 COLUMNISTS = {name for name, j in JOURNALISTS.items() if "columnist" in j["role"]}
 COLUMN_WINDOW = timedelta(hours=24)
 COLUMN_LIMIT = 2
+# On 22 October 16:00-16:19 Sydney 23 drafts answering one column post were rejected, account after account, each
+# echoing the ones before. Once PRESS_POST_FAILS replies to a paper's or journalist's post have been dropped
+# team-wide, the press, column and desk routes leave it until PRESS_POST_REST after the latest drop.
+PRESS_POST_FAILS = 3
+PRESS_POST_REST = timedelta(hours=1)
 # Replies that landed within three hours before a columnist's burst were answered 28% of the time, older ones 9%,
 # and the bursts came about 18:30-20:30 Sydney; ours mostly landed just after one.
 COLUMN_HOURS = range(16, 20)
@@ -939,8 +944,8 @@ class Bot:
         """(post, the post it answers, quota place) for the newest journalist's post about the referendum this
         account may answer, or None."""
         # the columnists' posts are the column route's, which counts every reply of ours under them
-        for p in sorted((p for p in candidates if p["author"] in JOURNALISTS and p["author"] not in COLUMNISTS),
-                        key=lambda p: -p["id"]):
+        for p in sorted((p for p in candidates if p["author"] in JOURNALISTS and p["author"] not in COLUMNISTS
+                         and not self._press_resting(p["id"])), key=lambda p: -p["id"]):
             topical, context = await self._press_topic(p)
             if not topical:
                 continue
@@ -955,7 +960,8 @@ class Bot:
         since = _iso(datetime.now(timezone.utc) - DESK_WINDOW)
         posts = [p for p in feed if (p["author"] in NEWS_OUTLETS or p["author"] in set(JOURNALISTS) - COLUMNISTS)
                  and (p.get("created_at") or "") >= since and not self.store.acted_on(self.username, "reply", p["id"])
-                 and self.desk_tries.get(p["id"], 0) < CONV_ATTEMPTS and not self._probe(p.get("content") or "")]
+                 and self.desk_tries.get(p["id"], 0) < CONV_ATTEMPTS and not self._probe(p.get("content") or "")
+                 and not self._press_resting(p["id"])]
         for p in sorted(posts, key=lambda p: -p["id"]):
             topical, context = await self._press_topic(p)
             if not topical:
@@ -978,7 +984,8 @@ class Bot:
         posts = [p for p in feed if p["author"] in open_ and (p.get("created_at") or "") >= since
                  and self.column_tries.get(p["id"], 0) < CONV_ATTEMPTS
                  and not (p.get("parent_id") is not None and self.store.made(p["parent_id"]))
-                 and not self.store.acted_on(self.username, "reply", p["id"]) and not self._probe(p.get("content") or "")]
+                 and not self.store.acted_on(self.username, "reply", p["id"]) and not self._probe(p.get("content") or "")
+                 and not self._press_resting(p["id"])]
         ours = {p["id"]: len(self.store.team_replies(p["id"])) for p in posts}
         for p in sorted(posts, key=lambda p: (ours[p["id"]], -p["id"])):
             topical, context = await self._press_topic(p)
@@ -994,6 +1001,12 @@ class Bot:
             if hold is not None:
                 return p, context, hold
         return None
+
+    def _press_resting(self, post_id: int) -> bool:
+        """Whether PRESS_POST_FAILS of the team's replies to this post were dropped, the latest under
+        PRESS_POST_REST ago."""
+        fails, last = self.store.dropped(post_id)
+        return fails >= PRESS_POST_FAILS and last > _iso(datetime.now(timezone.utc) - PRESS_POST_REST)
 
     def _press_open(self, journalist: str) -> bool:
         """Whether _press_place could give this account a place with this journalist today."""
@@ -3592,6 +3605,71 @@ async def column_check() -> None:
     print("column ok")
 
 
+async def press_rest_check() -> None:
+    """Once PRESS_POST_FAILS replies to one paper's or journalist's post were dropped, whoever drafted them, the
+    press, column and desk routes leave that post until PRESS_POST_REST after the latest drop."""
+    global COLUMN_HOURS
+    saved_hours, COLUMN_HOURS = COLUMN_HOURS, range(24)
+
+    class Says:
+        name = "says"
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            return "Fair point on the venue list. Nurses first, so yes on the mandate."  # a fair opener: dropped
+
+    now = datetime.now(timezone.utc)
+    persuaders = [p for p in load_personas() if p["line"] in PRESS_LINES]
+    desk = [p for p in load_personas() if p["line"] in DESK_LINES]
+    roster = Roster(own={p["username"] for p in load_personas()}, npcs=set(JOURNALISTS))
+    column = {"id": 810, "author": "lisa_podworth", "parent_id": None, "created_at": _iso(now - timedelta(minutes=5)),
+              "content": "A yes vote on the mandate is a blank cheque without limits in law."}
+    story = {"id": 811, "author": "amanda_rivera", "parent_id": None, "created_at": _iso(now - timedelta(minutes=5)),
+             "content": "The referendum campaign opens with the mandate splitting voters."}
+    for route, post, accounts in (("column", column, persuaders), ("journalist", story, persuaders),
+                                  ("desk", story, desk)):
+        store = StateStore(":memory:")
+
+        def bot(i: int) -> Bot:
+            b = Bot(accounts[i], FakePlatform(), Says(), load_world(), roster=roster, store=store)
+            b.seen.add(post["id"])
+            return b
+
+        async def target(b: Bot) -> Optional[tuple]:
+            if route == "column":
+                return await b._column_target([post])
+            if route == "journalist":
+                return await b._press_target([post])
+            return await b._desk_target([post])
+
+        for i in range(PRESS_POST_FAILS):
+            b = bot(i)
+            found = await target(b)
+            assert found is not None and found[0]["id"] == post["id"], (route, i)
+            assert await b._reply(post, "feed", route, context=found[1], hold=found[2], referendum=True,
+                                  claim=route == "journalist") is None and "fair opener" in b.rejected, b.rejected
+            assert not store.claimed([found[2]]), "its place goes back"
+        nxt = bot(PRESS_POST_FAILS)
+        assert await target(nxt) is None, f"{route}: the post rests after {PRESS_POST_FAILS} drops"
+        with store.db:
+            store.db.execute("UPDATE reply_picks SET picked_at = ?",
+                             (_iso(now - PRESS_POST_REST - timedelta(minutes=1)),))
+        assert await target(nxt) is not None, f"{route}: back after PRESS_POST_REST"
+        with store.db:
+            store.db.execute("UPDATE reply_picks SET picked_at = ? WHERE id = (SELECT MAX(id) FROM reply_picks)",
+                             (_iso(now),))
+        assert await target(bot(PRESS_POST_FAILS + 1)) is None, f"{route}: one more drop, another rest"
+    other = Bot(persuaders[0], FakePlatform(), Says(), load_world(), roster=roster, store=StateStore(":memory:"))
+    for i in range(PRESS_POST_FAILS - 1):
+        other.store.end_pick(other.store.pick(f"mate_{i}", "column", column["id"], column["author"], "npc", _iso(now)),
+                             "dropped")
+    assert await other._column_target([column]) is not None, "fewer drops than PRESS_POST_FAILS: still answered"
+    COLUMN_HOURS = saved_hours
+    print("press rest ok")
+
+
 async def desk_check() -> None:
     """Amplifiers and background accounts answer a paper's or journalist's referendum post of the last hour, each
     account once, up to DESK_LIMITS a post and outside the daily limit per author; older or off-topic posts, and
@@ -4737,6 +4815,7 @@ if __name__ == "__main__":
     asyncio.run(press_quota_check())
     asyncio.run(desk_check())
     asyncio.run(column_check())
+    asyncio.run(press_rest_check())
     asyncio.run(boost_check())
     asyncio.run(anchor_check())
     asyncio.run(sibling_check())

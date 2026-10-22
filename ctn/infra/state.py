@@ -510,6 +510,11 @@ class StateStore:
         return self.db.execute("SELECT COUNT(*) FROM reply_picks WHERE post_id = ? AND outcome IS NULL AND picked_at >= ?",
                                (post_id, since)).fetchone()[0]
 
+    def dropped(self, post_id: int) -> tuple:
+        """(replies to this post picked and then dropped by any of our accounts, when the latest was picked)."""
+        return self.db.execute("SELECT COUNT(*), MAX(picked_at) FROM reply_picks WHERE post_id = ? "
+                               "AND outcome = 'dropped'", (post_id,)).fetchone()
+
     def end_pick(self, pick: int, outcome: str) -> None:
         """A pick that never became a write: claim_failed or dropped."""
         with self.db:
@@ -778,6 +783,11 @@ if __name__ == "__main__":
         assert mix["unknown_now"] == {"npc": 1, "unknown": 1}
         before = again.reply_mix("2026-10-20T12:00:00+00:00")
         assert before["picked"]["npc-random"] == 1 and before["outcomes"]["open"] == 1
+        assert again.dropped(52) == (0, None) and again.dropped(53) == (0, None), "written or never claimed"
+        again.end_pick(again.pick("ann", "column", 60, "lisa", "npc", "2026-10-20T13:05:00+00:00"), "dropped")
+        again.end_pick(again.pick("bob", "column", 60, "lisa", "npc", "2026-10-20T13:09:00+00:00"), "dropped")
+        again.pick("cat", "column", 60, "lisa", "npc", "2026-10-20T13:10:00+00:00")  # still being written
+        assert again.dropped(60) == (2, "2026-10-20T13:09:00+00:00") and again.dropped(61) == (0, None)
     replies = StateStore(":memory:")
     replies.record("ana", "2026-10-20T13:00:00+00:00", A("reply", post_id=77, content="first"))
     sending = replies.begin_write("joe", "reply", 77, "second", "2026-10-20T13:01:00+00:00")
