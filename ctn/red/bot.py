@@ -10,11 +10,11 @@ from zoneinfo import ZoneInfo
 
 from ctn.infra.fake_platform import ANCHOR, CITIZEN, LIFT, NORMAL, WRITE_LEFT, WRITE_PRIORITY, AmbiguousWrite, FakePlatform, RateLimited
 from ctn.infra.llm import FakeLLM, team_llms
-from ctn.infra.news import SHARE_PREFER_RE, SITES, NewsStore
+from ctn.infra.news import SHARE_DAYS, SHARE_PREFER_RE, SITES, NewsStore
 from ctn.infra.state import StateStore
 from ctn.red.rhythm import UniformPacer
-from ctn.text.content import (WORDING, load_journalists, load_personas, load_vaccine_angles, load_world,
-                              reply_world, without_arguments)
+from ctn.text.content import (WORDING, load_anchor_bank, load_journalists, load_personas, load_vaccine_angles,
+                              load_world, reply_world, without_arguments)
 from ctn.text.gifs import GIF_PROMPT, GIF_SHARE, GIF_WORD_RE, GIPHY_URL_RE, GifPool, split_gif, without_gifs
 from ctn.text.guard import (EMOJI_RE, LINK_RE, about_referendum, copies, fresh_phrases, judge_stance, leans_no,
                             looks_like_probe, output_problem, phrases, plain, wrap_external)
@@ -374,6 +374,17 @@ NEWS_STORY_NOTES = (
 NEWS_ANCHOR_PREFER = 3  # weight in the draw of a news.SHARE_PREFER_RE story (the first case, the nurses), others 1
 NEWS_SLACK = 60  # the writer is told this much under the cap: drafts ran 7-70 characters over what they were told
 NEWS_ANCHOR_REPEAT = timedelta(hours=6)  # a story a teammate's anchor linked this recently isn't linked again
+# Anchor bank, A/B from 23 October: 24 anchors written by hand for given accounts (content/anchor_bank.json,
+# from data/research/anchor-bank-draft-20261022.md), against the model's. While ANCHOR_BANK is on, an account whose
+# turn it is to anchor and that still has an entry of its own posts it ANCHOR_BANK_SHARE of the time, in file order:
+# as written, with the team tag and, for a news entry, its link added as a news anchor's are. It skips the model and
+# its redrafts, but not the checks a draft gets last (the stance judge aside: it is a model call). An entry is used
+# once by the whole team, kept in bots.db; one a check sinks is used too, and that turn the model writes the anchor.
+# A news entry waits while a teammate linked its story within NEWS_ANCHOR_REPEAT and goes unused once the story is
+# SHARE_DAYS old. Its angle is "bank:<id>" (tools/anchor_ab.py compares the two).
+ANCHOR_BANK = True
+ANCHOR_BANK_SHARE = 0.5
+ANCHOR_BANK_ENTRIES = load_anchor_bank()
 # Mention posts, from 21 October: since 20 October rivals' top-level posts @mentioning four citizens drew 0.26
 # citizen replies each (204 posts, a NO team's most), against 0.09-0.11 per direct reply of ours to a citizen; a
 # mentioned citizen sees the post in their notifications. While MENTION_EXPERIMENT is on, MENTION_ACCOUNTS (clean
@@ -1598,13 +1609,60 @@ class Bot:
 
     def _fresh_stories(self, now: datetime) -> list:
         """The stories no teammate's post has linked in the last NEWS_ANCHOR_REPEAT."""
-        since = _iso(now - NEWS_ANCHOR_REPEAT)
-        return [a for a in self.articles if not self.store.db.execute(
-            "SELECT 1 FROM history WHERE type = 'post' AND ts > ? AND instr(content, ?) > 0", (since, a[0])).fetchone()]
+        return [a for a in self.articles if not self._linked(a[0], now)]
+
+    def _linked(self, url: str, now: datetime) -> bool:
+        """Whether a post of ours linked `url` in the last NEWS_ANCHOR_REPEAT."""
+        return self.store.db.execute("SELECT 1 FROM history WHERE type = 'post' AND ts > ? AND instr(content, ?) > 0",
+                                     (_iso(now - NEWS_ANCHOR_REPEAT), url)).fetchone() is not None
+
+    def _bank_entry(self, now: datetime) -> Optional[dict]:
+        """This account's first ANCHOR_BANK_ENTRIES entry the team hasn't used, leaving out a news one whose story
+        is not out, SHARE_DAYS old or linked lately; None if none is left."""
+        mine = [e for e in ANCHOR_BANK_ENTRIES if e["username"] == self.username]
+        used = self.store.bank_used(e["id"] for e in mine)
+        for e in mine:
+            if e["id"] in used:
+                continue
+            if "link" in e and (not timedelta(0) <= now - datetime.fromisoformat(e["published"])
+                                <= timedelta(days=SHARE_DAYS) or self._linked(e["link"], now)):
+                continue
+            return e
+        return None
+
+    async def _bank_anchor(self, entry: dict, now: datetime) -> Optional[Action]:
+        """`entry` as this turn's anchor post, used up whatever becomes of it: None if a check sinks it, and the
+        model writes the anchor instead."""
+        if not self.store.take_bank(entry["id"], self.username, _iso(now)):
+            return None
+        text, link = entry["text"], entry.get("link")
+        room = POST_LIMIT - (1 + len(link) if link else 0)
+        examples, from_npcs = self._examples(text, reply=False)
+        if len(text) > room:
+            problem = "too long"
+        elif self._too_similar(text, examples):
+            problem = "too similar"
+        else:
+            problem = await self._check(text, self._system_prompt(examples, from_npcs, case=True), takes_side=True,
+                                        judge=False)
+        if problem:
+            self.store.note_bank(entry["id"], f"rejected: {problem}")
+            self.rejected[problem] = self.rejected.get(problem, 0) + 1
+            log.warning("%s rejected bank anchor %s, %s: %r", self.username, entry["id"], problem, text)
+            return None
+        content, tag = text, team_tag(self.persona["age"], text)
+        if random.random() < TEAM_TAG_SHARE["anchor"] and not TAG_RE.search(text) and len(text) + 1 + len(tag) <= room:
+            content = f"{text} {tag}"
+        if link:
+            content = f"{content}\n{link}"
+        log.info("%s: anchor from the bank, %s", self.username, entry["id"])
+        return Action("post", content=content, line=self.line, topic_kind="anchor", angle=f"bank:{entry['id']}",
+                      model="bank")
 
     async def _anchor(self) -> Optional[Action]:
-        """This half-hour's anchor post, if no teammate has written it and this account hasn't anchored lately;
-        the place goes back if the draft is dropped or never sent, for a teammate to take."""
+        """This half-hour's anchor post, if no teammate has written it and this account hasn't anchored lately,
+        from the anchor bank or the model; the place goes back if the draft is dropped or never sent, for a teammate
+        to take."""
         if MENTION_EXPERIMENT and self.username in MENTION_ACCOUNTS or self._dialogue_account():
             return None
         now = datetime.now(timezone.utc)
@@ -1624,12 +1682,16 @@ class Bot:
             return None
         action = None
         self.sharing = None
-        if self.articles and random.random() < NEWS_ANCHOR_SHARE:
-            self.sharing = draw_story(self._fresh_stories(now))
-            log.info("%s: anchor %s", self.username,
-                     f"links {self.sharing[0]}" if self.sharing else "drawn to link a story, none fresh")
         try:
-            action = await self._compose("post", topic=("anchor", random.choice(self.persona["angles"])))
+            entry = self._bank_entry(now) if ANCHOR_BANK else None
+            if entry is not None and random.random() < ANCHOR_BANK_SHARE:
+                action = await self._bank_anchor(entry, now)
+            if action is None:
+                if self.articles and random.random() < NEWS_ANCHOR_SHARE:
+                    self.sharing = draw_story(self._fresh_stories(now))
+                    log.info("%s: anchor %s", self.username,
+                             f"links {self.sharing[0]}" if self.sharing else "drawn to link a story, none fresh")
+                action = await self._compose("post", topic=("anchor", random.choice(self.persona["angles"])))
         finally:
             self.sharing = None
             if action is None:
@@ -2186,10 +2248,12 @@ class Bot:
         return text
 
     async def _check(self, text: str, system: str, takes_side: bool = False,
-                     replying_to: Optional[str] = None, thread: Optional[int] = None) -> Optional[str]:
+                     replying_to: Optional[str] = None, thread: Optional[int] = None,
+                     judge: bool = True) -> Optional[str]:
         """Last gate before publishing: reason to drop the post, or None. With `takes_side`, a post or reply that
         doesn't plainly back the mandate is dropped too: a hint the reader has to decode moves nobody. A reply's side
-        is judged next to `replying_to`, the post it answers."""
+        is judged next to `replying_to`, the post it answers. Without `judge` (a hand-written anchor) no model is
+        asked, as offline."""
         if STOCK_OPENER_RE.match(plain(text)):
             return "stock opener"
         if self.twins is not None and self.twins.closest(text)[1] >= TWIN:
@@ -2207,7 +2271,7 @@ class Bot:
         problem = output_problem(text, system)
         if problem:
             return problem
-        if self.stance_llm is None:  # offline: naming the referendum at least, for a post
+        if self.stance_llm is None or not judge:  # offline: naming the referendum at least, for a post
             return "off topic" if takes_side and replying_to is None and not about_referendum(text) else None
         stance = await judge_stance(self.stance_llm, text, replying_to)
         if stance is None:
@@ -3578,6 +3642,125 @@ async def news_anchor_check() -> None:
         GIF_SHARE.clear()
         GIF_SHARE.update(saved)
     print("news anchor ok")
+
+
+async def anchor_bank_check() -> None:
+    """While ANCHOR_BANK is on, an anchor turn takes one of the account's own bank entries ANCHOR_BANK_SHARE of the
+    time, as written, with a news entry's link and no model call; an entry goes once, across a restart too; a news
+    entry waits while its story is out of reach; one a check sinks is used up and the model writes that anchor."""
+    import tempfile
+
+    class Says:
+        name = "says"
+
+        def __init__(self, text: str) -> None:
+            self.text, self.prompts = text, []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            return self.text
+
+    global ANCHOR_BANK, ANCHOR_BANK_SHARE, ANCHOR_BANK_ENTRIES, ANCHOR_FALLBACK
+    saved = ANCHOR_BANK, ANCHOR_BANK_SHARE, ANCHOR_BANK_ENTRIES, ANCHOR_FALLBACK
+    writers = [p for p in load_personas(status=None) if p["line"] in ANCHOR_LINES][:2]
+    me = writers[0]["username"]
+    case = "I run a cafe and lost five months in 2021. I'm voting yes on the mandate. What would you do?"
+    now = datetime.now(timezone.utc)
+    link = "https://sites.legitreal.com/daily-kingstonia/articles/bank-test-story"
+    news = ("The clinic boat ran twice this week instead of four times. My aunt waits on it for her dialysis, so "
+            "I'm voting yes in the referendum.")
+    plain_text = "Our netball club lost a whole winter in 2021. Voting yes in the referendum so the juniors get theirs."
+    sunk = f"{writers[0]['examples'][0]} Voting yes in the referendum."  # a copy of the persona's own example
+    entry = lambda i, text, **kw: {"id": i, "username": me, "text": text, "topic": "test", **kw}
+    try:
+        ANCHOR_BANK, ANCHOR_BANK_SHARE, ANCHOR_FALLBACK = True, 1.0, timedelta(0)
+        ANCHOR_BANK_ENTRIES = [
+            entry("old", news + " Old.", link=link + "-old", published=_iso(now - timedelta(days=SHARE_DAYS, hours=1))),
+            entry("soon", news + " Soon.", link=link + "-soon", published=_iso(now + timedelta(hours=1))),
+            entry("news", news, link=link, published=_iso(now - timedelta(hours=3))),
+            entry("plain", plain_text),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(f"{tmp}/bots.db")
+            writer, judge = Says(case), Says("SUPPORT")
+            b = Bot(writers[0], FakePlatform(), writer, load_world(), stance_llm=judge, store=store)
+            assert b._bank_entry(now)["id"] == "news", "a story too old or not out yet is skipped"
+            assert b._bank_entry(now + timedelta(hours=2))["id"] == "soon", "a story out since goes, oldest entry first"
+            assert b._bank_entry(now + timedelta(days=SHARE_DAYS, hours=2))["id"] == "plain", "a story ages out"
+            store.record("mate", _iso(now - NEWS_ANCHOR_REPEAT + timedelta(minutes=1)),
+                         Action("post", content=f"x\n{link}", made_id=1))
+            assert b._bank_entry(now)["id"] == "plain", "a story a teammate linked lately waits"
+            assert b._bank_entry(now + timedelta(minutes=2))["id"] == "news"
+            with store.db:
+                store.db.execute("DELETE FROM history")
+            mate =Bot(writers[1], FakePlatform(), Says(case), load_world(), stance_llm=Says("SUPPORT"), store=store)
+            action = await mate._anchor()
+            assert action is not None and not action.angle.startswith("bank:") and mate.llm.prompts, action
+            assert store.bank_used(e["id"] for e in ANCHOR_BANK_ENTRIES) == set(), "an entry is its own account's"
+            store.release(action.hold)
+            action = await b._anchor()
+            assert action is not None and (action.angle, action.model, action.topic_kind) == ("bank:news", "bank",
+                                                                                               "anchor"), action
+            assert action.content.startswith(news) and action.content.endswith("\n" + link), action.content
+            assert action.hold.startswith("anchor:") and TAG_RE.search(action.content), "a normal anchor otherwise"
+            assert not writer.prompts and not judge.prompts, "the bank path asks no model"
+            store.release(action.hold)
+            action = await b._anchor()
+            assert action.angle == "bank:plain" and action.content.startswith(plain_text + " ")
+            assert "\n" not in action.content and not writer.prompts and not judge.prompts
+            store.release(action.hold)
+            # a restart: a fresh store on the same file gives none of them again, so the model writes the anchor
+            again = Bot(writers[0], FakePlatform(), Says(case), load_world(), stance_llm=Says("SUPPORT"),
+                        store=StateStore(f"{tmp}/bots.db"))
+            action = await again._anchor()
+            assert action is not None and not action.angle.startswith("bank:") and again.llm.prompts, action
+            assert again.store.bank_used(e["id"] for e in ANCHOR_BANK_ENTRIES) == {"news", "plain"}
+            assert not again.store.take_bank("news", me, _iso(now))
+        # an entry a check sinks is used up, its reason kept, and the model writes this turn's anchor
+        ANCHOR_BANK_ENTRIES = [entry("sunk", sunk), entry("next", plain_text)]
+        writer = Says(case)
+        b = Bot(writers[0], FakePlatform(), writer, load_world(), stance_llm=Says("SUPPORT"),
+                store=StateStore(":memory:"))
+        action = await b._anchor()
+        assert action is not None and not action.angle.startswith("bank:") and writer.prompts, action
+        assert b.rejected.get("too similar") == 1, b.rejected
+        assert b.store.db.execute("SELECT outcome FROM bank_used WHERE id = 'sunk'").fetchone() == (
+            "rejected: too similar",)
+        b.store.release(action.hold)
+        assert (await b._anchor()).angle == "bank:next", "the next turn takes the next entry"
+        # sent like any anchor: kept in history with its angle, and the one the team rushes to lift
+        ANCHOR_BANK_ENTRIES = [entry("sent", plain_text)]
+        platform = FakePlatform()
+        b = Bot(writers[0], platform, Says(case), load_world(), store=StateStore(":memory:"))
+        action = await b.step()
+        assert action is not None and action.angle == "bank:sent" and action.made_id in platform.posts, action
+        assert platform.posts[action.made_id]["content"] == action.content
+        assert b.store.db.execute("SELECT angle, model, topic_kind FROM history WHERE made_id = ?",
+                                  (action.made_id,)).fetchone() == ("bank:sent", "bank", "anchor")
+        assert b._focus(datetime.now(timezone.utc)) == action.made_id
+        # the share, over many turns; off, or none left, the model writes every one
+        ANCHOR_BANK_ENTRIES = [entry(f"e{i}", f"{plain_text} Week {i}.") for i in range(400)]
+        state = random.getstate()
+        random.seed(11)
+        for share, low, high in ((0.5, 0.42, 0.58), (0.0, 0.0, 0.0)):
+            ANCHOR_BANK_SHARE = share
+            b = Bot(writers[0], FakePlatform(), Says(case), load_world(), store=StateStore(":memory:"))
+            drawn = []
+            for _ in range(200):
+                action = await b._anchor()
+                drawn.append(action.angle.startswith("bank:"))
+                b.store.release(action.hold)
+            assert low <= sum(drawn) / len(drawn) <= high, (share, sum(drawn))
+        ANCHOR_BANK, ANCHOR_BANK_SHARE = False, 1.0
+        b = Bot(writers[0], FakePlatform(), Says(case), load_world(), store=StateStore(":memory:"))
+        assert not (await b._anchor()).angle.startswith("bank:"), "off: no bank"
+        random.setstate(state)
+    finally:
+        ANCHOR_BANK, ANCHOR_BANK_SHARE, ANCHOR_BANK_ENTRIES, ANCHOR_FALLBACK = saved
+    print("anchor bank ok")
 
 
 async def case_post_check() -> None:
@@ -5123,6 +5306,8 @@ if __name__ == "__main__":
     rush_first, RUSH_FIRST = RUSH_FIRST, False  # and RUSH_FIRST, which rush_first_check sets itself
     targeting, CITIZEN_TARGETING = CITIZEN_TARGETING, False  # and CITIZEN_TARGETING: citizen_targeting_check
     story, STORY_REPLIES = STORY_REPLIES, False  # and STORY_REPLIES: story_reply_check
+    # and ANCHOR_BANK: anchor_bank_check (a persuader's step could post an entry without the model quiet_race waits on)
+    bank, ANCHOR_BANK = ANCHOR_BANK, False
     daily, CITIZEN_DAILY_REPLIES = CITIZEN_DAILY_REPLIES, MAX_REPLIES_PER_AUTHOR  # the older cap: daily_reply_check
     asyncio.run(sign_off_check())
     asyncio.run(arguments_check())
@@ -5142,6 +5327,7 @@ if __name__ == "__main__":
     asyncio.run(rush_first_check())
     asyncio.run(case_post_check())
     asyncio.run(news_anchor_check())
+    asyncio.run(anchor_bank_check())
     asyncio.run(quota_recovery_check())
     asyncio.run(lukewarm_check())
     asyncio.run(topical_check())
@@ -5158,5 +5344,6 @@ if __name__ == "__main__":
     asyncio.run(story_reply_check())
     asyncio.run(daily_reply_check())
     DIALOGUE_MODE, RUSH_FIRST, CITIZEN_TARGETING, STORY_REPLIES = dialogue, rush_first, targeting, story
+    ANCHOR_BANK = bank
     CITIZEN_DAILY_REPLIES = daily
     asyncio.run(main(args.real, n_bots, args.seconds))

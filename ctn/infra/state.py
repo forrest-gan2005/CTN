@@ -124,6 +124,12 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS bank_used (
+    id TEXT PRIMARY KEY,       -- an anchor_bank.json entry: taken once by the whole team, posted or not
+    username TEXT NOT NULL,
+    used_at TEXT NOT NULL,     -- UTC
+    outcome TEXT NOT NULL      -- drawn (became the anchor) | rejected: <the check that sank it>
+);
 CREATE TABLE IF NOT EXISTS inbox (
     username TEXT NOT NULL,
     post_id INTEGER NOT NULL,  -- a reply to one of our posts, waiting for an answer
@@ -646,6 +652,24 @@ class StateStore:
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, value))
 
+    def bank_used(self, ids: Iterable[str]) -> set:
+        """Which of these anchor bank entries the team has taken."""
+        ids = list(ids)
+        if not ids:
+            return set()
+        marks = ",".join("?" * len(ids))
+        return {r[0] for r in self.db.execute(f"SELECT id FROM bank_used WHERE id IN ({marks})", ids)}
+
+    def take_bank(self, entry_id: str, username: str, at: str) -> bool:
+        """Atomically mark an anchor bank entry used, before anything is sent; False if it was already."""
+        with self.db:
+            cur = self.db.execute("INSERT OR IGNORE INTO bank_used VALUES (?, ?, ?, 'drawn')", (entry_id, username, at))
+        return cur.rowcount == 1
+
+    def note_bank(self, entry_id: str, outcome: str) -> None:
+        with self.db:
+            self.db.execute("UPDATE bank_used SET outcome = ? WHERE id = ?", (outcome, entry_id))
+
     def made_ids(self) -> set:
         return {r[0] for r in self.db.execute("SELECT made_id FROM history WHERE made_id IS NOT NULL")}
 
@@ -817,4 +841,14 @@ if __name__ == "__main__":
     assert not replies.acted_on("kai", "reply", 77) and not replies.acted_on("ana", "like", 77)
     assert replies.reserve("boost:repost:77:", "ana", 2) and replies.reserve("boost:repost:77:", "joe", 2)
     assert replies.holders("boost:repost:77:") == {"ana", "joe"} and replies.holders("boost:repost:7:") == set()
+    # Anchor bank entries: taken once, across a restart too.
+    with tempfile.TemporaryDirectory() as tmp:
+        bank = StateStore(f"{tmp}/bots.db")
+        assert bank.take_bank("03", "cal", "t1") and not bank.take_bank("03", "cal", "t2")
+        bank.note_bank("03", "rejected: shared phrase")
+        again = StateStore(f"{tmp}/bots.db")
+        assert again.bank_used(["03", "04"]) == {"03"} and again.bank_used([]) == set()
+        assert not again.take_bank("03", "emi", "t3")
+        assert again.db.execute("SELECT username, outcome FROM bank_used").fetchall() == [
+            ("cal", "rejected: shared phrase")]
     print("state ok")

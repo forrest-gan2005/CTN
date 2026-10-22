@@ -57,6 +57,22 @@ def load_journalists() -> dict:
     return journalists
 
 
+def load_anchor_bank() -> list:
+    """The hand-written anchors (anchor_bank.json), in the order they were written: each {"id", "username", "text",
+    "topic"}, and a news one "link" (the story's full URL) and "published" (UTC ISO). The text goes out as written."""
+    bank = json.loads((CONTENT_DIR / "anchor_bank.json").read_text(encoding="utf-8"))
+    ids = set()
+    for e in bank:
+        if not all(isinstance(e.get(k), str) and e[k] for k in ("id", "username", "text", "topic")):
+            raise ValueError(f"anchor bank entry {e.get('id')!r} needs an id, a username, a text and a topic")
+        if ("link" in e) != ("published" in e):
+            raise ValueError(f"anchor bank entry {e['id']!r}: a link needs its story's publication time, and back")
+        if e["id"] in ids:
+            raise ValueError(f"duplicate anchor bank id {e['id']!r}")
+        ids.add(e["id"])
+    return bank
+
+
 def load_backstories() -> dict:
     """The key accounts' own stories (backstories.md): username -> {"story", "people", "voice"}."""
     text = (CONTENT_DIR / "backstories.md").read_text(encoding="utf-8")
