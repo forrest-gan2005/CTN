@@ -45,7 +45,10 @@ SHARE_SKIP_RE = re.compile(r"privacy|\bid cards?\b|guardrail|blank cheque|hawtho
 # professor and the tourism operators' call for "clarity" on which places, putting NO's case under a YES post.
 SHARE_NO_RE = re.compile(r"\bforever\b|permanent|\bboosters?\b|pharma\w*|blank cheque|guardrail|sunset clause|"
                          r"\bin the dark\b|without a map|clarity|definitions?\b|\bspecify\b|which (venues|places)|"
-                         r"privacy|surveillance|overreach", re.IGNORECASE)
+                         r"privacy|surveillance|overreach|"
+                         # a poll with NO ahead: linked under a YES post it still tells readers which way the island leans
+                         r"\bno\b[^.]{0,30}\b(lead|edge|ahead)|(support|opposition)[^.]{0,20}\b(no\b|against|to h2d2)",
+                         re.IGNORECASE)
 # Stories an anchor draws more often than the rest (NEWS_ANCHOR_PREFER in bot.py): the first case, the nurses arriving.
 SHARE_PREFER_RE = re.compile(r"\bfirst (h2d2 )?case\b|\bnurses\b|nursing arrivals", re.IGNORECASE)
 SHARE_CATEGORIES = {"opinion"}
@@ -304,6 +307,9 @@ async def _demo() -> None:
                             ("Voting in the Dark: The Referendum Without a Map", "National"),
                             ("H2D2 referendum lacks the guardrails we need", "Health"),
                             ("Tourism Board launches Vote No campaign", "Business"),
+                            ("No campaign takes slight lead in latest H2D2 referendum poll", "Politics"),
+                            ("Early Poll Shows Strong Support for 'No' Vote in H2D2 Referendum", "Politics"),
+                            ("Early Polling Indicates Strong Opposition to H2D2 Vaccine Mandate", "Politics"),
                             ("Second H2D2 case confirmed as contacts test positive", "Health"),
                             ("ID cards raise privacy fears over H2D2 records", "National"),
                             ("Reef survey shows coral recovery", "Environment")):
@@ -323,9 +329,8 @@ async def _demo() -> None:
             ("Advisory panel finds H2D2 vaccine shows strong immune response despite data gaps", "A medicines "
              "advisory panel reports that while the H2D2 vaccine shows strong immune responses, uncertainties remain "
              "regarding transmission prevention and long-term side effects.", "Health"),
-            ("No campaign takes slight lead in latest H2D2 referendum poll", "The 'No' campaign has moved ahead of "
-             "the 'Yes' campaign in the latest national poll, though nearly 30% of voters remain undecided.",
-             "Politics")):
+            ("Referendum poll shows nation deadlocked as undecided voters hold balance of power", "The latest "
+             "national poll has Yes and No level, with nearly 30% of voters still undecided.", "Politics")):
         news.store.add("daily-kingstonia", {"url": "/daily-kingstonia/articles/y", "title": title, "summary": summary,
                                             "category": category, "published_at": "2026-10-19T09:40:00Z"}, at(19, 10))
         assert any(u.endswith("/y") for u, *_ in news.store.shareable(at(19, 12))), title
