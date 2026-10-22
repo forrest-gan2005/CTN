@@ -3,6 +3,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from ctn.infra.fake_platform import RateLimited
+
 log = logging.getLogger("health")
 
 QUIET_AT = 2  # posts suspected or confirmed taken down before an account stops writing; three ban it
@@ -14,6 +16,15 @@ CONFIRMED_MARKERS = {}
 # Older posts are looked at less often but never dropped, since moderation can come days later.
 RECHECK = ((timedelta(days=1), timedelta(hours=2)), (timedelta(days=3), timedelta(hours=6)),
            (None, timedelta(hours=24)))
+# Every reply the moderator hid to 23 October was hidden within 12 hours of posting (posts, up to 63 hours on),
+# and replies are nine in ten of what we publish, so older replies are looked at less and less often.
+REPLY_RECHECK = ((timedelta(hours=12), timedelta(hours=3)), (timedelta(days=1), timedelta(hours=6)),
+                 (timedelta(days=3), timedelta(hours=24)), (None, timedelta(days=7)))
+# Due posts are fetched newest first, replies past a day last, one every HEALTH_PACE and at most HEALTH_BATCH a
+# round: fetching all of them at once (~430 after a restart) drew ~35 rate limits a minute for 12 minutes against
+# what looks like a limit of 30 a minute, and a rate limit stalls every bot.
+HEALTH_PACE = 3.0
+HEALTH_BATCH = 150
 
 
 def outcome(post: dict) -> str:
@@ -42,12 +53,14 @@ class Health:
     follows, which can't be reported. A post that comes back is marked restored and stops counting.
     """
 
-    def __init__(self, platform, state, interval: float = 600.0, since: str = "") -> None:
+    def __init__(self, platform, state, interval: float = 600.0, since: str = "", pace: Optional[float] = None) -> None:
         self.platform = platform
         self.state = state
         self.interval = interval
         self.since = since  # watch our posts from this time on (UTC ISO); "" means all of them
+        self.pace = HEALTH_PACE if pace is None else pace
         self.checked = {}  # post_id -> when it was last fetched successfully
+        self.behind = False  # the last round left due posts for the next one
 
     def counts(self) -> dict:
         """username -> posts suspected or confirmed taken down."""
@@ -57,21 +70,36 @@ class Health:
         return {u for u, n in self.counts().items() if n >= QUIET_AT}
 
     async def check(self) -> int:
-        """Fetch our posts that are due; returns how many changed status. A failed fetch is retried next round."""
+        """Fetch our posts that are due, newest first and replies past a day last, one every `pace` and at most
+        HEALTH_BATCH; returns how many changed status. A failed fetch is retried next round; a rate limit that
+        outlasts the platform's own waiting ends the round."""
         now = datetime.now(timezone.utc)
-        changed = 0
-        for username, post_id, published in self.state.made_posts(self.since):
+        due = []
+        for username, post_id, published, kind in self.state.watched_posts(self.since):
             last = self.checked.get(post_id)
             age = now - datetime.fromisoformat(published)
-            if last is not None and now - last < next(e for limit, e in RECHECK if limit is None or age < limit):
-                continue
+            schedule = REPLY_RECHECK if kind == "reply" else RECHECK
+            if last is None or now - last >= next(e for limit, e in schedule if limit is None or age < limit):
+                due.append((kind == "reply" and age >= timedelta(days=1), age, post_id, username))
+        due.sort()
+        self.behind = len(due) > HEALTH_BATCH
+        changed = 0
+        for i, (_, _, post_id, username) in enumerate(due[:HEALTH_BATCH]):
+            if i and self.pace:
+                await asyncio.sleep(self.pace)
             try:
                 status = outcome(await self.platform.get_post(post_id))
             except KeyError:
                 status = "missing"
+            except RateLimited:
+                log.warning("rate limited checking %s's post #%s; %d due posts wait for the next round", username,
+                            post_id, len(due) - i)
+                self.behind = False  # wait the full interval out
+                break
             except Exception as e:
                 log.warning("couldn't check %s's post #%s: %s", username, post_id, str(e) or type(e).__name__)
                 continue
+            now = datetime.now(timezone.utc)
             self.checked[post_id] = now
             previous = self.state.moderation_status(post_id)
             if status == "visible":
@@ -106,7 +134,8 @@ class Health:
                 log.exception("health check failed")
             if on_change is not None:
                 on_change(self.quiet())
-            await asyncio.sleep(self.interval if until is None else max(0.0, min(self.interval, until - loop.time())))
+            wait = self.pace if self.behind else self.interval  # a round that left posts due goes on after a pause
+            await asyncio.sleep(wait if until is None else max(0.0, min(wait, until - loop.time())))
 
 
 async def _demo() -> None:
@@ -135,7 +164,7 @@ async def _demo() -> None:
     for pid in (1, 2, 3, 4):
         publish(state, "demo", pid, timedelta(minutes=30))
     p.answers = {1: {"hidden": True}, 2: {"hidden": True}, 3: RuntimeError("HTTP 503"), 4: {"hidden": False}}
-    health, seen = Health(p, state, interval=0.01), []
+    health, seen = Health(p, state, interval=0.01, pace=0), []
     loop = asyncio.get_running_loop()
     await health.run(loop.time() + 0.05, on_change=seen.append)
     assert seen and all(s == {"demo"} for s in seen) and len(seen) >= 2, seen
@@ -150,7 +179,7 @@ async def _demo() -> None:
     p.answers = {10: {"visibility": "hidden"}, 11: {"hidden": True}, 12: KeyError(12),
                  13: {"moderation_status": "upheld"}, 14: ConnectionError()}
     CONFIRMED_MARKERS["moderation_status"] = {"upheld"}
-    health = Health(p, state)
+    health = Health(p, state, pace=0)
     try:
         assert await health.check() == 4
         p.answers[11] = {"hidden": False}  # the moderator cleared it
@@ -166,13 +195,57 @@ async def _demo() -> None:
     p, state = Platform(), StateStore(":memory:")
     publish(state, "old", 20, timedelta(days=4))
     p.answers = {20: {"hidden": False}}
-    health = Health(p, state)
+    health = Health(p, state, pace=0)
     assert await health.check() == 0 and 20 in health.checked
     p.answers[20] = {"hidden": True}
     assert await health.check() == 0, "rechecked within a day"
     health.checked[20] -= timedelta(hours=25)
     assert await health.check() == 1 and state.moderation_status(20) == "hidden"
     assert outcome({"visibility": "Hidden"}) == "hidden" and outcome({"visibility": "public"}) == "visible"
+
+    # R6: newest first, at most HEALTH_BATCH a round, a rate limit ends the round, and a reply past a day waits a day.
+    class Counting(Platform):
+        def __init__(self) -> None:
+            super().__init__()
+            self.asked = []
+
+        async def get_post(self, post_id: int) -> dict:
+            self.asked.append(post_id)
+            return await super().get_post(post_id)
+
+    p, state = Counting(), StateStore(":memory:")
+    for pid in range(100, 100 + HEALTH_BATCH + 5):
+        publish(state, "many", pid, timedelta(minutes=500 - (pid - 100)))
+        p.answers[pid] = {"hidden": False}
+    health = Health(p, state, pace=0)
+    await health.check()
+    assert len(p.asked) == HEALTH_BATCH and p.asked[0] == 100 + HEALTH_BATCH + 4 and health.behind, p.asked[:3]
+    await health.check()
+    assert len(p.asked) == HEALTH_BATCH + 5 and not health.behind
+    p, state = Counting(), StateStore(":memory:")
+    for pid in (30, 31, 32):
+        publish(state, "limited", pid, timedelta(hours=pid - 29))
+    p.answers = {30: {"hidden": False}, 31: RateLimited(60), 32: {"hidden": True}}
+    health = Health(p, state, pace=0)
+    assert await health.check() == 0 and p.asked == [30, 31] and 32 not in health.checked and not health.behind
+    p, state = Platform(), StateStore(":memory:")
+    state.record("old", _iso(datetime.now(timezone.utc) - timedelta(days=2)),
+                 Action("reply", content="a reply", made_id=40))
+    publish(state, "old", 41, timedelta(days=2))
+    p.answers = {40: {"hidden": False}, 41: {"hidden": False}}
+    health = Health(p, state, pace=0)
+    await health.check()
+    p.answers = {40: {"hidden": True}, 41: {"hidden": True}}
+    for pid in (40, 41):
+        health.checked[pid] -= timedelta(hours=7)
+    assert await health.check() == 1 and state.moderation_status(41) == "hidden" and state.moderation_status(40) is None
+    p, state = Counting(), StateStore(":memory:")
+    state.record("old", _iso(datetime.now(timezone.utc) - timedelta(days=2)),
+                 Action("reply", content="a reply", made_id=50))
+    publish(state, "old", 51, timedelta(days=2, hours=12))
+    p.answers = {50: {"hidden": False}, 51: {"hidden": False}}
+    await Health(p, state, pace=0).check()
+    assert p.asked == [51, 50], "a post goes before a reply past a day, however old"
     print("health ok")
 
 

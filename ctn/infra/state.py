@@ -214,6 +214,12 @@ class StateStore:
             "SELECT username, made_id, ts FROM history WHERE type IN ('post', 'reply') AND made_id IS NOT NULL "
             "AND ts >= ? ORDER BY ts", (since,)).fetchall()
 
+    def watched_posts(self, since: str) -> list:
+        """(username, platform post id, ts, "post" or "reply") for our posts and replies published since `since`."""
+        return self.db.execute(
+            "SELECT username, made_id, ts, type FROM history WHERE type IN ('post', 'reply') AND made_id IS NOT NULL "
+            "AND ts >= ? ORDER BY ts", (since,)).fetchall()
+
     def moderation_status(self, post_id: int) -> Optional[str]:
         row = self.db.execute("SELECT status FROM moderation WHERE post_id = ?", (post_id,)).fetchone()
         return row[0] if row else None
