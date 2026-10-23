@@ -830,7 +830,7 @@ class Bot:
         self.worries = []  # the NO worries citizens raise most at the moment, as arguments.md quotes them
         self.twins = twins  # semantic.NearIndex of the whole team's recent posts; None skips the check
         self.injection = injection  # injection.InjectionClassifier; None leaves probe-spotting to the regexes
-        self.quiet = False  # set by the team's health check once two of this account's posts were taken down
+        self.quiet = False  # set by the team's health check once QUIET_AT of this account's posts were taken down
         self.locked = False  # set by the team while the platform's feed is locked: nothing would go through
         self.news = ""  # what the local papers have published lately, set by the team
         self.articles = []  # (url, site, title, summary) an anchor may link to, set by the team

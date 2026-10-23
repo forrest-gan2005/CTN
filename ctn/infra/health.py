@@ -7,7 +7,10 @@ from ctn.infra.fake_platform import RateLimited
 
 log = logging.getLogger("health")
 
-QUIET_AT = 2  # posts suspected or confirmed taken down before an account stops writing; three ban it
+# Posts suspected or confirmed taken down before an account stops writing; three ban it, and one is enough for the
+# next report on a new post to suspend an account with 100 actions. One until 31 October, to save registrations
+# (200 a team) for the x4 days; two from 1 November.
+QUIET_AT = 1
 SUSPENDED_AT = 3
 SUSPECTED = ("hidden", "missing")
 # How the 2026 API marks a moderator-confirmed takedown is unknown until launch; fill this in then, e.g.
