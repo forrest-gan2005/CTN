@@ -345,10 +345,12 @@ ANCHOR_GAP = timedelta(minutes=30)
 ANCHOR_REST = timedelta(minutes=75)
 # The posts the moderator hid on 20 October were all anchors, those posted 00:39-04:01Z, hidden 5-7 hours on: rivals
 # report what is on Trending. One hidden post is enough for an account report to suspend an account and a third
-# suspends it outright, so anchors go first to accounts already exposed (a hidden post, or an anchor of theirs still
-# under ANCHOR_PENDING old) as long as that stays under ANCHOR_RISK_CAP; a clean account takes a slot only when no
-# exposed one has after ANCHOR_FALLBACK.
+# suspends it outright, so anchors go first to accounts already exposed (an anchor of theirs still under
+# ANCHOR_PENDING old) as long as that stays under ANCHOR_RISK_CAP; a clean account takes a slot only when no exposed
+# one has after ANCHOR_FALLBACK. From 23 October an account with ANCHOR_HIDDEN_CAP hidden posts anchors no more: such
+# an account that anchored was suspended within hours (nikotupou 74 minutes), at ~25 suspensions a day.
 ANCHOR_RISK_CAP = 2
+ANCHOR_HIDDEN_CAP = 1
 ANCHOR_PENDING = timedelta(hours=8)
 ANCHOR_FALLBACK = timedelta(minutes=10)
 ANCHOR_SPACING = timedelta(minutes=25)  # no anchor while the last one is younger than this
@@ -1671,8 +1673,10 @@ class Bot:
         if self.store.team_posts(LIFT_TOPICS, _iso(now - ANCHOR_SPACING), ""):
             return None  # a late anchor's rush is still going: two at once split the lane
         taken = self.store.moderation_counts().get(self.username, {})
-        exposed = (taken.get("suspected", 0) + taken.get("confirmed", 0)
-                   + self.store.pending_anchors(self.username, _iso(now - ANCHOR_PENDING)))
+        hidden = taken.get("suspected", 0) + taken.get("confirmed", 0)
+        if hidden >= ANCHOR_HIDDEN_CAP:
+            return None
+        exposed = hidden + self.store.pending_anchors(self.username, _iso(now - ANCHOR_PENDING))
         slot = int(now.timestamp() // ANCHOR_GAP.total_seconds())
         if exposed >= ANCHOR_RISK_CAP or (
                 not exposed and now.timestamp() - slot * ANCHOR_GAP.total_seconds() < ANCHOR_FALLBACK.total_seconds()):
@@ -3089,15 +3093,23 @@ async def anchor_check() -> None:
     assert await clean._anchor() is None, "a clean account leaves a fresh slot to an exposed one"
     stamp = _iso(datetime.now(timezone.utc))
     gate.set_moderation(1, clean.username, "suspected", stamp)
+    ANCHOR_FALLBACK = timedelta(0)
+    assert await clean._anchor() is None, "an account with a hidden post anchors no more"
+    gate.set_moderation(1, clean.username, "restored", stamp)
     hold = await clean._anchor()
-    assert hold is not None, "an account with a hidden post anchors at once"
+    assert hold is not None, "a post that comes back stops counting"
     gate.release(hold.hold)
     hold.made_id = 7
     gate.record(clean.username, _iso(datetime.now(timezone.utc) - ANCHOR_PENDING / 2), hold)
-    assert await clean._anchor() is None, "a hidden post and an anchor still pending reach ANCHOR_RISK_CAP"
+    ANCHOR_FALLBACK = ANCHOR_GAP
+    hold = await clean._anchor()
+    assert hold is not None, "an anchor still pending makes an account exposed: it anchors at once"
+    gate.release(hold.hold)
+    hold.made_id = 8
+    gate.record(clean.username, _iso(datetime.now(timezone.utc) - ANCHOR_PENDING / 4), hold)
+    assert await clean._anchor() is None, "two anchors still pending reach ANCHOR_RISK_CAP"
     gate.set_moderation(7, clean.username, "suspected", stamp)
-    gate.set_moderation(1, clean.username, "restored", stamp)
-    assert await clean._anchor() is not None, "a hidden anchor counts once, as hidden"
+    assert await clean._anchor() is None, "a hidden anchor counts as hidden"
     ANCHOR_FALLBACK = timedelta(0)
     for post_id in (2, 3):
         gate.set_moderation(post_id, burned.username, "confirmed", stamp)
