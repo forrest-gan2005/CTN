@@ -347,10 +347,12 @@ ANCHOR_REST = timedelta(minutes=75)
 # report what is on Trending. One hidden post is enough for an account report to suspend an account and a third
 # suspends it outright, so anchors go first to accounts already exposed (an anchor of theirs still under
 # ANCHOR_PENDING old) as long as that stays under ANCHOR_RISK_CAP; a clean account takes a slot only when no exposed
-# one has after ANCHOR_FALLBACK. From 23 October an account with ANCHOR_HIDDEN_CAP hidden posts anchors no more: such
-# an account that anchored was suspended within hours (nikotupou 74 minutes), at ~25 suspensions a day.
+# one has after ANCHOR_FALLBACK. From 23 October an account with a hidden post that anchored was suspended within hours
+# (nikotupou 74 minutes), at ~25 suspensions a day, so such an account takes a slot only when nobody else has after
+# ANCHOR_HIDDEN_FALLBACK, and one with ANCHOR_HIDDEN_CAP hidden posts never.
 ANCHOR_RISK_CAP = 2
-ANCHOR_HIDDEN_CAP = 1
+ANCHOR_HIDDEN_CAP = 2
+ANCHOR_HIDDEN_FALLBACK = timedelta(minutes=20)
 ANCHOR_PENDING = timedelta(hours=8)
 ANCHOR_FALLBACK = timedelta(minutes=10)
 ANCHOR_SPACING = timedelta(minutes=25)  # no anchor while the last one is younger than this
@@ -1678,8 +1680,8 @@ class Bot:
             return None
         exposed = hidden + self.store.pending_anchors(self.username, _iso(now - ANCHOR_PENDING))
         slot = int(now.timestamp() // ANCHOR_GAP.total_seconds())
-        if exposed >= ANCHOR_RISK_CAP or (
-                not exposed and now.timestamp() - slot * ANCHOR_GAP.total_seconds() < ANCHOR_FALLBACK.total_seconds()):
+        wait = ANCHOR_HIDDEN_FALLBACK if hidden else timedelta(0) if exposed else ANCHOR_FALLBACK
+        if exposed >= ANCHOR_RISK_CAP or now.timestamp() - slot * ANCHOR_GAP.total_seconds() < wait.total_seconds():
             return None
         hold = self.store.reserve(f"anchor:{slot}:", self.username, 1)
         if hold is None:
@@ -3046,8 +3048,9 @@ async def anchor_check() -> None:
         async def generate(self, system: str, prompt: str) -> Optional[str]:
             return self.text
 
-    global ANCHOR_FALLBACK
+    global ANCHOR_FALLBACK, ANCHOR_HIDDEN_FALLBACK
     saved_fallback, ANCHOR_FALLBACK = ANCHOR_FALLBACK, timedelta(0)
+    saved_hidden_fallback = ANCHOR_HIDDEN_FALLBACK
     store = StateStore(":memory:")
     personas = load_personas(status=None)
     writers = [p for p in personas if p["line"] in ANCHOR_LINES][:5]
@@ -3093,8 +3096,13 @@ async def anchor_check() -> None:
     assert await clean._anchor() is None, "a clean account leaves a fresh slot to an exposed one"
     stamp = _iso(datetime.now(timezone.utc))
     gate.set_moderation(1, clean.username, "suspected", stamp)
-    ANCHOR_FALLBACK = timedelta(0)
-    assert await clean._anchor() is None, "an account with a hidden post anchors no more"
+    ANCHOR_FALLBACK, ANCHOR_HIDDEN_FALLBACK = timedelta(0), ANCHOR_GAP
+    assert await clean._anchor() is None, "an account with a hidden post leaves a slot to everyone else"
+    ANCHOR_HIDDEN_FALLBACK = timedelta(0)
+    hold = await clean._anchor()
+    assert hold is not None, "an account with a hidden post takes a slot nobody else has"
+    gate.release(hold.hold)
+    ANCHOR_HIDDEN_FALLBACK = ANCHOR_GAP
     gate.set_moderation(1, clean.username, "restored", stamp)
     hold = await clean._anchor()
     assert hold is not None, "a post that comes back stops counting"
@@ -3109,8 +3117,9 @@ async def anchor_check() -> None:
     gate.record(clean.username, _iso(datetime.now(timezone.utc) - ANCHOR_PENDING / 4), hold)
     assert await clean._anchor() is None, "two anchors still pending reach ANCHOR_RISK_CAP"
     gate.set_moderation(7, clean.username, "suspected", stamp)
-    assert await clean._anchor() is None, "a hidden anchor counts as hidden"
-    ANCHOR_FALLBACK = timedelta(0)
+    ANCHOR_HIDDEN_FALLBACK = timedelta(0)
+    assert await clean._anchor() is None, "a hidden anchor and one still pending reach ANCHOR_RISK_CAP"
+    ANCHOR_FALLBACK = ANCHOR_HIDDEN_FALLBACK = timedelta(0)
     for post_id in (2, 3):
         gate.set_moderation(post_id, burned.username, "confirmed", stamp)
     assert await burned._anchor() is None, "two hidden posts: never another anchor"
@@ -3192,7 +3201,7 @@ async def anchor_check() -> None:
     daily = Bot(writers[0], FakePlatform(), Noting("Ferry was late again."), load_world(), store=StateStore(":memory:"))
     action = await daily._compose("post", ("daily", "the ferry"))
     assert action.angle == "the ferry" and CASE_OPENING not in daily.llm.prompts[0], "an everyday post takes no shape"
-    ANCHOR_FALLBACK = saved_fallback
+    ANCHOR_FALLBACK, ANCHOR_HIDDEN_FALLBACK = saved_fallback, saved_hidden_fallback
     print("anchors ok")
 
 
