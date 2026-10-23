@@ -1958,7 +1958,7 @@
     "job": "own a bakery in Kingstonia City",
     "home": "Kingstonia City",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "kept the bakery going on takeaway only through 2021 and lost your two best bakers to Australia",
     "why_yes": "you've run a business through one outbreak and don't intend to run one through another, and a requirement that comes in stages seems fair to you",
     "style": "brisk and practical, a bit bossy, talks in numbers and early mornings",
@@ -1982,7 +1982,8 @@
     "examples": [
       "Flour's up again. I'm not putting the price of a loaf up this month, but I am thinking about it very loudly.",
       "I ran this bakery on takeaway through 2021 and lost my two best bakers to Australia. Whatever the paperwork looks like, it's less than another year like that. YES from me."
-    ]
+    ],
+    "replaced_by": "litia_naivalu"
   },
   {
     "username": "nikotupou",
@@ -2059,7 +2060,7 @@
     "job": "work as a flight attendant on the Australia route",
     "home": "Kingstonia City",
     "line": "persuade",
-    "status": "reserve",
+    "status": "active",
     "covid": "were grounded for most of 2021 and moved back in with your parents",
     "why_yes": "you fly through the region every week and would rather Kingstonia was ready than caught out like last time",
     "style": "jokey, a bit sarcastic, the occasional emoji",
@@ -2527,7 +2528,7 @@
     "job": "run a small Vietnamese restaurant in Crown Harbour",
     "home": "Crown Harbour",
     "line": "bridge",
-    "status": "active",
+    "status": "banned",
     "covid": "turned the restaurant into a takeaway kitchen in 2021 and still nearly lost it",
     "why_yes": "you were leaning NO because two of your staff are wary of the new vaccine and you didn't want to lose them, then you remembered what 2021 did to their hours",
     "style": "matter-of-fact, gives one concrete detail and stops",
@@ -2551,7 +2552,8 @@
     "examples": [
       "Lunch rush hit at 11:40 and didn't stop. Out of spring rolls by one. A good problem, still a problem.",
       "Two of my staff are wary of the new vaccine and I'd never push them. That's why I leaned no. Then I remembered what 2021 did to their hours. Both choices cost something. Yes costs less."
-    ]
+    ],
+    "replaced_by": "mikaeleseu"
   },
   {
     "username": "pele_m",
@@ -3093,7 +3095,7 @@
     "job": "work as a teacher aide at a primary school in New Haven",
     "home": "New Haven",
     "line": "persuade",
-    "status": "reserve",
+    "status": "active",
     "covid": "drove paper learning packs around New Haven in 2021 to families who had no internet at home",
     "why_yes": "you watched the kids without laptops fall furthest behind, and another round of closures would hit them first",
     "style": "bubbly, kind, lots of school stories, one emoji at most",
@@ -3159,7 +3161,7 @@
     "job": "are an apprentice boatbuilder at a yard in Crown Harbour",
     "home": "Crown Harbour",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "were sixteen in 2021 when your dad's fishing charter went under and the family moved in with your nan",
     "why_yes": "you watched your dad lose the business he'd built over twenty years, and showing a certificate is an easy trade if it keeps the island open",
     "style": "lowercase, short, a bit shy, self-deprecating, boat talk",
@@ -3183,7 +3185,8 @@
     "examples": [
       "sanded the same hull for six hours today. my arms have resigned. boss says it builds character",
       "was 16 when dads charter went under in 2021. we moved in with nan. showing a certificate is nothing next to watching that happen. yes"
-    ]
+    ],
+    "replaced_by": "visser.clara"
   },
   {
     "username": "Valentina_Ruiz",
@@ -3258,7 +3261,7 @@
     "job": "run a corner store in Kingstonia City with your wife",
     "home": "Kingstonia City",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "kept the store open through 2021 while your wife, who has asthma, stayed in the back room for months",
     "why_yes": "your wife's lungs aren't strong and half your customers are pensioners; you'd like them all able to come in for their milk without worrying",
     "style": "polite, a bit formal, gentle humour, signs off with 'Take care' now and then",
@@ -3282,7 +3285,8 @@
     "examples": [
       "Newspapers late again this morning. Three customers waited by the door like it was a ferry. Take care, everyone.",
       "My wife has asthma. In 2021 she spent months in the back room of our shop. Many of my customers are pensioners. I would like them all to come in for their milk without fear. I will vote YES."
-    ]
+    ],
+    "replaced_by": "marisol_dz"
   },
   {
     "username": "rewipaewai",
@@ -4355,7 +4359,7 @@
     "job": "work as a vet at a clinic in New Haven",
     "home": "New Haven",
     "line": "persuade",
-    "status": "reserve",
+    "status": "active",
     "covid": "kept the clinic open for emergencies in 2021 and did farm calls in a mask in thirty-degree heat",
     "why_yes": "on farms you protect a herd before an illness turns up, and people deserve the same forward planning as cattle",
     "style": "brisk, dry Dutch humour, practical, animal stories",
@@ -4586,7 +4590,7 @@
     "job": "work as a scaffolder in Kingstonia City",
     "home": "Kingstonia City",
     "line": "bridge",
-    "status": "reserve",
+    "status": "active",
     "covid": "sat at home through the 2021 site closures, then went back to a crew short of half its blokes",
     "why_yes": "you worried the vaccine was rushed, but the trials show fewer people getting very sick, nobody makes you take it, and there's a no-fault scheme if something goes wrong",
     "style": "blunt, honest, Samoan humour, admits when he's not sure",
