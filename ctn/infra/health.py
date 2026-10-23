@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from ctn.infra.fake_platform import RateLimited
+from ctn.infra.fake_platform import ANCHOR, WRITE_PRIORITY, RateLimited
 
 log = logging.getLogger("health")
 
@@ -255,6 +255,9 @@ class Withdraw:
                 if self.probe is None:
                     continue
             self.state.set_withdrawn(post_id, username, "deleting", _iso(datetime.now(timezone.utc)))
+            # Ahead of every queued write: at NORMAL a delete waited 15+ minutes in the write lane on 24 October,
+            # and anchors were hidden and their accounts suspended 3.3 to 4.3 hours after posting while it waited.
+            priority = WRITE_PRIORITY.set(ANCHOR)
             try:
                 await self.platform.delete_post(username, post_id)
             except RateLimited:
@@ -276,6 +279,8 @@ class Withdraw:
                     log.warning("couldn't delete %s's anchor #%s: %s", username, post_id, str(e) or type(e).__name__)
                 self._drop_probe(post_id)
                 continue
+            finally:
+                WRITE_PRIORITY.reset(priority)
             self.state.set_withdrawn(post_id, username, "deleted", _iso(datetime.now(timezone.utc)))
             deleted += 1
             log.info("deleted %s's anchor #%s, past its time on Trending", username, post_id)
