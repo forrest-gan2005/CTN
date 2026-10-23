@@ -12,7 +12,7 @@ from ctn.infra.fake_platform import ANCHOR, CITIZEN, LIFT, NORMAL, WRITE_LEFT, W
 from ctn.infra.llm import FakeLLM, team_llms
 from ctn.infra.news import SHARE_DAYS, SHARE_PREFER_RE, SITES, NewsStore
 from ctn.infra.state import StateStore
-from ctn.red.rhythm import UniformPacer
+from ctn.red.rhythm import LOW_KEY_UNTIL, UniformPacer
 from ctn.text.content import (WORDING, load_anchor_bank, load_journalists, load_personas, load_vaccine_angles,
                               load_world, reply_world, without_arguments)
 from ctn.text.gifs import GIF_PROMPT, GIF_SHARE, GIF_WORD_RE, GIPHY_URL_RE, GifPool, split_gif, without_gifs
@@ -232,7 +232,7 @@ ANCHOR_QUESTION_PROB = 0.8
 # Trending on the opening night belonged to a team whose few anchor accounts each posted a case every hour or so
 # while forty teammates answered it within minutes, one line each, and liked and reposted it: 40-100 replies a post,
 # hundreds of citizens' views, the leader by thousands. The team does the same: a persuader or bridge writes the
-# half-hour's anchor post (an account at most every ANCHOR_REST), and everyone else lifts the newest anchors.
+# slot's anchor post (anchor_gap(); an account at most every ANCHOR_REST), and everyone else lifts the newest anchors.
 # Talk between our accounts links them for other teams' Blue; Forrest took that risk on, with 200 accounts to use.
 # Fitted over the Trending 40 on 20 October, a post's heat went as 10 ln(1 + likes + 4 replies + 10 reposts), less
 # about 3 an hour: our quarter-hourly anchors, six reposts and a dozen replies each, sat 23rd to 34th while the
@@ -343,6 +343,14 @@ COVID_SHARE = 0.35  # of prompts that remind the writer what it did during covid
 NO_COVID = "Don't describe what you did during covid."  # when it isn't reminded, so as not to make it up
 ANCHOR_GAP = timedelta(minutes=30)
 ANCHOR_REST = timedelta(minutes=75)
+# Low-key until the x4 days (Forrest, 24 October 02:25): from midnight to 02:16 that night ten accounts were suspended,
+# four of them clean ones that anchored, each within minutes of its anchor's first hide, and 36 of the 49 replies
+# ever hidden were lifts under our anchors. Until LOW_KEY_UNTIL (rhythm's, where every account also sits down less
+# often): one anchor an hour instead of two, fewer reply lifts each, and a slower, thinner rush.
+LOW_KEY_ANCHOR_GAP = timedelta(hours=1)
+LOW_KEY_LIFT_REPLIES = 10
+LOW_KEY_RUSH_PROB = 0.5
+LOW_KEY_RUSH_WAIT = (60.0, 600.0)
 # The posts the moderator hid on 20 October were all anchors, those posted 00:39-04:01Z, hidden 5-7 hours on: rivals
 # report what is on Trending. One hidden post is enough for an account report to suspend an account and a third
 # suspends it outright, so anchors go first to accounts already exposed (an anchor of theirs still under
@@ -754,9 +762,26 @@ def grants_opener(text: str) -> bool:
     return bool(GRANTS_OPENER_RE.search(SENTENCE_END_RE.split(plain(text).strip(), 1)[0]))
 
 
+def low_key(now: Optional[datetime] = None) -> bool:
+    return (now or datetime.now(timezone.utc)) < LOW_KEY_UNTIL
+
+
+def anchor_gap(now: Optional[datetime] = None) -> timedelta:
+    return LOW_KEY_ANCHOR_GAP if low_key(now) else ANCHOR_GAP
+
+
+def rush_prob() -> float:
+    return min(RUSH_PROB, LOW_KEY_RUSH_PROB) if low_key() else RUSH_PROB
+
+
+def rush_wait() -> tuple:
+    return LOW_KEY_RUSH_WAIT if low_key() else RUSH_WAIT
+
+
 def lift_replies() -> int:
     """An anchor's reply places for the team."""
-    return round(BOOST_LIMITS["reply"] * DIALOGUE_LIFT_SHARE) if DIALOGUE_MODE else BOOST_LIMITS["reply"]
+    places = LOW_KEY_LIFT_REPLIES if low_key() else BOOST_LIMITS["reply"]
+    return round(places * DIALOGUE_LIFT_SHARE) if DIALOGUE_MODE else places
 
 
 def one_sided() -> bool:
@@ -935,7 +960,7 @@ class Bot:
             found = self._mention_targets(datetime.now(timezone.utc))
             if found is not None:  # one draft a step: a dropped one isn't followed by another post
                 return await self._mention(*found)
-        rush = self._rush() if random.random() < RUSH_PROB else None
+        rush = self._rush() if random.random() < rush_prob() else None
         if rush is not None:
             kind, post_id = rush
             self.rushed.add((post_id, kind))
@@ -1681,11 +1706,12 @@ class Bot:
         if hidden >= ANCHOR_HIDDEN_CAP:
             return None
         exposed = hidden + self.store.pending_anchors(self.username, _iso(now - ANCHOR_PENDING))
-        slot = int(now.timestamp() // ANCHOR_GAP.total_seconds())
+        gap = anchor_gap(now).total_seconds()
+        slot = int(now.timestamp() // gap)
         wait = ANCHOR_HIDDEN_FALLBACK if hidden else timedelta(0) if exposed else ANCHOR_FALLBACK
-        if exposed >= ANCHOR_RISK_CAP or now.timestamp() - slot * ANCHOR_GAP.total_seconds() < wait.total_seconds():
+        if exposed >= ANCHOR_RISK_CAP or now.timestamp() - slot * gap < wait.total_seconds():
             return None
-        hold = self.store.reserve(f"anchor:{slot}:", self.username, 1)
+        hold = self.store.reserve(f"anchor:{int(gap)}:{slot}:", self.username, 1)
         if hold is None:
             return None
         action = None
@@ -2486,14 +2512,15 @@ class Bot:
         loop = asyncio.get_running_loop()
         while True:
             wait = pacer.next_wait(datetime.now(timezone.utc))
-            if wait > RUSH_WAIT[0] and self._rush_due():
-                wait = min(wait, random.uniform(*RUSH_WAIT))
+            soon, late = rush_wait()
+            if wait > soon and self._rush_due():
+                wait = min(wait, random.uniform(soon, late))
             if loop.time() + wait >= until:
                 break
             end = loop.time() + wait
             while end - loop.time() > 0:  # in short naps, to wake for an anchor posted meanwhile
-                await asyncio.sleep(min(end - loop.time(), RUSH_WAIT[1]))
-                if end - loop.time() > RUSH_WAIT[0] and self._rush_due():
+                await asyncio.sleep(min(end - loop.time(), late))
+                if end - loop.time() > soon and self._rush_due():
                     break
             try:
                 action = await self.step()
@@ -4698,8 +4725,9 @@ async def mention_check() -> None:
     try:
         MENTION_EXPERIMENT, MENTION_ACCOUNTS, ANCHOR_FALLBACK = False, {persona["username"]}, timedelta(0)
         off = bot()
-        assert not off._mention_due(now) and await off._anchor() is not None, "off: no mention posts, anchors as ever"
-        store.release(f"anchor:{int(now.timestamp() // ANCHOR_GAP.total_seconds())}:{persona['username']}")
+        anchored = await off._anchor()
+        assert not off._mention_due(now) and anchored is not None, "off: no mention posts, anchors as ever"
+        store.release(anchored.hold)
         MENTION_EXPERIMENT = True
         b = bot()
         assert await b._anchor() is None, "a mention account takes no anchor slot"
@@ -5314,6 +5342,24 @@ async def main(real: bool, n_bots: int, seconds: float) -> None:
     print(f"run one bot after another, the same work would take ~{len(bots) * elapsed:.0f}s")
 
 
+
+def low_key_check() -> None:
+    """Low-key until LOW_KEY_UNTIL: an anchor slot an hour and LOW_KEY_LIFT_REPLIES reply lifts; then as before."""
+    global LOW_KEY_UNTIL
+    saved = LOW_KEY_UNTIL
+    try:
+        LOW_KEY_UNTIL = datetime(2026, 11, 1, tzinfo=TIMEZONE)
+        before, after = datetime(2026, 10, 31, 23, tzinfo=TIMEZONE), datetime(2026, 11, 1, 0, 5, tzinfo=TIMEZONE)
+        assert low_key(before) and not low_key(after)
+        assert anchor_gap(before) == LOW_KEY_ANCHOR_GAP and anchor_gap(after) == ANCHOR_GAP
+        LOW_KEY_UNTIL = datetime.now(timezone.utc) + timedelta(days=1)
+        assert lift_replies() == LOW_KEY_LIFT_REPLIES and rush_wait() == LOW_KEY_RUSH_WAIT
+        assert rush_prob() == min(RUSH_PROB, LOW_KEY_RUSH_PROB)
+        LOW_KEY_UNTIL = datetime.now(timezone.utc) - timedelta(days=1)
+        assert lift_replies() == BOOST_LIMITS["reply"] and rush_wait() == RUSH_WAIT and rush_prob() == RUSH_PROB
+    finally:
+        LOW_KEY_UNTIL = saved
+
 if __name__ == "__main__":
     import argparse
 
@@ -5336,6 +5382,8 @@ if __name__ == "__main__":
     # and ANCHOR_BANK: anchor_bank_check (a persuader's step could post an entry without the model quiet_race waits on)
     bank, ANCHOR_BANK = ANCHOR_BANK, False
     daily, CITIZEN_DAILY_REPLIES = CITIZEN_DAILY_REPLIES, MAX_REPLIES_PER_AUTHOR  # the older cap: daily_reply_check
+    low_key_until, LOW_KEY_UNTIL = LOW_KEY_UNTIL, datetime(2026, 10, 1, tzinfo=TIMEZONE)  # low_key_check sets it
+    low_key_check()
     asyncio.run(sign_off_check())
     asyncio.run(arguments_check())
     asyncio.run(gif_check())
@@ -5373,4 +5421,5 @@ if __name__ == "__main__":
     DIALOGUE_MODE, RUSH_FIRST, CITIZEN_TARGETING, STORY_REPLIES = dialogue, rush_first, targeting, story
     ANCHOR_BANK = bank
     CITIZEN_DAILY_REPLIES = daily
+    LOW_KEY_UNTIL = low_key_until
     asyncio.run(main(args.real, n_bots, args.seconds))

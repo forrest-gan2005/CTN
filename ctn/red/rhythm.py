@@ -18,6 +18,9 @@ SESSION_GAP_MEDIAN = 45.0  # seconds between actions within one sitting
 # again when the team took to lifting anchor posts, which takes forty likes and twenty-five replies within minutes.
 SESSIONS_PER_DAY = (48.0, 72.0)
 FIRST_SITTING = (60.0, 600.0)  # seconds after coming online, or a restart, before a first look round
+# Low-key until the x4 days (Forrest, 24 October): every account sits down LOW_KEY_RATE as often till then.
+LOW_KEY_UNTIL = datetime(2026, 11, 1, tzinfo=TIMEZONE)
+LOW_KEY_RATE = 0.7
 
 
 def normalise(weights: Sequence[float]) -> list:
@@ -81,7 +84,7 @@ class Rhythm:
         i = math.floor(h)
         frac = h - i
         weight = self.curve[i % 24] * (1 - frac) + self.curve[(i + 1) % 24] * frac
-        return self.sessions_per_day * weight
+        return self.sessions_per_day * weight * (LOW_KEY_RATE if t < LOW_KEY_UNTIL else 1.0)
 
     def next_wait(self, now: datetime) -> float:
         """Seconds until this account's next action."""
@@ -132,6 +135,8 @@ if __name__ == "__main__":
 
     r = Rhythm("joe_tama", curve)
     assert Rhythm("joe_tama", curve).shift == r.shift
+    before, after = LOW_KEY_UNTIL - timedelta(days=1), LOW_KEY_UNTIL + timedelta(days=1)  # same hour of day
+    assert abs(r.rate(before) - LOW_KEY_RATE * r.rate(after)) < 1e-9, "low-key: fewer sittings till the x4 days"
     assert SESSIONS_PER_DAY[0] <= r.sessions_per_day <= SESSIONS_PER_DAY[1]
     fresh = Rhythm("joe_tama", curve)  # comes online: the first action within minutes, not hours
     first = fresh.next_wait(datetime(2026, 10, 19, 7, tzinfo=timezone.utc))
