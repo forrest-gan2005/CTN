@@ -35,6 +35,9 @@ PROVIDERS = {
     # qwen2.5-3b-instruct (SDK 0.5.0, 17 Oct): per team 3 a minute, one at a time, at most 1024 tokens. The key is
     # the team code unless CTN_LLM_KEY says otherwise; CTN_LLM_URL overrides the address if it moves.
     "official": ("https://llm.legitreal.com/v1", "CTN_LLM_KEY", 3),
+    # Any other chat-completions-compatible service, all of it in .env: COMPAT_LLM_URL and the key in COMPAT_LLM_KEY,
+    # or in the variable '?key_env=' names; '?price_in=&price_out=' give its USD per million tokens, so budgets apply.
+    "compat": ("", "COMPAT_LLM_KEY", 50),
 }
 ONE_AT_A_TIME = {"official"}
 RETRY_DELAY_RE = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"')
@@ -465,6 +468,12 @@ def make_llm(spec: Optional[str] = None, temperature: Optional[float] = None):
     if provider not in PROVIDERS:
         raise ValueError(f"unknown LLM provider {provider!r}; one of ollama, fake, {', '.join(PROVIDERS)}")
     base_url, key_var, rpm = PROVIDERS[provider]
+    if provider == "compat":
+        base_url, key_var = os.environ.get("COMPAT_LLM_URL", ""), str(options.pop("key_env", key_var))
+        if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key_var):
+            raise ValueError("key_env must name an environment variable, not hold a key")
+        if "price_in" in options or "price_out" in options:
+            PRICES[spec] = (float(options.pop("price_in", 0)), float(options.pop("price_out", 0)))
     key = os.environ.get(key_var)
     if provider == "official":
         base_url, key = os.environ.get("CTN_LLM_URL") or base_url, key or os.environ.get("CTN_TEAM_KEY")
