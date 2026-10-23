@@ -3,6 +3,7 @@ import email.utils
 import heapq
 import logging
 import random
+import re
 import secrets
 import sqlite3
 import time
@@ -31,6 +32,7 @@ MAX_RETRIES = 4
 MAX_CONCURRENT = 8
 MAX_RATE_WAIT = 300.0  # seconds a request will wait out a rate limit; longer and it fails at once instead
 JITTER = 1.0  # seconds, only ever added to a wait (a server-given one, or a feed request's turn)
+POST_PATH_RE = re.compile(r"/posts/\d+")  # one post itself, not its likes or replies
 EXHAUSTED_PAUSE = 60.0  # seconds a scope stays blocked after every attempt was rate-limited (even "Retry-After: 0")
 # Requests that never reached the server: safe to repeat even when they create something.
 NOT_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
@@ -263,6 +265,15 @@ class RealPlatform:
     async def follow(self, username: str, target: str) -> bool:
         return await self._toggle("POST", f"/accounts/{await self.account_id(target)}/follow", username)
 
+    async def delete_post(self, username: str, post_id: int) -> bool:
+        """Delete one of `username`'s own posts; False if the platform had no such post to delete."""
+        resp = await self._call("DELETE", f"/posts/{post_id}", username)
+        if resp.status_code == 404:
+            return False
+        resp.raise_for_status()
+        self.ours.pop(post_id, None)
+        return True
+
     async def unfollow(self, username: str, target: str) -> bool:
         return await self._toggle("DELETE", f"/accounts/{await self.account_id(target)}/follow", username)
 
@@ -480,10 +491,11 @@ class RealPlatform:
     async def _dispatch(self, scope: str, method: str, path: str, **kwargs) -> httpx.Response:
         """Send once the scope's rate-limit block allows it. Checked again after getting a connection slot and
         after every wait, since another request may hit a limit (or extend one) meanwhile; a blocked request
-        gives its slot back while it waits. Feed reads, and writes of posts, replies and reposts, retries
-        included, also leave one at a time, their lane's gap after the last one actually went."""
-        lane = "feed" if method == "GET" and path == "/posts" else "write" if method == "POST" and path == "/posts" \
-            else None
+        gives its slot back while it waits. Feed reads, and writes of posts, replies and reposts (and deletes of
+        them, which may count as writes), retries included, also leave one at a time,
+        their lane's gap after the last one actually went."""
+        lane = "feed" if method == "GET" and path == "/posts" else "write" if (method == "POST" and path == "/posts") \
+            or (method == "DELETE" and POST_PATH_RE.fullmatch(path)) else None
         if lane is None or not self.lane_gap[lane]:
             return await self._dispatch_when(scope, method, path, None, **kwargs)
         if lane not in self._lane_locks:

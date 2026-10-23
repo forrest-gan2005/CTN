@@ -137,6 +137,12 @@ CREATE TABLE IF NOT EXISTS inbox (
     received_at TEXT NOT NULL,
     PRIMARY KEY (username, post_id)
 );
+CREATE TABLE IF NOT EXISTS withdrawn (
+    post_id INTEGER PRIMARY KEY, -- one of our posts we deleted ourselves, so it can't be reported any more
+    username TEXT NOT NULL,
+    status TEXT NOT NULL,        -- deleting (sent, outcome unknown) | deleted
+    at TEXT NOT NULL
+);
 """
 
 # Columns returned by load_history, in order, matching Action's fields.
@@ -215,10 +221,53 @@ class StateStore:
             "AND ts >= ? ORDER BY ts", (since,)).fetchall()
 
     def watched_posts(self, since: str) -> list:
-        """(username, platform post id, ts, "post" or "reply") for our posts and replies published since `since`."""
+        """(username, platform post id, ts, "post" or "reply") for our posts and replies published since `since`,
+        less those we deleted or are deleting ourselves."""
         return self.db.execute(
             "SELECT username, made_id, ts, type FROM history WHERE type IN ('post', 'reply') AND made_id IS NOT NULL "
-            "AND ts >= ? ORDER BY ts", (since,)).fetchall()
+            "AND ts >= ? AND made_id NOT IN (SELECT post_id FROM withdrawn) ORDER BY ts", (since,)).fetchall()
+
+    def anchors_due(self, before: str) -> list:
+        """(username, platform post id) of our anchor posts published before `before`, newest first, that aren't
+        deleted yet and aren't known to be taken down (a delete left unsettled is due again)."""
+        return self.db.execute(
+            "SELECT username, made_id FROM history h WHERE type = 'post' AND topic_kind = 'anchor' "
+            "AND made_id IS NOT NULL AND ts < ? "
+            "AND NOT EXISTS (SELECT 1 FROM withdrawn w WHERE w.post_id = h.made_id AND w.status = 'deleted') "
+            "AND NOT EXISTS (SELECT 1 FROM moderation m WHERE m.post_id = h.made_id AND m.status != 'restored') "
+            "ORDER BY ts DESC", (before,)).fetchall()
+
+    def set_withdrawn(self, post_id: int, username: str, status: Optional[str], ts: str) -> None:
+        """Record a delete of ours as being sent or done; status None forgets it (the post is watched again)."""
+        with self.db:
+            if status is None:
+                self.db.execute("DELETE FROM withdrawn WHERE post_id = ?", (post_id,))
+            else:
+                self.db.execute("INSERT INTO withdrawn VALUES (?, ?, ?, ?) ON CONFLICT(post_id) DO UPDATE SET "
+                                "status = excluded.status, at = excluded.at", (post_id, username, status, ts))
+
+    def our_replies_to(self, post_id: int) -> list:
+        """(username, reply id) of our replies straight to `post_id`."""
+        return self.db.execute("SELECT username, made_id FROM history WHERE type = 'reply' AND post_id = ? "
+                               "AND made_id IS NOT NULL ORDER BY ts", (post_id,)).fetchall()
+
+    def parent_withdrawn(self, reply_id: int) -> bool:
+        """Whether `reply_id` is one of our replies straight to a post we deleted or are deleting."""
+        return self.db.execute("SELECT 1 FROM history h JOIN withdrawn w ON w.post_id = h.post_id "
+                               "WHERE h.made_id = ? AND h.type = 'reply' LIMIT 1", (reply_id,)).fetchone() is not None
+
+    def replies_to_withdrawn(self) -> list:
+        """(username, reply id) of our replies straight to posts we deleted."""
+        return self.db.execute("SELECT h.username, h.made_id FROM history h JOIN withdrawn w ON w.post_id = h.post_id "
+                               "WHERE h.type = 'reply' AND h.made_id IS NOT NULL AND w.status = 'deleted'").fetchall()
+
+    def withdrawn_status(self, post_id: int) -> Optional[str]:
+        row = self.db.execute("SELECT status FROM withdrawn WHERE post_id = ?", (post_id,)).fetchone()
+        return row[0] if row else None
+
+    def withdrawn_count(self, since: str) -> int:
+        return self.db.execute("SELECT COUNT(*) FROM withdrawn WHERE status = 'deleted' AND at >= ?",
+                               (since,)).fetchone()[0]
 
     def moderation_status(self, post_id: int) -> Optional[str]:
         row = self.db.execute("SELECT status FROM moderation WHERE post_id = ?", (post_id,)).fetchone()
@@ -790,6 +839,25 @@ if __name__ == "__main__":
     assert s.set_moderation(7, "joe", "restored", "t3") and s.moderation_counts()["joe"]["suspected"] == 1
     assert s.set_moderation(8, "joe", "confirmed", "t4") and not s.set_moderation(8, "joe", "restored", "t5")
     assert s.moderation_counts() == {"joe": {"suspected": 0, "confirmed": 1}}
+    # Anchors due for deleting: old enough, not deleted yet, not taken down; a deleted post isn't watched.
+    for i, (ts, kind) in enumerate((("2026-10-20T01:00:00+00:00", "anchor"), ("2026-10-20T02:00:00+00:00", "anchor"),
+                                    ("2026-10-20T03:00:00+00:00", "issue"), ("2026-10-20T09:00:00+00:00", "anchor"))):
+        s.record("ann", ts, A("post", content="a", topic_kind=kind, made_id=100 + i))
+    s.record("ann", "2026-10-20T00:30:00+00:00", A("post", content="a", topic_kind="anchor", made_id=8))  # taken down
+    assert s.anchors_due("2026-10-20T05:00:00+00:00") == [("ann", 101), ("ann", 100)]
+    s.set_withdrawn(101, "ann", "deleting", "t")
+    assert s.withdrawn_status(101) == "deleting" and s.withdrawn_status(100) is None
+    assert ("ann", 101) in s.anchors_due("2026-10-20T05:00:00+00:00")  # unsettled: due again
+    assert 101 not in [r[1] for r in s.watched_posts("")]
+    s.set_withdrawn(101, "ann", "deleted", "2026-10-20T05:00:00+00:00")
+    assert s.anchors_due("2026-10-20T05:00:00+00:00") == [("ann", 100)] and s.withdrawn_count("2026-10-20") == 1
+    s.record("bea", "2026-10-20T06:00:00+00:00", A("reply", post_id=101, content="r", made_id=120))
+    s.record("bea", "2026-10-20T06:00:00+00:00", A("reply", post_id=102, content="r", made_id=121))
+    assert s.parent_withdrawn(120) and not s.parent_withdrawn(121) and not s.parent_withdrawn(101)
+    assert s.replies_to_withdrawn() == [("bea", 120)]
+    s.set_withdrawn(100, "ann", "deleting", "t")
+    s.set_withdrawn(100, "ann", None, "t")
+    assert 100 in [r[1] for r in s.watched_posts("")]
     s.plan_start("ana", "2026-10-19T08:00:00+00:00")
     s.plan_start("ana", "2026-10-20T08:00:00+00:00")
     assert s.planned_start("ana") == "2026-10-19T08:00:00+00:00" and s.planned_start("bob") is None

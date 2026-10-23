@@ -16,7 +16,7 @@ from ctn.infra import backup, collector
 from ctn.infra.collector import ACCOUNTS_SEEN, COMPETITION_START, FEED_INTERVAL, GAME_OPENS, Collector, NpcStore, \
     accounts_seen
 from ctn.infra.fake_platform import AmbiguousWrite, FakePlatform, RateLimited
-from ctn.infra.health import Health
+from ctn.infra.health import WITHDRAW, Health, Withdraw
 from ctn.infra.llm import FakeLLM, game_day_start, ledger, load_env, team_llms
 from ctn.infra.news import News, NewsStore
 from ctn.infra.real_platform import WRITE_GAP, AccountStore, MockLegitSocial, RealPlatform
@@ -119,6 +119,8 @@ class Team:
                                  side=BLUE_SIDE)
         self.health = Health(platform, state)
         self.online = set()
+        self.withdraw = (Withdraw(platform, state, self.health, online=lambda: self.online, locked=lambda: self.locked)
+                         if WITHDRAW else None)
         self._logins = {}  # username -> the one login task its users share
         self.set_quiet(self.health.quiet())
         self.refresh()
@@ -309,7 +311,9 @@ class Team:
         return (f"status: {'FEED LOCKED, everyone stopped; ' if self.locked else ''}"
                 f"{len(self.online)}/{len(self.bots)} bots online; last hour actions "
                 f"{self.state.action_counts(hour_ago)}, engagement {self.state.engagement_counts(hour_ago)}; "
-                f"reports {self.state.report_counts()}; takedowns {self.state.moderation_counts()}; quiet {quiet}; "
+                f"reports {self.state.report_counts()}; "
+                f"anchors deleted last hour {self.state.withdrawn_count(hour_ago)}; "
+                f"takedowns {self.state.moderation_counts()}; quiet {quiet}; "
                 f"Blue rules off {sorted(self.scanner.disabled)}; unresolved writes {len(self.state.unresolved())}; "
                 f"{self.npc_store.count()} posts collected; "
                 f"reply targets last hour: {self.reply_mix(hour_ago)}; today: {self.reply_mix(game_day_start())}; "
@@ -448,6 +452,7 @@ class Team:
                 self.collector.run(until),
                 self._blue(until),
                 self.health.run(until, on_change=self.set_quiet),
+                *([self.withdraw.run(until)] if self.withdraw is not None else []),
                 *(self._start(bot, until) for bot in self.bots),
             )
         finally:

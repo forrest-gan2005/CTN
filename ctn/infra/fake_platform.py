@@ -107,6 +107,14 @@ class FakePlatform:
         self._notify(post["author"], "repost", username, post_id)
         return True
 
+    async def delete_post(self, username: str, post_id: int) -> bool:
+        if post_id not in self.posts:
+            return False
+        if self.posts[post_id]["author"] != username:
+            raise PermissionError(f"post {post_id} isn't {username}'s")
+        del self.posts[post_id]
+        return True
+
     async def follow(self, username: str, target: str) -> bool:
         if username == target:
             return False

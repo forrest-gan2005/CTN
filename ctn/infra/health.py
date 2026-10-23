@@ -28,6 +28,16 @@ REPLY_RECHECK = ((timedelta(hours=12), timedelta(hours=3)), (timedelta(days=1), 
 # what looks like a limit of 30 a minute, and a rate limit stalls every bot.
 HEALTH_PACE = 3.0
 HEALTH_BATCH = 150
+# An anchor's time on Trending is over by 3.4 hours (median 2.2, 50 anchors to 24 October), while the reports that
+# hid anchors came later: of 61 hidden to 24 October, 57 were hidden 3+ hours after posting, many in waves such as
+# the one just after midnight, when each team's daily report allowance starts again. A report already in is still
+# ruled, so an anchor is deleted WITHDRAW_AFTER posting (if the platform still shows it), older ones too, which
+# leaves later reports nothing to land on. Points already scored stay.
+WITHDRAW = True
+WITHDRAW_AFTER = timedelta(hours=3)
+WITHDRAW_EVERY = 300.0
+REPLIES_KEY = "withdraw_replies"  # meta: whether our replies survive a deleted post ("survive" | "vanish")
+WITHDRAW_BATCH = 5  # a look and a delete each; the looks share Health's pace, the deletes the write lane
 
 
 def outcome(post: dict) -> str:
@@ -46,6 +56,26 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
+class Pacer:
+    """One request every `gap` seconds across everyone sharing it: Health's and Withdraw's post reads together."""
+
+    def __init__(self, gap: float) -> None:
+        self.gap = gap
+        self.last = None
+        self._lock = None  # made inside the running loop (Python 3.9)
+
+    async def wait(self) -> None:
+        if not self.gap:
+            return
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            if self.last is not None and self.last + self.gap > loop.time():
+                await asyncio.sleep(self.last + self.gap - loop.time())
+            self.last = loop.time()
+
+
 class Health:
     """Watches our own posts for takedowns.
 
@@ -62,6 +92,7 @@ class Health:
         self.interval = interval
         self.since = since  # watch our posts from this time on (UTC ISO); "" means all of them
         self.pace = HEALTH_PACE if pace is None else pace
+        self.reads = Pacer(self.pace)
         self.checked = {}  # post_id -> when it was last fetched successfully
         self.behind = False  # the last round left due posts for the next one
 
@@ -83,13 +114,12 @@ class Health:
             age = now - datetime.fromisoformat(published)
             schedule = REPLY_RECHECK if kind == "reply" else RECHECK
             if last is None or now - last >= next(e for limit, e in schedule if limit is None or age < limit):
-                due.append((kind == "reply" and age >= timedelta(days=1), age, post_id, username))
+                due.append((kind == "reply" and age >= timedelta(days=1), age, post_id, username, kind))
         due.sort()
         self.behind = len(due) > HEALTH_BATCH
         changed = 0
-        for i, (_, _, post_id, username) in enumerate(due[:HEALTH_BATCH]):
-            if i and self.pace:
-                await asyncio.sleep(self.pace)
+        for i, (_, _, post_id, username, kind) in enumerate(due[:HEALTH_BATCH]):
+            await self.reads.wait()
             try:
                 status = outcome(await self.platform.get_post(post_id))
             except KeyError:
@@ -102,6 +132,11 @@ class Health:
             except Exception as e:
                 log.warning("couldn't check %s's post #%s: %s", username, post_id, str(e) or type(e).__name__)
                 continue
+            if status != "visible" and self.state.withdrawn_status(post_id) is not None:
+                continue  # we deleted it ourselves while this round was under way
+            if (status != "visible" and kind == "reply" and self.state.get_meta(REPLIES_KEY) != "survive"
+                    and self.state.parent_withdrawn(post_id)):
+                continue  # may have gone with the post we deleted: Withdraw finds out which
             now = datetime.now(timezone.utc)
             self.checked[post_id] = now
             previous = self.state.moderation_status(post_id)
@@ -110,10 +145,17 @@ class Health:
                     changed += 1
                     log.info("%s: post #%s is visible again", username, post_id)
                 continue
-            if self.state.set_moderation(post_id, username, status, _iso(now)):
-                changed += 1
-                self._report(username, post_id, status)
+            changed += self.record(username, post_id, status)
         return changed
+
+    def record(self, username: str, post_id: int, status: str) -> bool:
+        """A takedown seen (by this check or by Withdraw's look); True if it is news."""
+        now = datetime.now(timezone.utc)
+        self.checked[post_id] = now
+        if not self.state.set_moderation(post_id, username, status, _iso(now)):
+            return False
+        self._report(username, post_id, status)
+        return True
 
     def _report(self, username: str, post_id: int, status: str) -> None:
         c = self.state.moderation_counts().get(username, {"suspected": 0, "confirmed": 0})
@@ -139,6 +181,161 @@ class Health:
                 on_change(self.quiet())
             wait = self.pace if self.behind else self.interval  # a round that left posts due goes on after a pause
             await asyncio.sleep(wait if until is None else max(0.0, min(wait, until - loop.time())))
+
+
+class Withdraw:
+    """Deletes our anchor posts once their time on Trending is over (WITHDRAW_AFTER), so the reports that come in
+    hours later find nothing. Each is looked at first: one the platform no longer shows was taken down, and is
+    recorded as Health would. A delete is recorded as being sent before it goes, so Health never takes our own
+    delete for a takedown; one whose outcome is unknown is settled by the next look (gone after we sent a delete
+    means deleted). Only accounts logged in now delete, and nothing is done while the feed is locked. Until it is
+    known whether a reply outlives its deleted post, a teammate's reply seen visible just before a delete is looked
+    at again a round later: if it vanished, Health would take such replies for takedowns, so withdrawing stops
+    for good (kept in meta across restarts)."""
+
+    def __init__(self, platform, state, health: Health, online, locked=lambda: False,
+                 interval: float = WITHDRAW_EVERY, batch: int = WITHDRAW_BATCH) -> None:
+        self.platform = platform
+        self.state = state
+        self.health = health
+        self.online = online  # () -> usernames logged in now
+        self.locked = locked
+        self.interval = interval
+        self.batch = batch
+        self.refused = set()  # accounts the platform refused a delete as suspended or blocked: left alone this run
+        self.skipped = set()  # posts it refused a delete for any other reason: left alone this run
+        found = state.get_meta(REPLIES_KEY)  # "survive" | "vanish", once looked at
+        self.replies_survive = None if found is None else found == "survive"
+        self.stopped = found == "vanish"
+        self.probe = None  # (anchor id, username, reply id): a reply seen visible just before its anchor's delete
+
+    async def withdraw(self) -> int:
+        """One round: up to `batch` due anchors, newest first; returns how many were deleted. Until it is known
+        whether replies outlive their post, an anchor with replies of ours under it is deleted only as the one
+        whose reply is looked at again, one at a time."""
+        if self.stopped or self.locked():
+            return 0
+        if self.probe is not None and self.state.withdrawn_status(self.probe[0]) == "deleted":
+            await self._look_under()
+            if self.stopped:
+                return 0
+        now = datetime.now(timezone.utc)
+        online = set(self.online())
+        due = [(u, p) for u, p in self.state.anchors_due(_iso(now - WITHDRAW_AFTER))
+               if u in online and u not in self.refused and p not in self.skipped]
+        deleted = 0
+        for username, post_id in due[:self.batch]:
+            if username in self.refused or self.stopped or self.locked():
+                continue
+            sent = self.state.withdrawn_status(post_id) == "deleting"
+            await self.health.reads.wait()
+            try:
+                status = outcome(await self.platform.get_post(post_id))
+            except KeyError:
+                status = "missing"
+            except RateLimited:
+                log.warning("rate limited looking at %s's anchor #%s; the rest wait", username, post_id)
+                break
+            except Exception as e:
+                log.warning("couldn't look at %s's anchor #%s: %s", username, post_id, str(e) or type(e).__name__)
+                continue
+            if status != "visible":
+                if sent and status == "missing":
+                    self.state.set_withdrawn(post_id, username, "deleted", _iso(datetime.now(timezone.utc)))
+                    deleted += 1
+                    log.info("%s's anchor #%s is gone after our delete", username, post_id)
+                    continue
+                self.state.set_withdrawn(post_id, username, None, "")  # taken down before our delete landed
+                self.health.record(username, post_id, status)
+                continue
+            if self.replies_survive is None and self._untaken(post_id):
+                if self.probe is not None:
+                    continue  # one such delete at a time until the question is settled
+                self.probe = await self._probe_for(post_id)
+                if self.probe is None:
+                    continue
+            self.state.set_withdrawn(post_id, username, "deleting", _iso(datetime.now(timezone.utc)))
+            try:
+                await self.platform.delete_post(username, post_id)
+            except RateLimited:
+                log.warning("rate limited deleting %s's anchor #%s; tried again next round", username, post_id)
+                self._drop_probe(post_id)
+                break
+            except Exception as e:
+                response = getattr(e, "response", None)
+                code = getattr(response, "status_code", None)
+                if code is not None and 400 <= code < 500:  # refused: the post is watched again
+                    text = (getattr(response, "text", "") or "")[:200]
+                    if code == 401 or any(w in text.lower() for w in ("suspend", "block", "banned")):
+                        self.refused.add(username)
+                    else:
+                        self.skipped.add(post_id)
+                    self.state.set_withdrawn(post_id, username, None, "")
+                    log.warning("couldn't delete %s's anchor #%s: HTTP %s %s", username, post_id, code, text)
+                else:  # lost on the way: the next look settles it
+                    log.warning("couldn't delete %s's anchor #%s: %s", username, post_id, str(e) or type(e).__name__)
+                self._drop_probe(post_id)
+                continue
+            self.state.set_withdrawn(post_id, username, "deleted", _iso(datetime.now(timezone.utc)))
+            deleted += 1
+            log.info("deleted %s's anchor #%s, past its time on Trending", username, post_id)
+        return deleted
+
+    def _drop_probe(self, post_id: int) -> None:
+        if self.probe is not None and self.probe[0] == post_id:
+            self.probe = None
+
+    def _untaken(self, post_id: int) -> list:
+        """Our replies straight to `post_id` with no takedown on record."""
+        return [(u, r) for u, r in self.state.our_replies_to(post_id)
+                if self.state.moderation_status(r) in (None, "restored")]
+
+    async def _probe_for(self, post_id: int) -> Optional[tuple]:
+        """One of our replies to `post_id` that the platform shows now, to look at again after the delete."""
+        replies = self._untaken(post_id)
+        if not replies:
+            return None
+        username, reply_id = replies[0]
+        await self.health.reads.wait()
+        try:
+            visible = outcome(await self.platform.get_post(reply_id)) == "visible"
+        except Exception:
+            return None
+        return (post_id, username, reply_id) if visible else None
+
+    async def _look_under(self) -> None:
+        """A round after the delete, look at the reply again: gone means replies vanish with their post."""
+        post_id, username, reply_id = self.probe
+        await self.health.reads.wait()
+        try:
+            gone = outcome(await self.platform.get_post(reply_id)) != "visible"
+        except KeyError:
+            gone = True
+        except Exception as e:
+            log.warning("couldn't look at %s's reply #%s under deleted #%s: %s", username, reply_id, post_id,
+                        str(e) or type(e).__name__)
+            return
+        if gone:
+            self.stopped = True
+            self.state.set_meta(REPLIES_KEY, "vanish")
+            for u, r in self.state.replies_to_withdrawn():  # gone with their posts, not taken down
+                if self.state.moderation_status(r) in (None, "restored"):
+                    self.state.set_withdrawn(r, u, "deleted", _iso(datetime.now(timezone.utc)))
+            log.error("our replies vanish with a deleted post (%s's #%s under #%s): withdrawing stops; if that was "
+                      "a takedown instead, clear meta %s to try again", username, reply_id, post_id, REPLIES_KEY)
+            return
+        self.probe, self.replies_survive = None, True
+        self.state.set_meta(REPLIES_KEY, "survive")
+        log.info("%s's reply #%s outlives the deleted #%s", username, reply_id, post_id)
+
+    async def run(self, until: Optional[float] = None) -> None:
+        loop = asyncio.get_running_loop()
+        while until is None or loop.time() < until:
+            try:
+                await self.withdraw()
+            except Exception:
+                log.exception("withdrawing anchors failed")
+            await asyncio.sleep(self.interval if until is None else max(0.0, min(self.interval, until - loop.time())))
 
 
 async def _demo() -> None:
@@ -249,6 +446,129 @@ async def _demo() -> None:
     p.answers = {50: {"hidden": False}, 51: {"hidden": False}}
     await Health(p, state, pace=0).check()
     assert p.asked == [51, 50], "a post goes before a reply past a day, however old"
+
+    # R7: anchors past WITHDRAW_AFTER are deleted if still shown; young ones, other posts and offline accounts' are
+    # left; one already taken down is recorded as Health would; a delete whose outcome is lost is settled by the
+    # next look; Health never counts our own delete as a takedown, even mid-round.
+    class Deleting(Platform):
+        def __init__(self) -> None:
+            super().__init__()
+            self.deleted, self.fail, self.refuse = [], set(), {}
+
+        async def delete_post(self, username: str, post_id: int) -> bool:
+            if post_id in self.refuse:
+                raise Refused(self.refuse[post_id])
+            if post_id in self.fail:
+                self.fail.discard(post_id)
+                self.answers[post_id] = KeyError(post_id)  # it went through, but the answer was lost
+                raise ConnectionError()
+            self.deleted.append(post_id)
+            self.answers[post_id] = KeyError(post_id)
+            return True
+
+    class Refused(Exception):
+        def __init__(self, text: str) -> None:
+            super().__init__(f"HTTP 403 {text}")
+            self.response = type("R", (), {"status_code": 403, "text": text})()
+
+    def anchor(state, username: str, post_id: int, age: timedelta, kind: str = "anchor") -> None:
+        ts = _iso(datetime.now(timezone.utc) - age)
+        state.record(username, ts, Action("post", content=f"post {post_id}", topic_kind=kind, made_id=post_id))
+
+    p, state = Deleting(), StateStore(":memory:")
+    for pid, user, age, kind in ((60, "ann", 4, "anchor"), (61, "ann", 2, "anchor"), (62, "ann", 5, "issue"),
+                                 (63, "off", 5, "anchor"), (64, "ann", 6, "anchor"), (65, "ann", 7, "anchor")):
+        anchor(state, user, pid, timedelta(hours=age), kind)
+        p.answers[pid] = {"hidden": False}
+    p.answers[64] = KeyError(64)  # taken down before we got to it
+    p.fail = {65}
+    health = Health(p, state, pace=0)
+    w = Withdraw(p, state, health, online=lambda: {"ann"})
+    assert await w.withdraw() == 1 and p.deleted == [60]
+    assert state.withdrawn_status(60) == "deleted" and state.withdrawn_status(65) == "deleting"
+    assert state.withdrawn_status(64) is None and state.moderation_status(64) == "missing" and health.quiet() == {"ann"}
+    assert state.withdrawn_status(61) is None and state.withdrawn_status(63) is None
+    await health.check()
+    assert state.moderation_status(60) is None and state.moderation_status(65) is None, "our deletes aren't takedowns"
+    assert await w.withdraw() == 1 and state.withdrawn_status(65) == "deleted" and p.deleted == [60]
+    assert await w.withdraw() == 0
+
+    # A refusal about the post leaves only that post; one about the account (suspended) leaves the account; and
+    # nothing at all happens while the feed is locked.
+    for pid, age in ((66, 4), (67, 5), (68, 6)):
+        anchor(state, "ann", pid, timedelta(hours=age))
+        p.answers[pid] = {"hidden": False}
+    p.refuse = {66: "post awaiting a moderator"}
+    locked = [True]
+    w.locked = lambda: locked[0]
+    assert await w.withdraw() == 0 and p.deleted == [60]
+    locked[0] = False
+    assert await w.withdraw() == 2 and w.skipped == {66} and not w.refused and p.deleted == [60, 67, 68]
+    assert state.withdrawn_status(66) is None and 66 in [r[1] for r in state.watched_posts("")]
+    anchor(state, "bob", 69, timedelta(hours=4))
+    anchor(state, "bob", 71, timedelta(hours=5))
+    p.answers.update({69: {"hidden": False}, 71: {"hidden": False}})
+    p.refuse = {69: "account suspended", 71: "account suspended"}
+    w.online = lambda: {"ann", "bob"}
+    assert await w.withdraw() == 0 and w.refused == {"bob"} and state.withdrawn_status(71) is None
+
+    # After the first delete, a teammate's reply to it is looked at: if it vanished too, withdrawing stops and
+    # the reply isn't counted as a takedown; if it is still there, no more looks.
+    class Cascading(Deleting):
+        async def delete_post(self, username: str, post_id: int) -> bool:
+            await super().delete_post(username, post_id)
+            if self.vanish:
+                self.answers[81] = KeyError(81)
+            return True
+
+    for vanishes in (True, False):
+        p, state = Cascading(), StateStore(":memory:")
+        p.vanish = vanishes
+        anchor(state, "ann", 80, timedelta(hours=4))
+        anchor(state, "ann", 82, timedelta(hours=5))
+        anchor(state, "ann", 84, timedelta(hours=6))
+        for reply, ago in ((83, 3.5), (81, 3)):  # 83 was taken down before: never the one looked at
+            state.record("cat", _iso(datetime.now(timezone.utc) - timedelta(hours=ago)),
+                         Action("reply", post_id=80, content="lift", made_id=reply))
+        state.set_moderation(83, "cat", "hidden", "t")
+        p.answers = {80: {"hidden": False}, 81: {"hidden": False}, 82: {"hidden": False}, 84: {"hidden": False}}
+        health = Health(p, state, pace=0)
+        state.record("dan", _iso(datetime.now(timezone.utc) - timedelta(hours=3)),
+                     Action("reply", post_id=82, content="lift", made_id=85))
+        p.answers[85] = {"hidden": False}
+        w = Withdraw(p, state, health, online=lambda: {"ann"})
+        # 84 has no reply of ours and goes; 82 waits while 80's reply is the one looked at.
+        assert await w.withdraw() == 2 and w.probe == (80, "cat", 81) and not w.stopped and p.deleted == [80, 84]
+        if vanishes:
+            p.answers[85] = KeyError(85)  # as if 82 had gone too and taken its reply with it
+            state.set_withdrawn(82, "ann", "deleted", "t")
+        await health.check()
+        assert state.moderation_status(81) is None and state.moderation_status(85) is None, "not yet known"
+        assert await w.withdraw() == (0 if vanishes else 1) and w.stopped == vanishes
+        assert w.replies_survive is (None if vanishes else True) and (w.probe is None) != vanishes
+        assert state.withdrawn_status(83) is None and state.moderation_status(83) == "hidden"
+        assert state.withdrawn_status(81) == ("deleted" if vanishes else None)
+        assert state.withdrawn_status(85) == ("deleted" if vanishes else None)
+        health.checked.clear()
+        await health.check()
+        assert state.moderation_status(81) is None and state.moderation_status(85) is None
+        again = Withdraw(p, state, health, online=lambda: {"ann"})
+        assert again.stopped == vanishes and again.replies_survive is (not vanishes), "kept in meta"
+
+    class Racing(Deleting):
+        """Our delete lands while Health's round is under way."""
+
+        async def get_post(self, post_id: int) -> dict:
+            state.set_withdrawn(post_id, "ann", "deleted", "t")
+            raise KeyError(post_id)
+
+    p, state = Racing(), StateStore(":memory:")
+    anchor(state, "ann", 70, timedelta(hours=1))
+    health = Health(p, state, pace=0)
+    assert await health.check() == 0 and state.moderation_status(70) is None and 70 not in health.checked
+    pacer, began = Pacer(0.05), loop.time()
+    await asyncio.gather(pacer.wait(), pacer.wait(), pacer.wait())
+    assert loop.time() - began >= 0.1, "one read every gap, however many wait"
     print("health ok")
 
 
