@@ -17,7 +17,7 @@ from ctn.infra.collector import ACCOUNTS_SEEN, COMPETITION_START, FEED_INTERVAL,
     accounts_seen
 from ctn.infra.fake_platform import AmbiguousWrite, FakePlatform, RateLimited
 from ctn.infra.health import WITHDRAW, Health, Withdraw
-from ctn.infra.llm import FakeLLM, game_day_start, ledger, load_env, team_llms
+from ctn.infra.llm import FakeLLM, anchor_llm, game_day_start, ledger, load_env, team_llms
 from ctn.infra.news import News, NewsStore
 from ctn.infra.real_platform import WRITE_GAP, AccountStore, MockLegitSocial, RealPlatform
 from ctn.infra.state import StateStore
@@ -69,7 +69,7 @@ class Team:
                  not_before: Optional[datetime] = None, stagger: timedelta = timedelta(0),
                  min_citizens: int = MIN_CITIZENS, backup_dir: Optional[Path] = None,
                  backup_every: float = BACKUP_EVERY, news: Optional[News] = None, gifs: bool = True,
-                 accounts: Optional[Path] = None) -> None:
+                 accounts: Optional[Path] = None, anchor_writer=None) -> None:
         personas = personas if personas is not None else load_personas()
         # Every persona we own, reserves and those not running included, so none is ever taken for a rival.
         self.own = {p["username"] for p in load_personas(status=None)} | {p["username"] for p in personas}
@@ -99,7 +99,8 @@ class Team:
         self.collector = Collector(platform, npc_store, min_interval=collector_interval)
         self.roster = Roster(own=self.own)
         world = load_world()
-        self.bots = [Bot(p, platform, llm, world, stance_llm=stance_llm, roster=self.roster, store=state,
+        self.bots = [Bot(p, platform, llm, world, stance_llm=stance_llm, anchor_llm=anchor_writer, roster=self.roster,
+                         store=state,
                          feed=self.feed, profile=lambda author: npc_store.recent_by(author, 5), twins=self.twins,
                          injection=injection, depth=npc_store.depth, said=npc_store.said,
                          citizens=lambda since: npc_store.citizen_posts_since(since, cutoff))
@@ -474,20 +475,24 @@ async def live(limit: Optional[int], stagger_hours: float, opens: datetime = GAM
         personas = personas[:limit]
     platform = real_platform()
     llm, judge = team_llms()
+    anchors = anchor_llm()
     own = {p["username"] for p in load_personas(status=None)}
     team = Team(platform, llm, judge, NpcStore(DATA / "npc.db", own_usernames=own), StateStore(DATA / "bots.db"),
                 embedder=load_embedder(), injection=load_injection_classifier(), personas=personas,
                 not_before=opens, stagger=timedelta(hours=stagger_hours), backup_dir=backup.BACKUPS,
                 news=News(NewsStore()), gifs=os.environ.get("GIFS", "on").lower() not in ("0", "off", "no", "false"),
-                accounts=ACCOUNTS_SEEN)
-    log.info("live: %d accounts, online from %s staggered over %gh, writer %s, judge %s", len(personas),
-             f"{opens:%a %d %b %H:%M %Z}", stagger_hours, llm.name, judge.name)
+                accounts=ACCOUNTS_SEEN, anchor_writer=anchors)
+    log.info("live: %d accounts, online from %s staggered over %gh, writer %s, judge %s, anchors %s", len(personas),
+             f"{opens:%a %d %b %H:%M %Z}", stagger_hours, llm.name, judge.name,
+             anchors.name if anchors is not None else "the writer")
     loop = asyncio.get_running_loop()
     try:
         await team.run(loop.time() + (COMPETITION_END - datetime.now(timezone.utc)).total_seconds())
     finally:
         await llm.aclose()
         await judge.aclose()
+        if anchors is not None:
+            await anchors.aclose()
         await platform.aclose()
         await team.news.aclose()
 

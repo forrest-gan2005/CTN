@@ -228,7 +228,12 @@ CASE_TOPICS = ("issue", "pitch", "anchor")
 QUESTION_PROB = 0.5
 # An anchor more often still: a reply is worth six likes to its heat, and the platform's replies showed a closing
 # question moves no one either way, only turning pushback into conditions (20 October).
-ANCHOR_QUESTION_PROB = 0.8
+ANCHOR_QUESTION_PROB = 0.0  # 0.8 to 24 October: of 188 anchors, 42% of those ending on a question were hidden, 31% else
+# Plain anchors from 24 October: two or three sentences under ANCHOR_MAX_LEN and no team tag. Of 188 anchors, 35% of
+# those over 300 characters were hidden against 2 of 12 shorter ones, and the hand-written bank's 2 of 11 against the
+# model's 35%; every model anchor carried a team tag, which reads as a campaign account's.
+ANCHOR_PLAIN = True
+ANCHOR_MAX_LEN = 300
 # Trending on the opening night belonged to a team whose few anchor accounts each posted a case every hour or so
 # while forty teammates answered it within minutes, one line each, and liked and reposted it: 40-100 replies a post,
 # hundreds of citizens' views, the leader by thousands. The team does the same: a persuader or bridge writes the
@@ -446,6 +451,12 @@ def news_limit(story: tuple) -> int:
     return min(CASE_MAX_LEN, POST_LIMIT - 1 - len(story[0]))
 
 
+def anchor_limit(story: Optional[tuple]) -> int:
+    """How long an anchor may run: ANCHOR_MAX_LEN when plain, less a shared story's link when one is shared."""
+    limit = news_limit(story) if story else CASE_MAX_LEN
+    return min(limit, ANCHOR_MAX_LEN) if ANCHOR_PLAIN else limit
+
+
 def story_note(story: tuple) -> str:
     """What NEWS_STORY_NOTES says to frame `story`, or nothing."""
     text = f"{story[2]} {story[3]}"
@@ -489,7 +500,7 @@ TEAM_TAGS = (
     ("#SafeToVisit", 10, None, re.compile(r"touris|visitor|(?<!last )resort|holiday|cruise", re.IGNORECASE)),
 )
 TEAM_TAG = TEAM_TAGS[0][0]
-TEAM_TAG_SHARE = {"anchor": 1.0, "team": 0.8, "issue": 0.5}
+TEAM_TAG_SHARE = {"anchor": 0.0, "team": 0.3, "issue": 0.5}  # anchor 1.0 and team 0.8 to 24 October: see ANCHOR_PLAIN
 # The code adds them; they say nothing about the writer.
 TAG_RE = re.compile("|".join(re.escape(t[0]) for t in TEAM_TAGS), re.IGNORECASE)
 
@@ -830,7 +841,7 @@ def _describe(e: BaseException) -> str:
 
 
 class Bot:
-    def __init__(self, persona: dict, platform, llm, world: str, stance_llm=None,
+    def __init__(self, persona: dict, platform, llm, world: str, stance_llm=None, anchor_llm=None,
                  roster: Optional[Roster] = None, store: Optional[StateStore] = None,
                  examples=None, feed: Optional[Callable[[], list]] = None,
                  profile: Optional[Callable[[str], list]] = None, twins=None, injection=None,
@@ -841,6 +852,7 @@ class Bot:
         self.line = persona["line"]
         self.platform = platform
         self.llm = llm
+        self.anchor_llm = anchor_llm  # writes the anchor posts when given; else the writer does
         self.world = world
         self.plain_world = without_arguments(world)
         self.reply_world = reply_world(world)
@@ -1483,9 +1495,12 @@ class Bot:
         case = (kind == "post" and topic[0] in CASE_TOPICS
                 or kind == "reply" and target is not None and target["author"] in COLUMNISTS)
         mention = kind == "post" and topic[0] == "mention"
-        short = kind == "post" and topic[0] == "anchor" and ANCHOR_EXPERIMENT or mention
+        anchor = kind == "post" and topic[0] == "anchor"
+        short = anchor and (ANCHOR_EXPERIMENT or ANCHOR_PLAIN) or mention
         story = self._story_reply(kind, target, topic)
         system = self._system_prompt(examples, from_npcs, arguments=referendum, case=case, short=short,
+                                     under=anchor_limit(self.sharing if anchor else None) - NEWS_SLACK
+                                     if anchor and ANCHOR_PLAIN else None,
                                      story_reply=story)
         earlier, about = None, []
         if target is not None:
@@ -1509,17 +1524,22 @@ class Bot:
         thread = target["id"] if kind == "reply" and (topic[1] in ("team", "desk") or target["author"] in COLUMNISTS) \
             else None
         siblings = self.store.team_replies(thread)[-SIBLINGS_SHOWN:] if thread is not None else None
-        raw = await self.llm.generate(system, self._user_prompt(kind, target, topic, earlier, about, sign=sign,
-                                                                referendum=referendum, gif=gif, context=context,
-                                                                siblings=siblings))
-        model = getattr(raw, "model", None) or getattr(self.llm, "name", None)  # a fallback model may have written it
+        writer = self.anchor_llm if anchor and self.anchor_llm is not None else self.llm
+        prompt = self._user_prompt(kind, target, topic, earlier, about, sign=sign, referendum=referendum, gif=gif,
+                                   context=context, siblings=siblings)
+        raw = await writer.generate(system, prompt)
+        if raw is None and writer is not self.llm:  # over its budget or down: the team's writer has a go
+            log.warning("%s: the anchor writer gave nothing; the team's writer has a go", self.username)
+            writer = self.llm
+            raw = await writer.generate(system, prompt)
+        model = getattr(raw, "model", None) or getattr(writer, "name", None)  # a fallback model may have written it
         text, query = split_gif(raw)  # a GIF line goes even when none was asked for
         handles = [h for h, _ in self.mention_targets[0]] if mention and self.mention_targets else []
         prefix_len = sum(len(h) + 2 for h in handles)
         # A mention post is asked for under 50 words, but writers ran to 360 characters against a 280 cap and all went:
         # it may run as long as the platform takes once the handles are on.
-        limit = (news_limit(sharing) if sharing else CASE_MAX_LEN if case
-                 else POST_LIMIT - prefix_len if handles else MAX_LEN)
+        limit = (anchor_limit(sharing) if anchor and (sharing or ANCHOR_PLAIN) else news_limit(sharing) if sharing
+                 else CASE_MAX_LEN if case else POST_LIMIT - prefix_len if handles else MAX_LEN)
         content = self._clean(text, limit)
         if content is None:
             length = len(LABEL_RE.sub("", text.strip())) if text else 0
@@ -2007,7 +2027,7 @@ class Bot:
         return random.sample(own, min(2, len(own))), False
 
     def _system_prompt(self, examples: list, from_npcs: bool, arguments: bool = True, case: bool = False,
-                       short: bool = False, story_reply: bool = False) -> str:
+                       short: bool = False, story_reply: bool = False, under: Optional[int] = None) -> str:
         p = self.persona
         shown = ""
         if examples:
@@ -2038,7 +2058,8 @@ class Bot:
                    f"Other things you think: {'; '.join(p['views'])}.\n"
                    f"How you write: {p['style']}.\n\n")
             own_words = ""
-        length = ("Two or three sentences, under 50 words." if short
+        length = (f"Two or three sentences, under {under} characters." if under is not None
+                  else "Two or three sentences, under 50 words." if short
                   else "Three or four sentences, under 75 words." if case
                   else "Keep it to 1-3 short sentences, under 40 words.")
         world = (self.reply_world if story_reply else self.world) if arguments else self.plain_world
@@ -2197,7 +2218,7 @@ class Bot:
                 url, site, title, summary = self.sharing
                 parts.append(NEWS_ANCHOR_GUIDE.format(paper=SITES.get(site, site), title=title, summary=summary,
                                                       note=story_note(self.sharing),
-                                                      limit=news_limit(self.sharing) - NEWS_SLACK))
+                                                      limit=anchor_limit(self.sharing) - NEWS_SLACK))
             shapes = self.case_shapes or arm_shapes(self.writing_arm or arm())
             shape = self.case_shape if self.case_shape in shapes else _draw_shape(shapes)
             opening = "" if shape in OPENING_FREE else f" {CASE_OPENING}"
@@ -5360,6 +5381,62 @@ def low_key_check() -> None:
     finally:
         LOW_KEY_UNTIL = saved
 
+
+async def plain_anchor_check() -> None:
+    """Plain anchors: the anchor writer writes them when there is one (the team's if it gives nothing), asked for two
+    or three sentences under a character limit with no closing question; no team tag goes on, and one over
+    ANCHOR_MAX_LEN is dropped as too long. Other posts stay with the team's writer."""
+    class Writes:
+        def __init__(self, name: str, text: str) -> None:
+            self.name, self.text, self.prompts = name, text, []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append((system, prompt))
+            return self.text
+
+    global ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE, ANCHOR_FALLBACK, ANCHOR_BANK
+    saved = ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE, ANCHOR_FALLBACK, ANCHOR_BANK
+    try:
+        ANCHOR_PLAIN, ANCHOR_QUESTION_PROB = True, 0.0
+        TEAM_TAG_SHARE, ANCHOR_FALLBACK, ANCHOR_BANK = {"anchor": 0.0, "team": 0.3, "issue": 0.5}, timedelta(0), False
+        writer = [p for p in load_personas(status=None) if p["line"] in ANCHOR_LINES][0]
+        short = "I run a cafe and lost five months in 2021, so I'm voting yes on the mandate."
+        team, anchors = Writes("team", short), Writes("anchors", short)
+        b = Bot(writer, FakePlatform(), team, load_world(), anchor_llm=anchors, store=StateStore(":memory:"))
+        action = await b._anchor()
+        assert action is not None and action.content == short and action.model == "anchors", action
+        assert anchors.prompts and not team.prompts, "the anchor writer writes the anchor"
+        system, prompt = anchors.prompts[0]
+        assert f"Two or three sentences, under {ANCHOR_MAX_LEN - NEWS_SLACK} characters." in system
+        assert "End with a genuine question" not in prompt
+        assert not TAG_RE.search(action.content), "no team tag on a plain anchor"
+        long = Writes("anchors", "I run a cafe and lost five months in 2021. " * 8)
+        b = Bot(writer, FakePlatform(), team, load_world(), anchor_llm=long, store=StateStore(":memory:"))
+        assert await b._anchor() is None and b.rejected.get("too long"), b.rejected
+        assert len(long.text) > ANCHOR_MAX_LEN
+        alone = Bot(writer, FakePlatform(), team, load_world(), store=StateStore(":memory:"))
+        assert (await alone._anchor()).model == "team", "no anchor writer: the team's writes them"
+        silent = Writes("anchors", None)
+        b = Bot(writer, FakePlatform(), team, load_world(), anchor_llm=silent, store=StateStore(":memory:"))
+        action = await b._anchor()
+        assert silent.prompts and action is not None and action.model == "team", "a silent anchor writer: the team's"
+        story = ("https://example.com/" + "x" * 230, "kingstoniaherald", "Nurses short", "Forty posts are empty.")
+        assert anchor_limit(story) == min(news_limit(story), ANCHOR_MAX_LEN) < ANCHOR_MAX_LEN
+        assert anchor_limit(None) == ANCHOR_MAX_LEN
+        b = Bot(writer, FakePlatform(), team, load_world(), anchor_llm=anchors, store=StateStore(":memory:"))
+        b.sharing = story
+        under = anchor_limit(story) - NEWS_SLACK
+        b.store, anchors.prompts = StateStore(":memory:"), []
+        await b._write("post", ("anchor", "the nurses"), None, None, True)
+        system, prompt = anchors.prompts[-1]
+        assert f"under {under} characters" in system and f"under {under}" in prompt, (under, prompt[-400:])
+    finally:
+        ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE, ANCHOR_FALLBACK, ANCHOR_BANK = saved
+    print("plain anchors ok")
+
 if __name__ == "__main__":
     import argparse
 
@@ -5384,6 +5461,10 @@ if __name__ == "__main__":
     daily, CITIZEN_DAILY_REPLIES = CITIZEN_DAILY_REPLIES, MAX_REPLIES_PER_AUTHOR  # the older cap: daily_reply_check
     low_key_until, LOW_KEY_UNTIL = LOW_KEY_UNTIL, datetime(2026, 10, 1, tzinfo=TIMEZONE)  # low_key_check sets it
     low_key_check()
+    # and the plain anchors of 24 October: plain_anchor_check
+    plain_anchors = ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE
+    ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE = False, 0.8, {"anchor": 1.0, "team": 0.8, "issue": 0.5}
+    asyncio.run(plain_anchor_check())
     asyncio.run(sign_off_check())
     asyncio.run(arguments_check())
     asyncio.run(gif_check())
@@ -5422,4 +5503,5 @@ if __name__ == "__main__":
     ANCHOR_BANK = bank
     CITIZEN_DAILY_REPLIES = daily
     LOW_KEY_UNTIL = low_key_until
+    ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE = plain_anchors
     asyncio.run(main(args.real, n_bots, args.seconds))

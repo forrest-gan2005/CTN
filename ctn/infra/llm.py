@@ -485,6 +485,13 @@ def make_llm(spec: Optional[str] = None, temperature: Optional[float] = None):
                            one_at_a_time=provider in ONE_AT_A_TIME, extra=options)
 
 
+def anchor_llm():
+    """The anchor posts' own writer ($LLM_ANCHOR, with a fallback after a comma if wanted), or None for the team's."""
+    load_env()
+    spec = os.environ.get("LLM_ANCHOR")
+    return make_llm(spec) if spec else None
+
+
 def team_llms() -> tuple:
     """The writer ($LLM) and the stance judge ($LLM_JUDGE, else the writer's model at temperature 0)."""
     load_env()
