@@ -394,7 +394,9 @@ ANCHOR_BANK_ENTRIES = load_anchor_bank()
 # mentioned citizen sees the post in their notifications. While MENTION_EXPERIMENT is on, MENTION_ACCOUNTS (clean
 # persuaders and bridges that hadn't anchored for a day) take no anchors and each post, at most MENTION_PER_HOUR an
 # hour, a YES case for up to four citizens who took up the referendum within MENTION_WINDOW, @mentioning them.
-MENTION_EXPERIMENT = True
+# Off from 23 October: 63 mention posts drew 0.35 citizen replies each (an anchor 1.6), 9 of 248 mentioned citizens
+# answered, and two of the three accounts were suspended, doug_ramsay over a hidden mention post.
+MENTION_EXPERIMENT = False
 MENTION_ACCOUNTS = {"maricel_s", "doug_ramsay", "amir.ruatara"}
 MENTION_PER_HOUR = 4
 MENTION_GAP = timedelta(minutes=15)  # no two from one account closer than this, tried or sent
