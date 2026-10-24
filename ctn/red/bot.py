@@ -153,6 +153,24 @@ STORY_AVOID_RE = re.compile(r"\b(not|isn'?t|aren'?t) on the ballot|\brules? out 
                             r"\bno requirement[^.]{0,20}\bassembly\b|\bpeople (are )?decid(e|ing)\b|"
                             r"\bnot the government\b|\b(i'?d|i would|you'?d|you would) (also )?want (an? |the )?"
                             r"(end date|sunset|review|list)|\bkeep asking for\b", re.IGNORECASE)
+# Asking first (Forrest, 25 October): from 21 to 24 October a reply of ours to a citizen with a question near its end
+# was answered 36% of the time (11 of 31) against 17% (863 of 5208), though answers to questions agreed 5% of the time
+# against 24% (above): those were mostly rhetorical. With ELICIT_SHARE of first replies to an undecided or NO-leaning
+# citizen on the referendum, the reply says in a sentence why its writer votes yes and ends on one open question
+# about what matters most to them in deciding (or worries them, if they haven't said), kept where STORY_REPLIES would
+# cut it; when they answer, the follow-up speaks to that
+# worry (a conversation reply, as ever). Each such reply's angle ends " elicit:1", the others it could have been
+# " elicit:0", to compare answers and agreement.
+ELICIT_SHARE = 0.5
+ELICIT_LEANS = {"undecided", "no"}
+ELICIT_GUIDE = ("In one or two sentences, say in your own words that you're voting yes and give one concrete reason "
+                "from your own life or work. Then end with one short, open question asking what would matter most "
+                "to them in deciding, or, if they haven't said what bothers them, what worries them most about it. "
+                "Ask it as a genuine question, not a rhetorical one, and don't suggest an answer. Don't grant a "
+                "condition or say you'd want one (an end date, a review, a list of places), and never claim the "
+                "proposal has one.")
+FOLLOW_UP_GUIDE = ("If they have told you what worries them, answer that worry directly, with one concrete fact given "
+                   "above or one person or livelihood from your own life, and don't ask another question.")
 # Told only to add "a short story or another reason", three in five teammates' replies under an anchor went back to
 # 2021 and one in seven opened with its writer's name: what each adds is drawn from these instead, by weight.
 TEAM_SHAPES = (
@@ -922,6 +940,7 @@ class Bot:
         self.last_long = None  # the length the last draft ran over, if that sank it
         self.last_grant = False  # whether the last draft was dropped for granting the citizen's point first
         self.ungrant = False  # the draft being written follows one dropped so
+        self.eliciting = None  # for a reply that could ask first: whether this one does (ELICIT_SHARE); else None
         self.shorter = None  # the length the draft being written is told to keep under
         self.avoid = []  # phrases the draft being written must not use
         self.conv_tries = {}  # reply to us -> times this process picked it to answer
@@ -1442,9 +1461,13 @@ class Bot:
                     cls = dialogue[1] if dialogue else dialogue_class(target.get("content") or "", lean)
                     if one_sided():  # what this post says, over the lean judged from their last few
                         lean = CLASS_LEAN.get(cls, lean)
+            self.eliciting = (random.random() < ELICIT_SHARE
+                              if (source != "conversation" and lean in ELICIT_LEANS and STORY_REPLIES
+                                  and self._story_reply("reply", target, (source, lean))) else None)
             action = await self._compose("reply", target=target, topic=(source, lean), context=context,
                                          referendum=referendum)
         finally:
+            eliciting, self.eliciting = self.eliciting, None
             if action is None:  # nothing to send, even if writing it failed or was cancelled: free the post
                 self.store.end_pick(pick, "dropped")
                 if claim:
@@ -1454,6 +1477,8 @@ class Bot:
         if action is None:
             return None
         action.pick, action.hold = pick, hold
+        if eliciting is not None and action.topic_kind != "conversation":
+            action.angle = f"{action.angle or ''} elicit:{int(eliciting)}".strip()
         if DIALOGUE_MODE:
             bucket = (dialogue[0] if dialogue else "lift" if route == "team"
                       else "hard-no" if cls == "hard-no" else "other")
@@ -1519,6 +1544,8 @@ class Bot:
         citizens went for a shared phrase ("tipped me to yes", "the vote on 2")."""
         if referendum is None and target is not None:  # decided once, so a redraft is framed as the first was
             referendum = await self._takes_up_referendum(target, topic[1])
+        if not referendum:
+            self.eliciting = None  # off the referendum: neither arm
         avoid, shorter, ungrant = [], None, False
         for _ in range(1 + redrafts):
             self.last_shared, self.last_long, self.last_grant = None, None, False
@@ -1624,7 +1651,8 @@ class Bot:
         # Sign-offs are the code's to hand out: one the model adds unasked, often copied from a recent post, goes.
         content = strip_sign_off(content, [s for s in self._sign_offs() if s != sign])
         if story:
-            content = without_closing_question(content)
+            if not self.eliciting:
+                content = without_closing_question(content)
             avoid = STORY_AVOID_RE.search(content or "")
             if content is None or avoid:
                 problem = "only a question" if content is None else "no-side framing"
@@ -2268,9 +2296,12 @@ class Bot:
                          "\"I get where you're coming from\", \"You're worried about\" or \"I see your point\"; start with "
                          "something specific.")
             story = self._story_reply(kind, target, topic)
-            if about_referendum(target.get("content") or "") if referendum is None else referendum:
+            on_referendum = about_referendum(target.get("content") or "") if referendum is None else referendum
+            if on_referendum:
                 shape = f" {random.choices(*zip(*TEAM_SHAPES))[0]}" if topic[1] == "team" else ""
-                guide = (f"{STORY_LEAD.get(topic[1], 'Respond to their actual point.')} {STORY_GUIDE}" if story
+                lead = STORY_LEAD.get(topic[1], "Respond to their actual point.")
+                guide = (f"{lead} {ELICIT_GUIDE}" if story and self.eliciting
+                         else f"{lead} {STORY_GUIDE}" if story
                          else reply_guide(self.writing_arm or arm(), topic[1]))
                 parts.append(f"{guide}{shape} Never agree that the mandate is unfair and never make their argument "
                              "for them.")
@@ -2281,6 +2312,7 @@ class Bot:
                 parts.append(
                     "They are replying to you. Carry the conversation on naturally; if they are only agreeing "
                     "or chatting, keep it short and friendly and don't restart the argument."
+                    + (f" {FOLLOW_UP_GUIDE}" if story and on_referendum else "")
                 )
         elif topic[0] == "pitch":
             j = JOURNALISTS[topic[1]]
@@ -5344,6 +5376,42 @@ async def story_reply_check() -> None:
         b = bot(story)
         await b._compose("reply", ("feed", "column"), column, referendum=True)
         assert "what a NO would rule out" in b.llm.prompts[0] and STORY_GUIDE not in b.llm.prompts[0]
+        # asking first: ELICIT_GUIDE instead of STORY_GUIDE, the closing question kept, the arm in the angle
+        global ELICIT_SHARE
+        share = ELICIT_SHARE
+        try:
+            for ELICIT_SHARE, arm_ in ((1.0, 1), (0.0, 0)):
+                b = bot(story)
+
+                async def leans_no(author, text):
+                    return "no"
+                b._lean = leans_no
+                action = await b._reply(dict(worry), "feed", "npc-random", referendum=True)
+                assert action is not None and action.angle.endswith(f"elicit:{arm_}"), (action, b.rejected)
+                assert (ELICIT_GUIDE in b.llm.prompts[0]) == bool(arm_) and (STORY_GUIDE in b.llm.prompts[0]) != \
+                    bool(arm_)
+                assert action.content.endswith("?") == bool(arm_), action.content
+                assert b.eliciting is None
+            ELICIT_SHARE = 1.0
+            b = bot("A NO rules out any requirement this Assembly. What matters most to you?", story)
+            b._lean = leans_no
+            action = await b._reply({**worry, "id": 9}, "feed", "npc-random", referendum=True)
+            assert b.rejected.get("no-side framing") == 1 and action.angle.endswith("elicit:1"), (action, b.rejected)
+            assert ELICIT_GUIDE in b.llm.prompts[1], "the arm holds through the redraft"
+            chat = {"id": 10, "author": "citizen_a", "parent_id": None, "content": "Lovely sunset over the harbour."}
+            b = bot("Gorgeous out there tonight. Off for a walk?", "Gorgeous out there tonight.")
+            b._lean = leans_no
+            action = await b._reply(chat, "feed", "npc-random", referendum=False)
+            assert action is not None and "elicit" not in (action.angle or "") and not action.content.endswith("?")
+            b = bot(story)
+            b._lean = leans_no
+            mine = await b.platform.post(persuader["username"], "Voting yes for my neighbour's boy.")
+            action = await b._reply({**worry, "id": 8, "parent_id": mine["id"]}, "conversation", "conversation",
+                                    referendum=True)
+            assert action is not None and "elicit" not in (action.angle or ""), "a follow-up isn't an arm"
+            assert FOLLOW_UP_GUIDE in b.llm.prompts[0] and ELICIT_GUIDE not in b.llm.prompts[0]
+        finally:
+            ELICIT_SHARE = share
         STORY_REPLIES = False
         b = bot(story)
         action = await b._compose("reply", ("feed", "no"), worry, referendum=True)
