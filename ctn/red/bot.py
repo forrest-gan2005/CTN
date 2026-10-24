@@ -357,7 +357,10 @@ ONE_SIDED_WORLD = {
 OPENING_FREE = {"story"}  # the one shape that may open with who you are: some do, as people do, just not every one
 COVID_SHARE = 0.35  # of prompts that remind the writer what it did during covid: every one did, and 2021 was in most
 NO_COVID = "Don't describe what you did during covid."  # when it isn't reminded, so as not to make it up
-ANCHOR_GAP = timedelta(minutes=30)
+# One anchor an hour from 25 October (Forrest), not two: replies to citizens get the write-lane places half the lifts
+# took (the lane ran 133-166 of its ~175 writes an hour on 24 October), and anchors, which got nearly every suspended
+# account suspended, are halved; see CONVERSE_FOLLOW_UP.
+ANCHOR_GAP = timedelta(hours=1)
 ANCHOR_REST = timedelta(minutes=75)
 # Low-key until the x4 days (Forrest, 24 October 02:25): from midnight to 02:16 that night ten accounts were suspended,
 # four of them clean ones that anchored, each within minutes of its anchor's first hide, and 36 of the 49 replies
@@ -1765,7 +1768,7 @@ class Bot:
                       model="bank")
 
     async def _anchor(self) -> Optional[Action]:
-        """This half-hour's anchor post, if no teammate has written it and this account hasn't anchored lately,
+        """This slot's anchor post, if no teammate has written it and this account hasn't anchored lately,
         from the anchor bank or the model; the place goes back if the draft is dropped or never sent, for a teammate
         to take."""
         if MENTION_EXPERIMENT and self.username in MENTION_ACCOUNTS or self._dialogue_account():
