@@ -239,6 +239,15 @@ class NpcStore:
     def max_id(self) -> Optional[int]:
         return self.db.execute("SELECT MAX(id) FROM posts").fetchone()[0]
 
+    def replies_after(self, after: Optional[int], limit: int = 2000) -> tuple:
+        """(newest id looked at, [(id, author, parent id)] of the replies stored with an id above `after`, oldest
+        first, from the first `limit` posts there); with `after` None, (the newest id, [])."""
+        if after is None:
+            return self.max_id(), []
+        rows = self.db.execute("SELECT id, author, parent_id FROM posts WHERE id > ? ORDER BY id LIMIT ?",
+                               (after, limit)).fetchall()
+        return (rows[-1][0] if rows else after), [r for r in rows if r[2] is not None]
+
     def add_gap(self, low: Optional[int], high: int) -> None:
         with self.db:
             self.db.execute("INSERT INTO gaps (low, high) VALUES (?, ?)", (low, high))

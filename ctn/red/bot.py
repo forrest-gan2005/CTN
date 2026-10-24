@@ -12,7 +12,7 @@ from ctn.infra.fake_platform import ANCHOR, CITIZEN, LIFT, NORMAL, WRITE_LEFT, W
 from ctn.infra.llm import FakeLLM, team_llms
 from ctn.infra.news import SHARE_DAYS, SHARE_PREFER_RE, SITES, NewsStore
 from ctn.infra.state import StateStore
-from ctn.red.rhythm import LOW_KEY_UNTIL, UniformPacer, at_night
+from ctn.red.rhythm import LOW_KEY_UNTIL, NIGHT_HOURS, UniformPacer, at_night
 from ctn.text.content import (WORDING, load_anchor_bank, load_journalists, load_personas, load_vaccine_angles,
                               load_world, reply_world, without_arguments)
 from ctn.text.gifs import GIF_PROMPT, GIF_SHARE, GIF_WORD_RE, GIPHY_URL_RE, GifPool, split_gif, without_gifs
@@ -48,7 +48,9 @@ RUNUP_DAYS = 1
 # Leaning to replies and posts: citizens' likes and replies to us, and their minds changing, are what score.
 # Most writing goes to the team's anchor posts (below), so posts of an account's own are fewer: the platform takes
 # 180 posts, replies and reposts an hour from the whole team.
-ACTION_WEIGHTS = {"like": 5, "reply": 4, "post": 0.5, "repost": 1.25, "follow": 0.5, "none": 0.5}
+# Replies to citizens up from 4 and likes down from 5 on 24 October, with the same total: that fleet spent 98% of its
+# items on citizens, we 27%.
+ACTION_WEIGHTS = {"like": 3, "reply": 6, "post": 0.5, "repost": 1.25, "follow": 0.5, "none": 0.5}
 LINE_ACTIONS = {"amplifier": {"like": 6, "reply": 0.3, "post": 0.2, "repost": 3, "follow": 1, "none": 2}}
 # An account two takedowns from a ban stops writing; likes, reposts and follows can't be reported.
 QUIET_ACTIONS = {"like": 6, "repost": 1, "follow": 1, "none": 3}
@@ -183,6 +185,15 @@ OPEN_PICK = timedelta(hours=1)
 # of our replies the team leaves them be for a while (a session's length isn't published; two hours covers it).
 # Answering someone who replied to us is a conversation, not another push, and doesn't wait.
 CITIZEN_COOLDOWN = timedelta(hours=2)
+# Answering citizens (Forrest, 24 October). The fleet that looks likeliest to be china's, scoring ~1,500 an hour
+# without Trending, answered 80% of the citizens who replied to it, in a median 24 seconds, and kept 834 threads going
+# past two turns in two days; we answered 31%, in a median 30 minutes, with 54 such threads. With CONVERSE_FOLLOW_UP a
+# known citizen's reply to us is answered whatever CITIZEN_DAILY_REPLIES says (MAX_REPLIES_PER_AUTHOR and
+# THREAD_DEPTH_LIMIT still hold), and an account is woken ANSWER_WAIT after the collector sees one, looking every
+# ANSWER_LOOK, outside NIGHT_HOURS and while not quiet.
+CONVERSE_FOLLOW_UP = True
+ANSWER_WAIT = (15.0, 60.0)
+ANSWER_LOOK = 20.0
 # A reply to us that two picks in a row couldn't answer (draft dropped, claim lost) is let go, so an account always
 # drawn to answer it doesn't spend every step, for up to INBOX_TTL, on a draft that keeps failing.
 CONV_ATTEMPTS = 2
@@ -862,7 +873,8 @@ class Bot:
                  examples=None, feed: Optional[Callable[[], list]] = None,
                  profile: Optional[Callable[[str], list]] = None, twins=None, injection=None,
                  depth: Optional[Callable[[int], int]] = None, said=None,
-                 citizens: Optional[Callable[[datetime], list]] = None) -> None:
+                 citizens: Optional[Callable[[datetime], list]] = None,
+                 answers: Optional[Callable[[Optional[int]], tuple]] = None) -> None:
         self.username = persona["username"]
         self.persona = persona
         self.line = persona["line"]
@@ -881,6 +893,9 @@ class Bot:
         self.depth = depth  # post id -> how many messages deep it sits in its thread; None: not known
         self.said = said  # (words, since) -> (author, text) of others' posts with those words; None: none known
         self.citizens = citizens  # since -> (id, author, text, created_at) of citizens' posts, newest first; None: none
+        self.answers = answers  # after id -> (newest id, [(id, author, parent id)] collected after it); None: none
+        self.answer_mark = None  # the newest collected post id _answer_due has looked at
+        self.answering = False  # woken for a citizen's answer: the next step answers them before anything else
         self.hashtags = []  # what citizens are tagging today, refreshed by the team
         self.worries = []  # the NO worries citizens raise most at the moment, as arguments.md quotes them
         self.twins = twins  # semantic.NearIndex of the whole team's recent posts; None skips the check
@@ -971,6 +986,12 @@ class Bot:
         if talker:
             candidates = [p for p in candidates if self._dialogue_citizen(p["author"])]
         citizen_conv = conv is not None and self.roster.classify(conv["author"]) == "npc"
+        answering, self.answering = self.answering, False
+        if answering and citizen_conv and not self.quiet and not talker:
+            self.conv_tries[conv["id"]] = self.conv_tries.get(conv["id"], 0) + 1
+            reply = await self._reply(conv, "conversation", "conversation")
+            if reply is not None:
+                return reply
         if not self.quiet and self.line in DESK_LINES:
             found = await self._desk_target(obs["feed"])
             if found is not None:
@@ -1393,6 +1414,8 @@ class Bot:
         # Checked with nothing awaited before the pick, so a teammate choosing the same citizen meanwhile sees it.
         if (route not in ("team", "desk", "journalist", "column") and target["author"] not in JOURNALISTS
                 and target["author"] not in NEWS_OUTLETS and self.roster.classify(target["author"]) != "own"
+                and not (route == "conversation" and self._follow_up(target["author"])
+                         and not self._answered_enough(target["author"]))
                 and self._replied_enough(target["author"])):
             if hold is not None:
                 self.store.release(hold)
@@ -1670,7 +1693,8 @@ class Bot:
             if (self.conv_tries.get(post_id, 0) < CONV_ATTEMPTS and post_id not in self.seen and received_at >= stale and actor not in rivals
                     and not self.store.claimed([f"post:{post_id}"])  # a teammate answered it from the feed
                     and self.store.replies_to(actor, since) < MAX_REPLIES_PER_AUTHOR
-                    and (actor in JOURNALISTS or actor in NEWS_OUTLETS or not self._replied_enough(actor))):
+                    and (actor in JOURNALISTS or actor in NEWS_OUTLETS or self._follow_up(actor)
+                         or not self._replied_enough(actor))):
                 try:
                     post = await self.platform.get_post(post_id)
                 except KeyError:
@@ -1989,6 +2013,32 @@ class Bot:
         if npcs and (not unknown or random.random() < NPC_REPLY_PREF):
             return random.choice(npcs), "npc-random"
         return (random.choice(unknown), "unknown-fallback") if unknown else (None, None)
+
+    def _follow_up(self, author: str) -> bool:
+        """Whether a reply of `author`'s to us is answered past CITIZEN_DAILY_REPLIES: a known citizen's is."""
+        return CONVERSE_FOLLOW_UP and self.roster.classify(author) == "npc"
+
+    def _answered_enough(self, author: str) -> bool:
+        """Whether the team has MAX_REPLIES_PER_AUTHOR replies to `author` in the last 24 hours, sent or on their
+        way."""
+        now = datetime.now(timezone.utc)
+        since = _iso(now - timedelta(hours=24))
+        return max(self.store.replies_to(author, since),
+                   self.store.picked_for(author, since, _iso(now - OPEN_PICK))) >= MAX_REPLIES_PER_AUTHOR
+
+    def _answer_due(self, now: Optional[datetime] = None) -> bool:
+        """Whether the collector has seen a known citizen reply to one of this account's posts or replies of the
+        last INBOX_TTL since this was last asked; the first call only marks where to start."""
+        if self.answers is None or not CONVERSE_FOLLOW_UP:
+            return False
+        newest, rows = self.answers(self.answer_mark)
+        first, self.answer_mark = self.answer_mark is None, max(newest or 0, self.answer_mark or 0) or None
+        now = now or datetime.now(timezone.utc)
+        if first or not rows or self.quiet or self._squad() or at_night(now, NIGHT_HOURS):
+            return False
+        since = _iso(now - INBOX_TTL)
+        mine = {a.made_id for ts, a in self.history if a.made_id is not None and ts >= since}
+        return any(parent in mine and self.roster.classify(author) == "npc" for _, author, parent in rows)
 
     def _replied_enough(self, author: str) -> bool:
         """Whether the team has CITIZEN_DAILY_REPLIES replies to `author` in the last 24 hours, sent or on their way."""
@@ -2560,6 +2610,13 @@ class Bot:
         log.warning("%s: %s may or may not have been published (%s)", self.username, action.type, why)
         self.remember(action)
 
+    def _answer_due_safe(self) -> bool:
+        try:
+            return self._answer_due()
+        except Exception:  # nor here
+            log.exception("%s answer check failed", self.username)
+            return False
+
     def _rush_due(self) -> bool:
         try:
             return self._rush() is not None
@@ -2578,10 +2635,17 @@ class Bot:
             if loop.time() + wait >= until:
                 break
             end = loop.time() + wait
-            while end - loop.time() > 0:  # in short naps, to wake for an anchor posted meanwhile
-                await asyncio.sleep(min(end - loop.time(), late))
-                if end - loop.time() > soon and self._rush_due():
-                    break
+            look = min(late, ANSWER_LOOK) if self.answers is not None else late
+            rush_looked = loop.time()
+            while end - loop.time() > 0:  # in short naps, to wake for an anchor posted or a citizen's answer
+                await asyncio.sleep(min(end - loop.time(), look))
+                if loop.time() - rush_looked >= late * 0.95:  # anchors are looked for every `late`, as ever
+                    rush_looked = loop.time()
+                    if end - loop.time() > soon and self._rush_due():
+                        break
+                if end - loop.time() > ANSWER_WAIT[1] and self._answer_due_safe():
+                    end = loop.time() + random.uniform(*ANSWER_WAIT)
+                    self.answering = True
             try:
                 action = await self.step()
                 if action is None:
@@ -5288,8 +5352,9 @@ async def story_reply_check() -> None:
 
 async def daily_reply_check() -> None:
     """A citizen gets at most CITIZEN_DAILY_REPLIES ordinary replies from the team in a rolling 24 hours, counting
-    one a teammate is still writing and an answer to their reply to us; replies to teammates' anchors don't count."""
-    global CITIZEN_DAILY_REPLIES
+    one a teammate is still writing and, without CONVERSE_FOLLOW_UP, an answer to their reply to us; replies to
+    teammates' anchors don't count."""
+    global CITIZEN_DAILY_REPLIES, CONVERSE_FOLLOW_UP
 
     class Says:
         name = "says"
@@ -5297,10 +5362,13 @@ async def daily_reply_check() -> None:
         def delay(self) -> float:
             return 0.0
 
-        async def generate(self, system: str, prompt: str) -> Optional[str]:
-            return "My mum's in aged care on the ward, so I'm voting yes on the mandate for her."
+        said = iter(["My mum's in aged care on the ward, so I'm voting yes on the mandate for her.",
+                     "The ward lost three nurses to the last wave, so a certificate at the door feels small to me."])
 
-    saved, CITIZEN_DAILY_REPLIES = CITIZEN_DAILY_REPLIES, 1
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            return next(self.said, "My mum's in aged care on the ward, so I'm voting yes on the mandate for her.")
+
+    saved, CITIZEN_DAILY_REPLIES = (CITIZEN_DAILY_REPLIES, CONVERSE_FOLLOW_UP), 1
     try:
         first, second = [p for p in load_personas() if p["line"] == "persuade"][:2]
         store, platform = StateStore(":memory:"), FakePlatform()
@@ -5322,7 +5390,15 @@ async def daily_reply_check() -> None:
         answer = await platform.post("citizen_a", "Fair, but the referendum list?", parent_id=action.made_id)
         store.ingest_notifications(a.username, [], [{"post_id": answer["id"], "actor": "citizen_a"}],
                                    _iso(datetime.now(timezone.utc)))
+        CONVERSE_FOLLOW_UP = False
         assert await a._conversation_target() is None and not store.inbox(a.username), "their answer isn't exempt"
+        CONVERSE_FOLLOW_UP = True
+        store.ingest_notifications(a.username, [], [{"post_id": answer["id"], "actor": "citizen_a"}],
+                                   _iso(datetime.now(timezone.utc)))
+        found = await a._conversation_target()
+        assert found is not None and found["id"] == answer["id"], "with CONVERSE_FOLLOW_UP it is"
+        assert await a._reply(found, "conversation", "conversation") is not None, a.rejected
+        assert await b._reply(two, "feed", "npc-random", referendum=True) is None, "a new one still waits a day"
         anchor = await platform.post("teammate_1", "I'm voting yes on the mandate, for my mum's ward.")
         assert await b._reply(anchor, "feed", "team", referendum=True, claim=False) is not None, "a lift isn't paced"
         with store.db:  # a day on, citizen_a may be answered again
@@ -5332,7 +5408,7 @@ async def daily_reply_check() -> None:
         assert [p["author"] for p in b._open_targets([two])] == ["citizen_a"]
         assert await b._reply(two, "feed", "npc-random", referendum=True) is not None
     finally:
-        CITIZEN_DAILY_REPLIES = saved
+        CITIZEN_DAILY_REPLIES, CONVERSE_FOLLOW_UP = saved
     print("daily reply ok")
 
 
@@ -5477,6 +5553,81 @@ async def plain_anchor_check() -> None:
     print("plain anchors ok")
 
 
+async def answer_check() -> None:
+    """A known citizen's reply to one of an account's posts, once the collector has it, wakes the account within
+    ANSWER_WAIT; a teammate's or an unknown account's doesn't, nor anything at night, while quiet or before the
+    first look."""
+    global ANSWER_WAIT, ANSWER_LOOK
+    persona = [p for p in load_personas() if p["line"] == "persuade"][0]
+    roster = Roster(own={persona["username"], "teammate_1"}, npcs={"citizen_a"})
+    collected = {"newest": 100, "rows": []}
+
+    def answers(after):
+        if after is None:
+            return collected["newest"], []
+        return collected["newest"], [r for r in collected["rows"] if r[0] > after]
+
+    bot = Bot(persona, FakePlatform(), FakeLLM(), load_world(), roster=roster, store=StateStore(":memory:"),
+              answers=answers)
+    noon = datetime.now(TIMEZONE).replace(hour=12, minute=0).astimezone(timezone.utc)
+    night = noon.replace(hour=(noon.hour + 14) % 24)  # 02:00 Sydney
+    bot.remember(Action("reply", post_id=40, content="mine", made_id=50))
+    collected.update(newest=101, rows=[(101, "citizen_a", 50)])
+    assert not bot._answer_due(noon), "the first look only marks where to start"
+    collected.update(newest=102, rows=[(102, "citizen_a", 50)])
+    assert bot._answer_due(noon) and not bot._answer_due(noon), "once, then it's been seen"
+    collected.update(newest=104, rows=[(103, "teammate_1", 50), (104, "stranger", 50)])
+    assert not bot._answer_due(noon), "a teammate or an account of unknown standing"
+    collected.update(newest=105, rows=[(105, "citizen_a", 999)])
+    assert not bot._answer_due(noon), "to someone else's post"
+    collected.update(newest=106, rows=[(106, "citizen_a", 50)])
+    assert not bot._answer_due(night), "not at night"
+    bot.quiet = True
+    collected.update(newest=107, rows=[(107, "citizen_a", 50)])
+    assert not bot._answer_due(noon), "not while quiet"
+    bot.quiet = False
+
+    class Slow:
+        def next_wait(self, now):
+            return 2.0
+
+    loop = asyncio.get_running_loop()
+    steps, due = [], iter([True])
+
+    async def step():
+        steps.append(loop.time())
+
+    global RUSH_WAIT
+    saved = ANSWER_WAIT, ANSWER_LOOK, RUSH_WAIT
+    try:
+        ANSWER_WAIT, ANSWER_LOOK, RUSH_WAIT = (0.01, 0.02), 0.05, (0.05, 0.6)
+        bot.step = step
+        bot._answer_due = lambda now=None: next(due, False)
+        looks = []
+        bot._rush_due = lambda: looks.append(loop.time()) and False
+        start = loop.time()
+        await bot.run(start + 3.0, Slow())
+        assert len(steps) == 2 and steps[0] - start < 0.5, "woken well before its 2 seconds, then as paced"
+        assert bot.answering, "and told to answer first"
+        assert len(looks) <= 6, f"anchors still looked for every RUSH_WAIT[1], not every ANSWER_LOOK: {len(looks)}"
+    finally:
+        ANSWER_WAIT, ANSWER_LOOK, RUSH_WAIT = saved
+
+    # the woken step answers the citizen before anything else it might do
+    platform, store = FakePlatform(), StateStore(":memory:")
+    bot = Bot(persona, platform, FakeLLM(), load_world(), roster=roster, store=store)
+    mine = await platform.post(bot.username, "Voting yes for my mum's ward.")
+    bot.remember(Action("post", content=mine["content"], made_id=mine["id"]))
+    answer = await platform.post("citizen_a", "Fair, but what about the referendum's end date?", parent_id=mine["id"])
+    store.ingest_notifications(bot.username, [], [{"post_id": answer["id"], "actor": "citizen_a"}],
+                               _iso(datetime.now(timezone.utc)))
+    bot.answering = True
+    action = await bot.think({"feed": []})
+    assert action is not None and action.type == "reply" and action.post_id == answer["id"], (action, bot.rejected)
+    assert not bot.answering
+    print("answers ok")
+
+
 async def night_anchor_check() -> None:
     """No anchor post inside ANCHOR_NIGHT; one outside it as ever."""
     class Says:
@@ -5591,6 +5742,7 @@ if __name__ == "__main__":
     anchor_pause, ANCHOR_PAUSE = ANCHOR_PAUSE, (datetime(2000, 1, 1, tzinfo=TIMEZONE),) * 2  # nor the pause
     asyncio.run(squad_check())
     asyncio.run(night_anchor_check())
+    asyncio.run(answer_check())
     plain_anchors = ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE
     ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE = False, 0.8, {"anchor": 1.0, "team": 0.8, "issue": 0.5}
     asyncio.run(plain_anchor_check())

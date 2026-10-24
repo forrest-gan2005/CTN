@@ -103,7 +103,8 @@ class Team:
                          store=state,
                          feed=self.feed, profile=lambda author: npc_store.recent_by(author, 5), twins=self.twins,
                          injection=injection, depth=npc_store.depth, said=npc_store.said,
-                         citizens=lambda since: npc_store.citizen_posts_since(since, cutoff))
+                         citizens=lambda since: npc_store.citizen_posts_since(since, cutoff),
+                         answers=npc_store.replies_after)
                      for p in personas]
         self.gifs = GifPool() if gifs else None  # one pool, so the whole team spaces out reusing a GIF
         if self.gifs is not None:  # and across restarts, from what the team has posted or may have
