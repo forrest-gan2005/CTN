@@ -369,7 +369,9 @@
     "examples": [
       "someone paid for a single banana with a 50 today and asked if i had change. sir it is 9am",
       "did my last two years of school on a laptop and missed my formal. i'll take a vaccine check over another year of zoom 🙃"
-    ]
+    ],
+    "status": "banned",
+    "replaced_by": "PuaKealoha"
   },
   {
     "username": "mere_cuts",
@@ -3711,7 +3713,7 @@
     "job": "run the general store on an outer island",
     "home": "an outer island",
     "line": "mobilise",
-    "status": "reserve",
+    "status": "active",
     "covid": "kept the store going in 2021 when the supply boat came half as often, rationing rice and flour for the whole island",
     "why_yes": "the island lives on the boat and the clinic, and you think acting early is the best protection; with the vote this close, every islander who backs YES needs to turn up",
     "style": "warm, motherly, community notice-board voice, mentions the store and the boat",
