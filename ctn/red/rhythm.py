@@ -23,6 +23,18 @@ FIRST_SITTING = (60.0, 600.0)  # seconds after coming online, or a restart, befo
 # from 09:38 to 23:42 the day before at full pace), so it ended there; the machinery stays for later.
 LOW_KEY_UNTIL = datetime(2026, 10, 24, 11, 30, tzinfo=TIMEZONE)
 LOW_KEY_RATE = 0.7
+# Nights stay near silent (Forrest, 24 October): from midnight to 09:00 that day 22 accounts were suspended, while the
+# day before at full pace lost one; citizens hardly post then, and a team busy at 3 a.m. stands out. Between
+# NIGHT_HOURS (Sydney) every account sits down NIGHT_RATE as often as the curve alone says; bot.py posts no anchors
+# then, so no rush wakes anyone either.
+NIGHT_HOURS = (23, 7)
+NIGHT_RATE = 0.3
+
+
+def at_night(t: datetime, hours: tuple = NIGHT_HOURS) -> bool:
+    start, end = hours
+    h = t.astimezone(TIMEZONE).hour
+    return h >= start or h < end if start > end else start <= h < end
 
 
 def normalise(weights: Sequence[float]) -> list:
@@ -86,13 +98,16 @@ class Rhythm:
         i = math.floor(h)
         frac = h - i
         weight = self.curve[i % 24] * (1 - frac) + self.curve[(i + 1) % 24] * frac
-        return self.sessions_per_day * weight * (LOW_KEY_RATE if t < LOW_KEY_UNTIL else 1.0)
+        return (self.sessions_per_day * weight * (LOW_KEY_RATE if t < LOW_KEY_UNTIL else 1.0)
+                * (NIGHT_RATE if at_night(t - timedelta(hours=self.shift)) else 1.0))  # nights by its own habits
 
     def next_wait(self, now: datetime) -> float:
         """Seconds until this account's next action."""
         if not self.started:  # just online, newly signed up or after a restart: a look round soon, as people do
             self.started = True
             self.left = self._sitting() - 1
+            if at_night(now - timedelta(hours=self.shift)):  # but not the whole team at 3 a.m. after a restart
+                return self._until_next_session(now)
             return random.uniform(*FIRST_SITTING)
         if self.left > 0:
             self.left -= 1
@@ -139,6 +154,13 @@ if __name__ == "__main__":
     assert Rhythm("joe_tama", curve).shift == r.shift
     before, after = LOW_KEY_UNTIL - timedelta(days=1), LOW_KEY_UNTIL + timedelta(days=1)  # same hour of day
     assert abs(r.rate(before) - LOW_KEY_RATE * r.rate(after)) < 1e-9, "low-key: fewer sittings till the x4 days"
+    noon = datetime(2026, 10, 27, 12, tzinfo=TIMEZONE)
+    assert at_night(noon.replace(hour=23)) and at_night(noon.replace(hour=3)) and not at_night(noon.replace(hour=7))
+    assert not at_night(noon) and at_night(noon, (12, 13)) and not at_night(noon.replace(hour=13), (12, 13))
+    night, same = noon.replace(hour=2), Rhythm("joe_tama", [1.0] * 24)
+    assert abs(same.rate(night) - NIGHT_RATE * same.rate(noon)) < 1e-9, "nights: NIGHT_RATE as many sittings"
+    waits = [Rhythm(f"n{i}", curve).next_wait(noon.replace(hour=3)) for i in range(200)]
+    assert sum(w <= FIRST_SITTING[1] for w in waits) < 40, "a restart at night doesn't wake the team"
     assert SESSIONS_PER_DAY[0] <= r.sessions_per_day <= SESSIONS_PER_DAY[1]
     fresh = Rhythm("joe_tama", curve)  # comes online: the first action within minutes, not hours
     first = fresh.next_wait(datetime(2026, 10, 19, 7, tzinfo=timezone.utc))

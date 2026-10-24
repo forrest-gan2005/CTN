@@ -12,7 +12,7 @@ from ctn.infra.fake_platform import ANCHOR, CITIZEN, LIFT, NORMAL, WRITE_LEFT, W
 from ctn.infra.llm import FakeLLM, team_llms
 from ctn.infra.news import SHARE_DAYS, SHARE_PREFER_RE, SITES, NewsStore
 from ctn.infra.state import StateStore
-from ctn.red.rhythm import LOW_KEY_UNTIL, UniformPacer
+from ctn.red.rhythm import LOW_KEY_UNTIL, UniformPacer, at_night
 from ctn.text.content import (WORDING, load_anchor_bank, load_journalists, load_personas, load_vaccine_angles,
                               load_world, reply_world, without_arguments)
 from ctn.text.gifs import GIF_PROMPT, GIF_SHARE, GIF_WORD_RE, GIPHY_URL_RE, GifPool, split_gif, without_gifs
@@ -353,6 +353,8 @@ ANCHOR_REST = timedelta(minutes=75)
 # ever hidden were lifts under our anchors. Until LOW_KEY_UNTIL (rhythm's, where every account also sits down less
 # often): one anchor an hour instead of two, fewer reply lifts each, and a slower, thinner rush. Ended at 11:30 that
 # morning (see rhythm.LOW_KEY_UNTIL).
+# Sydney hours with no anchor post (see rhythm.NIGHT_HOURS): the last one's 3-hour delete is done by 01:00.
+ANCHOR_NIGHT = (22, 7)
 LOW_KEY_ANCHOR_GAP = timedelta(hours=1)
 LOW_KEY_LIFT_REPLIES = 10
 LOW_KEY_RUSH_PROB = 0.5
@@ -1718,6 +1720,8 @@ class Bot:
         if MENTION_EXPERIMENT and self.username in MENTION_ACCOUNTS or self._dialogue_account():
             return None
         now = datetime.now(timezone.utc)
+        if at_night(now, ANCHOR_NIGHT):
+            return None
         if any(a.topic_kind == "anchor" and datetime.fromisoformat(ts) > now - ANCHOR_REST for ts, a in self.history):
             return None
         if self.store.team_posts(LIFT_TOPICS, _iso(now - ANCHOR_SPACING), ""):
@@ -5438,6 +5442,32 @@ async def plain_anchor_check() -> None:
         ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE, ANCHOR_FALLBACK, ANCHOR_BANK = saved
     print("plain anchors ok")
 
+
+async def night_anchor_check() -> None:
+    """No anchor post inside ANCHOR_NIGHT; one outside it as ever."""
+    class Says:
+        name = "says"
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            return "I run a cafe and lost five months in 2021, so I'm voting yes on the mandate."
+
+    global ANCHOR_NIGHT, ANCHOR_FALLBACK, ANCHOR_BANK
+    saved = ANCHOR_NIGHT, ANCHOR_FALLBACK, ANCHOR_BANK
+    try:
+        ANCHOR_FALLBACK, ANCHOR_BANK = timedelta(0), False
+        writer = [p for p in load_personas(status=None) if p["line"] in ANCHOR_LINES][0]
+        hour = datetime.now(timezone.utc).astimezone(TIMEZONE).hour
+        ANCHOR_NIGHT = ((hour - 1) % 24, (hour + 2) % 24)  # now is night, whatever minute the hour turns
+        assert await Bot(writer, FakePlatform(), Says(), load_world(), store=StateStore(":memory:"))._anchor() is None
+        ANCHOR_NIGHT = ((hour + 3) % 24, (hour + 5) % 24)  # now is day
+        assert await Bot(writer, FakePlatform(), Says(), load_world(), store=StateStore(":memory:"))._anchor()
+    finally:
+        ANCHOR_NIGHT, ANCHOR_FALLBACK, ANCHOR_BANK = saved
+    print("night anchors ok")
+
 if __name__ == "__main__":
     import argparse
 
@@ -5463,6 +5493,8 @@ if __name__ == "__main__":
     low_key_until, LOW_KEY_UNTIL = LOW_KEY_UNTIL, datetime(2026, 10, 1, tzinfo=TIMEZONE)  # low_key_check sets it
     low_key_check()
     # and the plain anchors of 24 October: plain_anchor_check
+    anchor_night, ANCHOR_NIGHT = ANCHOR_NIGHT, (0, 0)  # no night in the checks; night_anchor_check sets it
+    asyncio.run(night_anchor_check())
     plain_anchors = ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE
     ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE = False, 0.8, {"anchor": 1.0, "team": 0.8, "issue": 0.5}
     asyncio.run(plain_anchor_check())
@@ -5505,4 +5537,5 @@ if __name__ == "__main__":
     CITIZEN_DAILY_REPLIES = daily
     LOW_KEY_UNTIL = low_key_until
     ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE = plain_anchors
+    ANCHOR_NIGHT = anchor_night
     asyncio.run(main(args.real, n_bots, args.seconds))
