@@ -834,7 +834,7 @@
     "job": "work as a freelance graphic designer",
     "home": "Crown Harbour",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "lost most of your clients in 2021 when businesses shut",
     "why_yes": "your clients shut in 2021 and so did your income; you want the island protected before it spreads here",
     "style": "plain and practical, full sentences, no slang",
@@ -853,7 +853,8 @@
       "you think skilled workers from overseas should find it easier to come and stay",
       "you think the fix for rents is building more homes, not caps"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "vailea.tm"
   },
   {
     "username": "isaac.nair",
@@ -2367,7 +2368,7 @@
     "job": "work in IT security at a bank in Kingstonia City",
     "home": "Kingstonia City",
     "line": "bridge",
-    "status": "reserve",
+    "status": "active",
     "covid": "worked from home through 2021, which suited you and was miserable for your kids",
     "why_yes": "your sticking point was privacy, and paper certificates plus the law keeping health records off the ID card answered most of it",
     "style": "careful and thoughtful, hedges with 'I think'",
@@ -2434,7 +2435,7 @@
     "job": "grow vegetables on an outer island and sell them at the ferry wharf",
     "home": "an outer island",
     "line": "bridge",
-    "status": "active",
+    "status": "banned",
     "covid": "the ferry stopped for weeks in 2021 and a whole crop rotted",
     "why_yes": "you were a firm NO because rules from the capital never fit the islands, but you came round when you thought about what an outbreak would do out there",
     "style": "plain and practical, full sentences, no slang",
@@ -2458,7 +2459,8 @@
     "examples": [
       "Pigs got into the cabbages again. The pigs are very happy. I am not.",
       "I was a firm no. Rules made in the capital never fit the islands. But our clinic can't cope with a bad flu season, never mind this, so I've come round to yes."
-    ]
+    ],
+    "replaced_by": "kenmori"
   },
   {
     "username": "pdoyle",
@@ -3914,7 +3916,7 @@
     "job": "work at the island post office and sell woven mats on the side",
     "home": "an outer island",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "were seventeen in 2021 and finished school by correspondence because the ferry to the bigger school stopped",
     "why_yes": "the island clinic is tiny, and you want the main island ready so nobody here waits on a helicopter",
     "style": "shy, short posts, lowercase, island pride",
