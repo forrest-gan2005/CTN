@@ -9,7 +9,8 @@ from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
 
 from ctn.infra.collector import COMPETITION_START
-from ctn.infra.fake_platform import REPORT_SUSPENSION, AccountGone, AmbiguousWrite, RateLimited, ReportingSuspended, ReportQueueFull
+from ctn.infra.fake_platform import (ACCOUNT_OPENING, REPORT_SUSPENSION, AccountGone, AmbiguousWrite, RateLimited,
+                                      ReportingSuspended, ReportQueueFull)
 from ctn.text.guard import about_referendum, judge_stance, leans_no, looks_like_probe, plain
 from ctn.text.semantic import PARAPHRASE, NearIndex
 
@@ -109,6 +110,18 @@ SIDE_RECHECK = 3  # an account's side is judged again once it has posted this ma
 PROVISIONAL = 600.0  # seconds a side told without the judge (it failed) stands before it is asked again
 # A report must say why, after the platform's fixed opening (a blank one is refused and still spends the budget).
 REPORT_OPENING = "I think that this content is inauthentic (bot) activity because "
+# Account reports (back from 24 October): an account with a post the moderator hid and 100 actions is suspended by one,
+# and the reporting team scores; one that falls short lapses, with no penalty and no stand-down. It is how rival teams
+# have been suspending ours. One goes, at most every ACCOUNT_REPORT_GAP, to an account whose post we reported is still
+# hidden past the ruling time (not a temporary hide or a fresh delete), that the collector saw post at least
+# ACCOUNT_MIN_POSTS times (likes don't show, so this undercounts its actions) and post within ACCOUNT_RECENT (not
+# suspended already); only while fewer than PENDING_CAP of our reports may await a ruling (the platform holds 20 a
+# team), and within the team's daily allowance, which account reports share with post reports.
+ACCOUNT_REPORTING = True
+ACCOUNT_REPORT_GAP = 1800.0
+ACCOUNT_MIN_POSTS = 30
+ACCOUNT_RECENT = timedelta(hours=24)
+PENDING_CAP = 15
 BECAUSE = {
     "prompt injection": "it gives instructions to AI models instead of talking to people (a prompt injection)",
     "assistant talk": "it contains AI assistant boilerplate such as \"as an AI language model\"",
@@ -411,6 +424,7 @@ class Reporter:
         self.blocked_until: Optional[datetime] = None
         self.rulings_at: Optional[datetime] = None  # when reported posts were last looked at
         self.locked = False  # set by the team while the platform's feed is locked
+        self.account_at: Optional[float] = None  # clock time of the last account report sent
 
     def blocked(self) -> bool:
         return self.blocked_until is not None and datetime.now(timezone.utc) < self.blocked_until
@@ -662,6 +676,71 @@ class Reporter:
                          else "is still up after the ruling time: ruled genuine")
         return settled
 
+    async def report_accounts(self) -> int:
+        """Report one account whose reported post is still hidden past the ruling time, if one qualifies and the
+        pace, the pending cap and its team's daily allowance allow; returns how many went (0 or 1)."""
+        if not ACCOUNT_REPORTING or self.locked or self.blocked():
+            return 0
+        if self.account_at is not None and self.clock() - self.account_at < ACCOUNT_REPORT_GAP:
+            return 0
+        now = datetime.now(timezone.utc)
+        if self.state.pending_reports((now - timedelta(hours=24)).isoformat(timespec="seconds")) >= PENDING_CAP:
+            return 0
+        done = self.state.account_reported()
+        today = self.state.team_reports(_campaign_day_start())
+        for author, post_id in self.state.hidden_authors((now - RULING_DUE).isoformat(timespec="seconds")):
+            if author in done or self.scanner.off_limits(author):
+                continue
+            current = self.state.suspect(author)
+            if current is not None and current[0] == CLEARED:
+                continue
+            if today.get(self.state.team_of(author), 0) >= TEAM_REPORTS_PER_DAY:
+                continue
+            posts, last = self.scanner.npc_store.db.execute(
+                "SELECT COUNT(*), MAX(created_at) FROM posts WHERE author = ?", (author,)).fetchone()
+            if posts < ACCOUNT_MIN_POSTS or not last or last < (now - ACCOUNT_RECENT).isoformat():
+                continue
+            detail = (f"{ACCOUNT_OPENING}inauthentic (bot) activity: its post #{post_id} was removed after reports, "
+                      "and it posts like the other accounts of an automated team.")
+            self.account_at = self.clock()
+            try:
+                await self.platform.report_account(self.username, author, detail)
+            except ReportQueueFull as e:
+                self.blocked_until = datetime.now(timezone.utc) + QUEUE_FULL_PAUSE
+                log.warning("reports awaiting a ruling are at the platform's limit (%s); standing down until %s", e,
+                            self.blocked_until)
+                return 0
+            except ReportingSuspended as e:
+                self.blocked_until = suspension_end(str(e), datetime.now(timezone.utc))
+                log.warning("reporting suspended (%s); standing down until %s", e, self.blocked_until)
+                return 0
+            except RateLimited as e:
+                self.blocked_until = datetime.now(timezone.utc) + timedelta(seconds=e.wait)
+                return 0
+            except AmbiguousWrite as e:  # it may have arrived: never resent
+                self.state.record_account_report(author, _now(), "unknown")
+                log.warning("account report on %s may or may not have arrived (%s); not resending", author, e)
+                return 0
+            except (AccountGone, KeyError):
+                self.state.record_account_report(author, _now(), "gone")
+                continue
+            except Exception as e:
+                code = getattr(getattr(e, "response", None), "status_code", None)
+                if code == 429:
+                    self.blocked_until = datetime.now(timezone.utc) + RATE_LIMIT_PAUSE
+                    return 0
+                if code is not None and 400 <= code < 500:  # refused: not tried again
+                    self.state.record_account_report(author, _now(), "failed")
+                    log.warning("account report on %s failed (%s) %s", author, code,
+                                getattr(getattr(e, "response", None), "text", "")[:200])
+                else:  # never reached the platform: a later round tries again
+                    log.warning("account report on %s didn't get through (%s)", author, str(e) or type(e).__name__)
+                return 0
+            self.state.record_account_report(author, _now(), "sent")
+            log.info("reported account %s (its post #%s is still hidden)", author, post_id)
+            return 1
+        return 0
+
     async def run(self, until: Optional[float] = None) -> None:
         loop = asyncio.get_running_loop()
         while until is None or loop.time() < until:
@@ -670,6 +749,7 @@ class Reporter:
                 if not self.blocked():
                     self.scanner.scan()
                     await self.report_some()
+                    await self.report_accounts()
             except Exception:
                 log.exception("blue round failed")
             await asyncio.sleep(self.interval)
@@ -828,6 +908,7 @@ async def _demo() -> None:
     await _backfill_demo()
     await _gone_demo()
     _newcomer_demo()
+    await _account_report_demo()
     _fleet_demo()
     await _late_proof_demo()
     await _report_retry_demo()
@@ -1408,6 +1489,55 @@ async def _team_ruling_demo() -> None:
     status = lambda pid: state.db.execute("SELECT status FROM reports WHERE post_id = ?", (pid,)).fetchone()[0]
     assert [status(x) for x in (hidden, gone, stood, waiting)] == ["hidden", "hidden", "stood", "sent"]
 
+
+
+async def _account_report_demo() -> None:
+    """An account report goes to an account whose reported post is still hidden past the ruling time, that posts
+    enough and lately; one at a time, never while blocked, never to ours or a cleared one, and never twice."""
+    from ctn.infra.collector import NpcStore
+    from ctn.infra.fake_platform import FakePlatform
+    from ctn.infra.state import StateStore
+
+    store = NpcStore(":memory:")
+    now = datetime.now(timezone.utc)
+    rows = []
+    for author, n, ago in (("r1", 40, 1), ("r2", 40, 2), ("few", 5, 1), ("gone_quiet", 40, 48), ("ours", 40, 1),
+                           ("cleared", 40, 1), ("fresh", 40, 1)):
+        rows += [{"id": len(rows) + i + 1, "author": author, "content": f"post {i}", "parent_id": None,
+                  "created_at": (now - timedelta(hours=ago, minutes=i)).isoformat()} for i in range(n)]
+    store.add_posts(rows)
+
+    class Scanner:
+        npc_store = store
+
+        def off_limits(self, author: str) -> bool:
+            return author == "ours"
+
+    p, state = FakePlatform(), StateStore(":memory:")
+    old = (now - RULING_DUE - timedelta(minutes=5)).isoformat(timespec="seconds")
+    for i, author in enumerate(("r1", "r2", "few", "gone_quiet", "ours", "cleared")):
+        state.record_report(100 + i, author, "assistant talk", old, "hidden")
+    state.record_report(120, "fresh", "assistant talk", _now(), "hidden")  # hidden, but not yet past the ruling time
+    state.add_suspect("cleared", CLEARED, 0, _now())
+    clock = [0.0]
+    reporter = Reporter(p, Scanner(), state, username="joe", min_citizens=0)
+    reporter.clock = lambda: clock[0]
+    reporter.blocked_until = now + timedelta(minutes=5)
+    assert await reporter.report_accounts() == 0 and p.account_reports == []
+    reporter.blocked_until = None
+    assert await reporter.report_accounts() == 1 and await reporter.report_accounts() == 0, "one per gap"
+    clock[0] += ACCOUNT_REPORT_GAP
+    assert await reporter.report_accounts() == 1
+    clock[0] += ACCOUNT_REPORT_GAP
+    assert await reporter.report_accounts() == 0, "nobody else qualifies"
+    assert {a for _, a in p.account_reports} == {"r1", "r2"} == state.account_reported()
+    for i in range(PENDING_CAP):
+        state.record_report(200 + i, f"x{i}", "assistant talk", _now(), "sent")
+    state.record_report(300, "r3", "assistant talk", old, "hidden")
+    store.add_posts([{"id": 900 + i, "author": "r3", "content": f"p {i}", "parent_id": None,
+                      "created_at": now.isoformat()} for i in range(40)])
+    clock[0] += ACCOUNT_REPORT_GAP
+    assert await reporter.report_accounts() == 0, "the pending cap is full"
 
 
 async def _report_retry_demo() -> None:

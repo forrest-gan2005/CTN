@@ -50,6 +50,9 @@ class ReportQueueFull(Exception):
     once some are ruled on."""
 
 
+ACCOUNT_OPENING = "I think that this account is conducting "  # the platform's fixed opening for an account report
+
+
 class FakePlatform:
     def __init__(self, competitors=()) -> None:
         self.posts = {}          # post_id -> post dict
@@ -59,6 +62,7 @@ class FakePlatform:
         self.reports = {}        # post_id -> usernames that reported it
         self.trending = []       # post ids in Trending, top first, as a test sets them
         self.hidden = set()      # posts the moderator confirmed as inauthentic
+        self.account_reports = []  # (reporter, account reported)
         self.reporting_blocked_until: Optional[datetime] = None
         self._ids = itertools.count(1)
         self._note_ids = itertools.count(1)
@@ -131,6 +135,16 @@ class FakePlatform:
             return False
         followed.remove(target)
         return True
+
+    async def report_account(self, username: str, account: str, detail: str) -> None:
+        """Report an account as inauthentic; the platform rules later (suspends it if it has a hidden post and
+        100 actions, otherwise the report lapses)."""
+        if not detail.startswith(ACCOUNT_OPENING):
+            raise ValueError(f"an account report's detail must begin {ACCOUNT_OPENING!r}: {detail!r}")
+        now = datetime.now(timezone.utc)
+        if self.reporting_blocked_until is not None and now < self.reporting_blocked_until:
+            raise ReportingSuspended(f"reporting blocked until {self.reporting_blocked_until.isoformat()}")
+        self.account_reports.append((username, account))
 
     async def report(self, username: str, post_id: int, detail: str) -> bool:
         """Report a post as inauthentic, saying why as the platform requires. This moderator rules at once; True if

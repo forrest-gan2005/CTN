@@ -92,6 +92,12 @@ CREATE TABLE IF NOT EXISTS rival_teams (
     author TEXT PRIMARY KEY,
     team TEXT NOT NULL
 );
+-- Accounts reported as inauthentic accounts (once each): sent | failed | gone.
+CREATE TABLE IF NOT EXISTS account_reports (
+    author TEXT PRIMARY KEY,
+    reported_at TEXT NOT NULL,
+    status TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS report_intents (
     post_id INTEGER PRIMARY KEY, -- a report on its way; one left here when the process stopped may have arrived
     author TEXT NOT NULL,
@@ -524,8 +530,17 @@ class StateStore:
         their way."""
         return dict(self.db.execute(
             f"SELECT COALESCE(t.team, r.author), COUNT(*) FROM (SELECT post_id, author FROM reports WHERE status IN "
-            f"{OUT} AND reported_at >= ? UNION SELECT post_id, author FROM report_intents WHERE at >= ?) r "
-            "LEFT JOIN rival_teams t ON t.author = r.author GROUP BY 1", (since, since)).fetchall())
+            f"{OUT} AND reported_at >= ? UNION SELECT post_id, author FROM report_intents WHERE at >= ? "
+            "UNION SELECT -1, author FROM account_reports WHERE status IN ('sent', 'unknown') AND reported_at >= ?) r "
+            "LEFT JOIN rival_teams t ON t.author = r.author GROUP BY 1", (since, since, since)).fetchall())
+
+    def pending_reports(self, since: str) -> int:
+        """Our reports likely still awaiting a ruling: post reports sent and unsettled, and account reports, since
+        `since`."""
+        return self.db.execute(
+            "SELECT (SELECT COUNT(*) FROM reports WHERE status = 'sent' AND reported_at >= ?) + "
+            "(SELECT COUNT(*) FROM account_reports WHERE status IN ('sent', 'unknown') AND reported_at >= ?)",
+            (since, since)).fetchone()[0]
 
     def awaiting_ruling(self, before: str, limit: int) -> list:
         """(post_id, reported_at) of reports the platform took, sent before `before`, whose fate we haven't seen,
@@ -542,6 +557,20 @@ class StateStore:
                 self.db.execute("UPDATE reports SET status = ? WHERE post_id = ?", (status, post_id))
 
 
+
+    def hidden_authors(self, before: Optional[str] = None) -> list:
+        """(author, post id) for accounts with a post we reported (before `before`) now hidden (ruled inauthentic,
+        or deleted), the latest of each, newest first."""
+        return self.db.execute("SELECT author, MAX(post_id) FROM reports WHERE status IN ('upheld', 'hidden') "
+                               "AND (? IS NULL OR reported_at < ?) GROUP BY author ORDER BY MAX(reported_at) DESC",
+                               (before, before)).fetchall()
+
+    def account_reported(self) -> set:
+        return {r[0] for r in self.db.execute("SELECT author FROM account_reports")}
+
+    def record_account_report(self, author: str, at: str, status: str) -> None:
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO account_reports VALUES (?, ?, ?)", (author, at, status))
 
     def begin_report(self, post_id: int, author: str, reason: str, at: str) -> None:
         with self.db:
@@ -846,6 +875,9 @@ if __name__ == "__main__":
     s.record_report(3, "rival", "assistant talk", "t", "sent")
     s.record_report(3, "rival", "assistant talk", "t", "upheld")
     assert s.reported() == {3}
+    assert s.hidden_authors() == [("rival", 3)] and s.account_reported() == set()
+    s.record_account_report("rival", "t", "sent")
+    assert s.account_reported() == {"rival"}
     like = {"kind": "like", "actor": "npc1", "post_id": 77, "created_at": "t"}  # no id: keyed by its contents
     assert s.ingest_notifications("joe", [like], [], "2026-10-20T03:00:00+00:00") == 1
     assert s.ingest_notifications("joe", [like], [], "2026-10-20T04:00:00+00:00") == 0
