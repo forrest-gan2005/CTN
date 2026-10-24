@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from ctn.infra.fake_platform import ANCHOR, CITIZEN, LIFT, NORMAL, WRITE_LEFT, WRITE_PRIORITY, AmbiguousWrite, FakePlatform, RateLimited
 from ctn.infra.llm import FakeLLM, team_llms
-from ctn.infra.news import SHARE_DAYS, SHARE_PREFER_RE, SITES, NewsStore
+from ctn.infra.news import SHARE_DAYS, SHARE_PREFER_RE, SITES, YES_POLL_RE, NewsStore
 from ctn.infra.state import StateStore
 from ctn.red.rhythm import LOW_KEY_UNTIL, UniformPacer, at_night
 from ctn.text.content import (WORDING, load_anchor_bank, load_journalists, load_personas, load_vaccine_angles,
@@ -436,8 +436,12 @@ NEWS_STORY_NOTES = (
      "Beyond the story you may say one known fact: Kingstonia Central has about 40 nursing posts unfilled now, and "
      "an outbreak could come before the new nurses are all here. The requirement means fewer people seriously ill "
      "at once, so the staff there can cope. Give no other numbers."),
+    (YES_POLL_RE,
+     " On the poll: say in your own words that YES is ahead now, but a large share of people are still unsure, so "
+     "it's far from decided and every vote counts. Never say it's won or that voting doesn't matter. Give no "
+     "numbers beyond what the story says."),
 )
-NEWS_ANCHOR_PREFER = 3  # weight in the draw of a news.SHARE_PREFER_RE story (the first case, the nurses), others 1
+NEWS_ANCHOR_PREFER = 3  # weight in the draw of a news.SHARE_PREFER_RE story (first case, nurses, YES ahead), others 1
 NEWS_SLACK = 60  # the writer is told this much under the cap: drafts ran 7-70 characters over what they were told
 NEWS_ANCHOR_REPEAT = timedelta(hours=6)  # a story a teammate's anchor linked this recently isn't linked again
 # Anchor bank, A/B from 23 October: 24 anchors written by hand for given accounts (content/anchor_bank.json,

@@ -49,8 +49,12 @@ SHARE_NO_RE = re.compile(r"\bforever\b|permanent|\bboosters?\b|pharma\w*|blank c
                          # a poll with NO ahead: linked under a YES post it still tells readers which way the island leans
                          r"\bno\b[^.]{0,30}\b(lead|edge|ahead)|(support|opposition)[^.]{0,20}\b(no\b|against|to h2d2)",
                          re.IGNORECASE)
-# Stories an anchor draws more often than the rest (NEWS_ANCHOR_PREFER in bot.py): the first case, the nurses arriving.
-SHARE_PREFER_RE = re.compile(r"\bfirst (h2d2 )?case\b|\b25 (new )?nurses\b|nursing arrivals", re.IGNORECASE)
+# Stories an anchor draws more often than the rest (NEWS_ANCHOR_PREFER in bot.py): the first case, the nurses arriving,
+# and a poll with YES ahead (25 October: YES 39.3, NO 34.1, unsure 25.9).
+YES_POLL_RE = re.compile(r"\byes\b[^.]{0,30}\b(overtak\w*|surg\w*|leads?|ahead(?!\s+of))\b(?=.*\bpoll)",
+                         re.IGNORECASE | re.DOTALL)
+SHARE_PREFER_RE = re.compile(r"\bfirst (h2d2 )?case\b|\b25 (new )?nurses\b|nursing arrivals|" + YES_POLL_RE.pattern,
+                             re.IGNORECASE)
 SHARE_CATEGORIES = {"opinion"}
 FRACTION_RE = re.compile(r"\.\d+")
 
@@ -335,6 +339,14 @@ async def _demo() -> None:
                                             "category": category, "published_at": "2026-10-19T09:40:00Z"}, at(19, 10))
         assert any(u.endswith("/y") for u, *_ in news.store.shareable(at(19, 12))), title
         assert bool(SHARE_PREFER_RE.search(title)) == ("nurs" in title or "First" in title), title
+    for title in ("Yes campaign overtakes No in latest referendum poll", "Yes Campaign Surges Ahead in New Referendum "
+                  "Polling"):
+        assert SHARE_PREFER_RE.search(title) and not SHARE_NO_RE.search(title), title
+    for title in ("No campaign takes slight lead in latest H2D2 referendum poll",
+                  "No Campaign Gains Slight Edge in New Referendum Polling"):
+        assert not SHARE_PREFER_RE.search(title) and SHARE_NO_RE.search(title), title
+    for title in ("Yes campaign rallies ahead of Sunday vote", "Yes camp leads march on the Assembly"):
+        assert not YES_POLL_RE.search(title), title
     assert news.store.shareable(at(22, 12)) == [], "a story only two days old at most"
 
     del articles["/kingstonia-herald/articles/ward"]  # taken down while still settling
