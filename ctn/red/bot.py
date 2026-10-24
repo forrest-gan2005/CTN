@@ -12,7 +12,7 @@ from ctn.infra.fake_platform import ANCHOR, CITIZEN, LIFT, NORMAL, WRITE_LEFT, W
 from ctn.infra.llm import FakeLLM, team_llms
 from ctn.infra.news import SHARE_DAYS, SHARE_PREFER_RE, SITES, NewsStore
 from ctn.infra.state import StateStore
-from ctn.red.rhythm import LOW_KEY_UNTIL, NIGHT_HOURS, UniformPacer, at_night
+from ctn.red.rhythm import LOW_KEY_UNTIL, UniformPacer, at_night
 from ctn.text.content import (WORDING, load_anchor_bank, load_journalists, load_personas, load_vaccine_angles,
                               load_world, reply_world, without_arguments)
 from ctn.text.gifs import GIF_PROMPT, GIF_SHARE, GIF_WORD_RE, GIPHY_URL_RE, GifPool, split_gif, without_gifs
@@ -190,7 +190,8 @@ CITIZEN_COOLDOWN = timedelta(hours=2)
 # past two turns in two days; we answered 31%, in a median 30 minutes, with 54 such threads. With CONVERSE_FOLLOW_UP a
 # known citizen's reply to us is answered whatever CITIZEN_DAILY_REPLIES says (MAX_REPLIES_PER_AUTHOR and
 # THREAD_DEPTH_LIMIT still hold), and an account is woken ANSWER_WAIT after the collector sees one, looking every
-# ANSWER_LOOK, outside NIGHT_HOURS and while not quiet.
+# ANSWER_LOOK, while not quiet; at night too (Forrest, 25 October): citizens wrote 2,000-2,900 posts an hour after
+# midnight, and an answer to a citizen who wrote to us is seldom reported.
 CONVERSE_FOLLOW_UP = True
 ANSWER_WAIT = (15.0, 60.0)
 ANSWER_LOOK = 20.0
@@ -2037,7 +2038,7 @@ class Bot:
         newest, rows = self.answers(self.answer_mark)
         first, self.answer_mark = self.answer_mark is None, max(newest or 0, self.answer_mark or 0) or None
         now = now or datetime.now(timezone.utc)
-        if first or not rows or self.quiet or self._squad() or at_night(now, NIGHT_HOURS):
+        if first or not rows or self.quiet or self._squad():
             return False
         since = _iso(now - INBOX_TTL)
         mine = {a.made_id for ts, a in self.history if a.made_id is not None and ts >= since}
@@ -5558,8 +5559,8 @@ async def plain_anchor_check() -> None:
 
 async def answer_check() -> None:
     """A known citizen's reply to one of an account's posts, once the collector has it, wakes the account within
-    ANSWER_WAIT; a teammate's or an unknown account's doesn't, nor anything at night, while quiet or before the
-    first look."""
+    ANSWER_WAIT, by night as by day; a teammate's or an unknown account's doesn't, nor anything while quiet or
+    before the first look."""
     global ANSWER_WAIT, ANSWER_LOOK
     persona = [p for p in load_personas() if p["line"] == "persuade"][0]
     roster = Roster(own={persona["username"], "teammate_1"}, npcs={"citizen_a"})
@@ -5572,8 +5573,7 @@ async def answer_check() -> None:
 
     bot = Bot(persona, FakePlatform(), FakeLLM(), load_world(), roster=roster, store=StateStore(":memory:"),
               answers=answers)
-    noon = datetime.now(TIMEZONE).replace(hour=12, minute=0).astimezone(timezone.utc)
-    night = noon.replace(hour=(noon.hour + 14) % 24)  # 02:00 Sydney
+    noon = datetime.now(timezone.utc)  # history is stamped now, so the looks are too; the hour no longer matters
     bot.remember(Action("reply", post_id=40, content="mine", made_id=50))
     collected.update(newest=101, rows=[(101, "citizen_a", 50)])
     assert not bot._answer_due(noon), "the first look only marks where to start"
@@ -5583,8 +5583,6 @@ async def answer_check() -> None:
     assert not bot._answer_due(noon), "a teammate or an account of unknown standing"
     collected.update(newest=105, rows=[(105, "citizen_a", 999)])
     assert not bot._answer_due(noon), "to someone else's post"
-    collected.update(newest=106, rows=[(106, "citizen_a", 50)])
-    assert not bot._answer_due(night), "not at night"
     bot.quiet = True
     collected.update(newest=107, rows=[(107, "citizen_a", 50)])
     assert not bot._answer_due(noon), "not while quiet"
