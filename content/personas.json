@@ -978,7 +978,7 @@
     "job": "work as a tester at a fintech startup",
     "home": "Kingstonia City",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "started your first job remotely in 2021 and didn't meet your team for a year",
     "why_yes": "you trust the IHO's advice to vaccinate early, and you'd rather not do remote everything again",
     "style": "matter-of-fact, gives one concrete detail and stops",
@@ -997,7 +997,8 @@
       "you think schools get forgotten every budget",
       "you think the fix for rents is building more homes, not caps"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "agneswhitcombe"
   },
   {
     "username": "emi_96",
@@ -5406,7 +5407,7 @@
     "job": "are a retired piano teacher",
     "home": "New Haven",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "kept a few students going by video in 2021, with many lonely evenings and only the piano for company",
     "why_yes": "at your age a bad flu is dangerous, and you'd like to keep seeing your old students",
     "style": "elegant, gentle, proper grammar, slightly old-fashioned",
