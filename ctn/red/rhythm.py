@@ -18,8 +18,10 @@ SESSION_GAP_MEDIAN = 45.0  # seconds between actions within one sitting
 # again when the team took to lifting anchor posts, which takes forty likes and twenty-five replies within minutes.
 SESSIONS_PER_DAY = (48.0, 72.0)
 FIRST_SITTING = (60.0, 600.0)  # seconds after coming online, or a restart, before a first look round
-# Low-key until the x4 days (Forrest, 24 October): every account sits down LOW_KEY_RATE as often till then.
-LOW_KEY_UNTIL = datetime(2026, 11, 1, tzinfo=TIMEZONE)
+# Low-key until LOW_KEY_UNTIL: every account sits down LOW_KEY_RATE as often till then. On from 02:35 to 11:30 on 24
+# October (Forrest): it cost about half the hourly score and suspensions went on regardless (22 that day, after one
+# from 09:38 to 23:42 the day before at full pace), so it ended there; the machinery stays for later.
+LOW_KEY_UNTIL = datetime(2026, 10, 24, 11, 30, tzinfo=TIMEZONE)
 LOW_KEY_RATE = 0.7
 
 

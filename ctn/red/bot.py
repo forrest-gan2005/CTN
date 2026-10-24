@@ -351,7 +351,8 @@ ANCHOR_REST = timedelta(minutes=75)
 # Low-key until the x4 days (Forrest, 24 October 02:25): from midnight to 02:16 that night ten accounts were suspended,
 # four of them clean ones that anchored, each within minutes of its anchor's first hide, and 36 of the 49 replies
 # ever hidden were lifts under our anchors. Until LOW_KEY_UNTIL (rhythm's, where every account also sits down less
-# often): one anchor an hour instead of two, fewer reply lifts each, and a slower, thinner rush.
+# often): one anchor an hour instead of two, fewer reply lifts each, and a slower, thinner rush. Ended at 11:30 that
+# morning (see rhythm.LOW_KEY_UNTIL).
 LOW_KEY_ANCHOR_GAP = timedelta(hours=1)
 LOW_KEY_LIFT_REPLIES = 10
 LOW_KEY_RUSH_PROB = 0.5
