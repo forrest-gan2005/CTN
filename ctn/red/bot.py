@@ -372,9 +372,9 @@ ANCHOR_HIDDEN_CAP = 2
 # report on it, one with fewer by its third hidden post only. Vertex's anchor accounts on Trending had made 9 to 21
 # posts in two days. So these accounts write the anchors and do nothing else (no likes, reposts, replies or
 # follows), stopping at SQUAD_ACTION_CAP actions and at ANCHOR_HIDDEN_CAP hidden posts; the rest of the team never
-# anchors, unless no anchor has gone up for SQUAD_GRACE and the slot is SQUAD_FALLBACK old.
-ANCHOR_SQUAD = frozenset({"semisilatu", "sitanifonua", "kavya2304", "jo_baptiste", "Tani_Fusitua", "hemi_parata",
-                          "AstridSolberg", "tina_faumuina", "faisal.rahman"})
+# anchors, unless no anchor has gone up for SQUAD_GRACE and the slot is SQUAD_FALLBACK old. Nine at first, five since
+# the evening of 24 October: with nine out of lifting our anchors got 31-38 reposts against Vertex's 45 and lost #1.
+ANCHOR_SQUAD = frozenset({"semisilatu", "kavya2304", "jo_baptiste", "hemi_parata", "AstridSolberg"})
 SQUAD_ACTION_CAP = 90
 SQUAD_GRACE = timedelta(minutes=75)
 SQUAD_FALLBACK = timedelta(minutes=20)
