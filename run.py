@@ -1698,6 +1698,7 @@ if __name__ == "__main__":
         from ctn.red import bot as bot_module
         # Pitches and anchor posts have their own checks; these expect a step's action to be the kind they set.
         bot_module.PITCH_PROB, bot_module.ANCHOR_LINES = 0.0, set()
+        bot_module.ANCHOR_SQUAD = frozenset()  # and the squad, whose accounts only anchor: ctn.red.bot's squad_check
         # The checks below were written before these; ctn.red.bot's own checks cover them, and smoke() runs with them.
         pinned = bot_module.CITIZEN_TARGETING, bot_module.STORY_REPLIES, bot_module.CITIZEN_DAILY_REPLIES
         bot_module.CITIZEN_TARGETING, bot_module.STORY_REPLIES = False, False

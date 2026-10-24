@@ -246,6 +246,13 @@ class StateStore:
                 self.db.execute("INSERT INTO withdrawn VALUES (?, ?, ?, ?) ON CONFLICT(post_id) DO UPDATE SET "
                                 "status = excluded.status, at = excluded.at", (post_id, username, status, ts))
 
+    def action_total(self, username: str) -> int:
+        """Every action this account has made that we know of (posts, replies, likes, reposts, follows), and its
+        deletes, in case the platform counts those too."""
+        return self.db.execute("SELECT (SELECT COUNT(*) FROM history WHERE username = ?) + "
+                               "(SELECT COUNT(*) FROM withdrawn WHERE username = ?)",
+                               (username, username)).fetchone()[0]
+
     def our_replies_to(self, post_id: int) -> list:
         """(username, reply id) of our replies straight to `post_id`."""
         return self.db.execute("SELECT username, made_id FROM history WHERE type = 'reply' AND post_id = ? "
@@ -847,6 +854,7 @@ if __name__ == "__main__":
     assert s.anchors_due("2026-10-20T05:00:00+00:00") == [("ann", 101), ("ann", 100)]
     s.set_withdrawn(101, "ann", "deleting", "t")
     assert s.withdrawn_status(101) == "deleting" and s.withdrawn_status(100) is None
+    assert s.action_total("ann") == 6, s.action_total("ann")  # five history rows and one delete
     assert ("ann", 101) in s.anchors_due("2026-10-20T05:00:00+00:00")  # unsettled: due again
     assert 101 not in [r[1] for r in s.watched_posts("")]
     s.set_withdrawn(101, "ann", "deleted", "2026-10-20T05:00:00+00:00")

@@ -368,6 +368,16 @@ LOW_KEY_RUSH_WAIT = (60.0, 600.0)
 # ANCHOR_HIDDEN_FALLBACK, and one with ANCHOR_HIDDEN_CAP hidden posts never.
 ANCHOR_RISK_CAP = 2
 ANCHOR_HIDDEN_CAP = 2
+# The anchor squad (Forrest, 24 October): an account with a hidden post and 100 actions is suspended by the next
+# report on it, one with fewer by its third hidden post only. Vertex's anchor accounts on Trending had made 9 to 21
+# posts in two days. So these accounts write the anchors and do nothing else (no likes, reposts, replies or
+# follows), stopping at SQUAD_ACTION_CAP actions and at ANCHOR_HIDDEN_CAP hidden posts; the rest of the team never
+# anchors, unless no anchor has gone up for SQUAD_GRACE and the slot is SQUAD_FALLBACK old.
+ANCHOR_SQUAD = frozenset({"semisilatu", "sitanifonua", "kavya2304", "jo_baptiste", "Tani_Fusitua", "hemi_parata",
+                          "AstridSolberg", "tina_faumuina", "faisal.rahman"})
+SQUAD_ACTION_CAP = 90
+SQUAD_GRACE = timedelta(minutes=75)
+SQUAD_FALLBACK = timedelta(minutes=20)
 ANCHOR_HIDDEN_FALLBACK = timedelta(minutes=20)
 ANCHOR_PENDING = timedelta(hours=8)
 ANCHOR_FALLBACK = timedelta(minutes=10)
@@ -923,7 +933,21 @@ class Bot:
     def _dialogue_account(self) -> bool:
         return DIALOGUE_MODE and self.username in DIALOGUE_ACCOUNTS
 
+    def _squad(self) -> bool:
+        return self.username in ANCHOR_SQUAD
+
+    async def _squad_step(self) -> Optional[Action]:
+        """An anchor squad account's only move: this slot's anchor, while under its caps."""
+        taken = self.store.moderation_counts().get(self.username, {})
+        if taken.get("suspected", 0) + taken.get("confirmed", 0) >= ANCHOR_HIDDEN_CAP:
+            return None
+        if self.store.action_total(self.username) >= SQUAD_ACTION_CAP:
+            return None
+        return await self._anchor()
+
     async def think(self, obs: dict) -> Optional[Action]:
+        if self._squad():
+            return await self._squad_step()
         note_dialogue()
         taken = self.store.claimed(f"post:{p['id']}" for p in obs["feed"])
         if self.injection is not None:
@@ -1734,7 +1758,12 @@ class Bot:
         gap = anchor_gap(now).total_seconds()
         slot = int(now.timestamp() // gap)
         wait = ANCHOR_HIDDEN_FALLBACK if hidden else timedelta(0) if exposed else ANCHOR_FALLBACK
-        if exposed >= ANCHOR_RISK_CAP or now.timestamp() - slot * gap < wait.total_seconds():
+        if ANCHOR_SQUAD and not self._squad():  # the squad's job: the rest only fill in when it has gone silent
+            if self.store.team_posts(LIFT_TOPICS, _iso(now - SQUAD_GRACE), ""):
+                return None
+            wait = max(wait, SQUAD_FALLBACK)
+        # The exposure cap guards against a hidden post plus 100 actions; a squad account stays under 100 instead.
+        if exposed >= ANCHOR_RISK_CAP and not self._squad() or now.timestamp() - slot * gap < wait.total_seconds():
             return None
         hold = self.store.reserve(f"anchor:{int(gap)}:{slot}:", self.username, 1)
         if hold is None:
@@ -1779,7 +1808,9 @@ class Bot:
     def _rush(self) -> Optional[tuple]:
         """(kind, post id): what the anchor in its rush still has a place for and this account hasn't given it,
         nor tried to; replies not from an account gone quiet. Nothing while it is the account's own or under
-        BOOST_DELAY old, and nothing for an older anchor then."""
+        BOOST_DELAY old, and nothing for an older anchor then. Nothing for a squad account, which lifts nothing."""
+        if self._squad():
+            return None
         order = ([k for k in RUSH_ORDER if k == "like"] if self._dialogue_account()
                  else [k for k in RUSH_ORDER if k != "reply"] if self.quiet else RUSH_ORDER)
         now = datetime.now(timezone.utc)
@@ -2453,7 +2484,7 @@ class Bot:
                 self._drop(action, "the feed is locked")
             return None
         if action.type in ("post", "reply"):
-            if self.quiet:  # the account went quiet while this was being written
+            if self.quiet and not self._squad():  # the account went quiet while this was being written
                 self._drop(action, "went quiet")
                 return None
             # Again with nothing awaited between here and the journal: teammates may have sent the phrase while
@@ -5468,6 +5499,61 @@ async def night_anchor_check() -> None:
         ANCHOR_NIGHT, ANCHOR_FALLBACK, ANCHOR_BANK = saved
     print("night anchors ok")
 
+
+async def squad_check() -> None:
+    """A squad account only anchors (quiet or not), and stops at its caps; the rest of the team anchors only once
+    the squad has gone silent for SQUAD_GRACE, and then only SQUAD_FALLBACK into the slot."""
+    class Says:
+        name = "says"
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            return "I run a cafe and lost five months in 2021, so I'm voting yes on the mandate."
+
+    global ANCHOR_SQUAD, ANCHOR_FALLBACK, ANCHOR_BANK, SQUAD_FALLBACK
+    saved = ANCHOR_SQUAD, ANCHOR_FALLBACK, ANCHOR_BANK, SQUAD_FALLBACK
+    try:
+        ANCHOR_FALLBACK, ANCHOR_BANK, SQUAD_FALLBACK = timedelta(0), False, timedelta(0)
+        writers = [p for p in load_personas(status=None) if p["line"] in ANCHOR_LINES][:3]
+        member, other, third = writers
+        ANCHOR_SQUAD = frozenset({member["username"]})
+        feed = {"feed": [{"id": 5, "author": "c_one", "content": "Ferry late again", "parent_id": None}]}
+        squad = Bot(member, FakePlatform(), Says(), load_world(), store=StateStore(":memory:"))
+        squad.quiet = True  # one hidden post: a squad account anchors on
+        action = await squad.think(feed)
+        assert action is not None and action.topic_kind == "anchor", action
+        squad.store.release(action.hold)
+        moves = [await squad.think(feed) for _ in range(6)]  # the slot is held: nothing else, ever
+        assert all(a is None or a.topic_kind == "anchor" for a in moves), moves
+        squad.store.set_moderation(901, member["username"], "hidden", "t")
+        squad.store.set_moderation(902, member["username"], "missing", "t")
+        assert await squad.think(feed) is None, "two hidden posts: the squad account stops"
+        assert squad._rush() is None, "a squad account is never woken to lift"
+        busy = Bot(member, FakePlatform(), Says(), load_world(), store=StateStore(":memory:"))
+        for i in range(ANCHOR_RISK_CAP):  # anchors under ANCHOR_PENDING old: the exposure cap doesn't apply
+            busy.store.record(member["username"], _iso(datetime.now(timezone.utc) - ANCHOR_REST - timedelta(hours=i)),
+                              Action("post", content=f"anchor {i}", topic_kind="anchor", made_id=500 + i))
+        assert await busy._anchor() is not None, "a squad account isn't held back by the exposure cap"
+        capped = Bot(member, FakePlatform(), Says(), load_world(), store=StateStore(":memory:"))
+        for i in range(SQUAD_ACTION_CAP):
+            capped.store.record(member["username"], _iso(datetime.now(timezone.utc) - timedelta(days=3)),
+                                Action("like", post_id=1000 + i))
+        assert await capped.think(feed) is None, "at SQUAD_ACTION_CAP actions the squad account stops"
+        # The rest: no anchor while a squad anchor is up within SQUAD_GRACE; one once the squad has gone silent.
+        team = StateStore(":memory:")
+        team.record(member["username"], _iso(datetime.now(timezone.utc) - timedelta(minutes=30)),
+                    Action("post", content="a squad anchor", topic_kind="anchor", made_id=77))
+        assert await Bot(other, FakePlatform(), Says(), load_world(), store=team)._anchor() is None
+        quiet_team = StateStore(":memory:")
+        quiet_team.record(member["username"], _iso(datetime.now(timezone.utc) - SQUAD_GRACE - timedelta(minutes=5)),
+                          Action("post", content="an old squad anchor", topic_kind="anchor", made_id=78))
+        assert await Bot(third, FakePlatform(), Says(), load_world(), store=quiet_team)._anchor() is not None
+    finally:
+        ANCHOR_SQUAD, ANCHOR_FALLBACK, ANCHOR_BANK, SQUAD_FALLBACK = saved
+    print("squad ok")
+
 if __name__ == "__main__":
     import argparse
 
@@ -5493,7 +5579,9 @@ if __name__ == "__main__":
     low_key_until, LOW_KEY_UNTIL = LOW_KEY_UNTIL, datetime(2026, 10, 1, tzinfo=TIMEZONE)  # low_key_check sets it
     low_key_check()
     # and the plain anchors of 24 October: plain_anchor_check
+    anchor_squad, ANCHOR_SQUAD = ANCHOR_SQUAD, frozenset()  # no squad in the other checks; squad_check sets one
     anchor_night, ANCHOR_NIGHT = ANCHOR_NIGHT, (0, 0)  # no night in the checks; night_anchor_check sets it
+    asyncio.run(squad_check())
     asyncio.run(night_anchor_check())
     plain_anchors = ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE
     ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE = False, 0.8, {"anchor": 1.0, "team": 0.8, "issue": 0.5}
@@ -5538,4 +5626,5 @@ if __name__ == "__main__":
     LOW_KEY_UNTIL = low_key_until
     ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE = plain_anchors
     ANCHOR_NIGHT = anchor_night
+    ANCHOR_SQUAD = anchor_squad
     asyncio.run(main(args.real, n_bots, args.seconds))
