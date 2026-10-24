@@ -265,6 +265,13 @@ class RealPlatform:
     async def follow(self, username: str, target: str) -> bool:
         return await self._toggle("POST", f"/accounts/{await self.account_id(target)}/follow", username)
 
+    async def set_private(self, username: str, private: bool = True) -> None:
+        """Make `username`'s profile private, or public again: its profile page then shows its posts to nobody but
+        itself and the organisers, while the posts stay in the feeds and on Trending."""
+        resp = await self._call("PUT", f"/accounts/{await self.account_id(username)}/private", username,
+                                json={"private": private})
+        resp.raise_for_status()
+
     async def delete_post(self, username: str, post_id: int) -> bool:
         """Delete one of `username`'s own posts; False if the platform had no such post to delete."""
         resp = await self._call("DELETE", f"/posts/{post_id}", username)

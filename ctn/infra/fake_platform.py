@@ -111,6 +111,10 @@ class FakePlatform:
         self._notify(post["author"], "repost", username, post_id)
         return True
 
+    async def set_private(self, username: str, private: bool = True) -> None:
+        self.private = getattr(self, "private", set())
+        (self.private.add if private else self.private.discard)(username)
+
     async def delete_post(self, username: str, post_id: int) -> bool:
         if post_id not in self.posts:
             return False

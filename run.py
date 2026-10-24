@@ -47,6 +47,10 @@ WORRY_WINDOW = timedelta(hours=2)  # the NO worries citizens raise, for posts th
 TEAM_RECENT = 1000  # our latest posts every new draft is checked against for paraphrase
 STATUS_EVERY = 1800.0
 LOGIN_RETRY = 60.0  # seconds between login attempts
+# Private profiles, a trial from 25 October (Forrest): a private account's posts still reach the feeds and Trending
+# (tevita.lolo held three of its top five so), but other teams can't page through its history to pick it for an
+# account report. Two anchor squad accounts and two of the busiest repliers to citizens; set after each login.
+PRIVATE_ACCOUNTS = {"kavya2304", "semisilatu", "thanh_ng", "mele_d"}
 RECONCILE_EVERY = 300.0
 UNRESOLVED_GIVE_UP = timedelta(minutes=30)  # the collector reads Latest every few seconds, so by then it would show
 CLOCK_SKEW = timedelta(minutes=5)
@@ -362,11 +366,21 @@ class Team:
             try:
                 await asyncio.wait_for(self.platform.ensure_account(username, self.names[username]),
                                        until - loop.time())
+                if username in PRIVATE_ACCOUNTS:
+                    await self._make_private(username)
                 return True
             except Exception as e:
                 log.warning("%s could not log in (%s)", username, str(e) or type(e).__name__)
                 await asyncio.sleep(max(0.0, min(LOGIN_RETRY, until - loop.time())))
         return False
+
+    async def _make_private(self, username: str) -> None:
+        """Set a PRIVATE_ACCOUNTS profile private once logged in; a failure is logged and the account runs as is."""
+        try:
+            await self.platform.set_private(username, True)
+            log.info("%s's profile is private", username)
+        except Exception as e:
+            log.warning("couldn't make %s's profile private (%s)", username, str(e) or type(e).__name__)
 
     async def _start(self, bot: Bot, until: float) -> None:
         """Hold a bot until its start time, log it in, then let it run; all within this run's deadline."""
