@@ -355,6 +355,9 @@ ANCHOR_REST = timedelta(minutes=75)
 # morning (see rhythm.LOW_KEY_UNTIL).
 # Sydney hours with no anchor post (see rhythm.NIGHT_HOURS): the last one's 3-hour delete is done by 01:00.
 ANCHOR_NIGHT = (22, 7)
+# No anchors in this window either (Forrest, 24 October): from about 15:00 that day Trending posts below #1 got
+# almost no NPC views, so an anchor short of #1 scored nothing and only risked a report.
+ANCHOR_PAUSE = (datetime(2026, 10, 24, 20, 45, tzinfo=TIMEZONE), datetime(2026, 10, 25, 7, 0, tzinfo=TIMEZONE))
 LOW_KEY_ANCHOR_GAP = timedelta(hours=1)
 LOW_KEY_LIFT_REPLIES = 10
 LOW_KEY_RUSH_PROB = 0.5
@@ -1744,7 +1747,7 @@ class Bot:
         if MENTION_EXPERIMENT and self.username in MENTION_ACCOUNTS or self._dialogue_account():
             return None
         now = datetime.now(timezone.utc)
-        if at_night(now, ANCHOR_NIGHT):
+        if at_night(now, ANCHOR_NIGHT) or ANCHOR_PAUSE[0] <= now < ANCHOR_PAUSE[1]:
             return None
         if any(a.topic_kind == "anchor" and datetime.fromisoformat(ts) > now - ANCHOR_REST for ts, a in self.history):
             return None
@@ -5485,18 +5488,22 @@ async def night_anchor_check() -> None:
         async def generate(self, system: str, prompt: str) -> Optional[str]:
             return "I run a cafe and lost five months in 2021, so I'm voting yes on the mandate."
 
-    global ANCHOR_NIGHT, ANCHOR_FALLBACK, ANCHOR_BANK
-    saved = ANCHOR_NIGHT, ANCHOR_FALLBACK, ANCHOR_BANK
+    global ANCHOR_NIGHT, ANCHOR_FALLBACK, ANCHOR_BANK, ANCHOR_PAUSE
+    saved = ANCHOR_NIGHT, ANCHOR_FALLBACK, ANCHOR_BANK, ANCHOR_PAUSE
     try:
         ANCHOR_FALLBACK, ANCHOR_BANK = timedelta(0), False
+        ANCHOR_PAUSE = (datetime(2000, 1, 1, tzinfo=TIMEZONE),) * 2
         writer = [p for p in load_personas(status=None) if p["line"] in ANCHOR_LINES][0]
         hour = datetime.now(timezone.utc).astimezone(TIMEZONE).hour
         ANCHOR_NIGHT = ((hour - 1) % 24, (hour + 2) % 24)  # now is night, whatever minute the hour turns
         assert await Bot(writer, FakePlatform(), Says(), load_world(), store=StateStore(":memory:"))._anchor() is None
         ANCHOR_NIGHT = ((hour + 3) % 24, (hour + 5) % 24)  # now is day
         assert await Bot(writer, FakePlatform(), Says(), load_world(), store=StateStore(":memory:"))._anchor()
+        now = datetime.now(timezone.utc)
+        ANCHOR_PAUSE = (now - timedelta(minutes=5), now + timedelta(minutes=5))  # day, but paused
+        assert await Bot(writer, FakePlatform(), Says(), load_world(), store=StateStore(":memory:"))._anchor() is None
     finally:
-        ANCHOR_NIGHT, ANCHOR_FALLBACK, ANCHOR_BANK = saved
+        ANCHOR_NIGHT, ANCHOR_FALLBACK, ANCHOR_BANK, ANCHOR_PAUSE = saved
     print("night anchors ok")
 
 
@@ -5581,6 +5588,7 @@ if __name__ == "__main__":
     # and the plain anchors of 24 October: plain_anchor_check
     anchor_squad, ANCHOR_SQUAD = ANCHOR_SQUAD, frozenset()  # no squad in the other checks; squad_check sets one
     anchor_night, ANCHOR_NIGHT = ANCHOR_NIGHT, (0, 0)  # no night in the checks; night_anchor_check sets it
+    anchor_pause, ANCHOR_PAUSE = ANCHOR_PAUSE, (datetime(2000, 1, 1, tzinfo=TIMEZONE),) * 2  # nor the pause
     asyncio.run(squad_check())
     asyncio.run(night_anchor_check())
     plain_anchors = ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE
@@ -5626,5 +5634,6 @@ if __name__ == "__main__":
     LOW_KEY_UNTIL = low_key_until
     ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE = plain_anchors
     ANCHOR_NIGHT = anchor_night
+    ANCHOR_PAUSE = anchor_pause
     ANCHOR_SQUAD = anchor_squad
     asyncio.run(main(args.real, n_bots, args.seconds))
