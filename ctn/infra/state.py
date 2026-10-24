@@ -237,6 +237,16 @@ class StateStore:
             "AND NOT EXISTS (SELECT 1 FROM moderation m WHERE m.post_id = h.made_id AND m.status != 'restored') "
             "ORDER BY ts DESC", (before,)).fetchall()
 
+    def lifts_due(self, since: str = "") -> list:
+        """(username, reply id) of our replies since `since` straight to posts we deleted, newest first, that aren't
+        deleted yet and aren't known to be taken down."""
+        return self.db.execute(
+            "SELECT h.username, h.made_id FROM history h JOIN withdrawn p ON p.post_id = h.post_id "
+            "WHERE h.type = 'reply' AND h.made_id IS NOT NULL AND p.status = 'deleted' AND h.ts >= ? "
+            "AND NOT EXISTS (SELECT 1 FROM withdrawn w WHERE w.post_id = h.made_id AND w.status = 'deleted') "
+            "AND NOT EXISTS (SELECT 1 FROM moderation m WHERE m.post_id = h.made_id AND m.status != 'restored') "
+            "ORDER BY h.ts DESC", (since,)).fetchall()
+
     def set_withdrawn(self, post_id: int, username: str, status: Optional[str], ts: str) -> None:
         """Record a delete of ours as being sent or done; status None forgets it (the post is watched again)."""
         with self.db:
@@ -862,7 +872,8 @@ if __name__ == "__main__":
     s.record("bea", "2026-10-20T06:00:00+00:00", A("reply", post_id=101, content="r", made_id=120))
     s.record("bea", "2026-10-20T06:00:00+00:00", A("reply", post_id=102, content="r", made_id=121))
     assert s.parent_withdrawn(120) and not s.parent_withdrawn(121) and not s.parent_withdrawn(101)
-    assert s.replies_to_withdrawn() == [("bea", 120)]
+    assert s.replies_to_withdrawn() == [("bea", 120)] and s.lifts_due() == [("bea", 120)]
+    assert s.lifts_due("2026-10-20T07:00:00+00:00") == []
     s.set_withdrawn(100, "ann", "deleting", "t")
     s.set_withdrawn(100, "ann", None, "t")
     assert 100 in [r[1] for r in s.watched_posts("")]

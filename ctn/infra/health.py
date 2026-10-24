@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from ctn.infra.fake_platform import ANCHOR, WRITE_PRIORITY, RateLimited
+from ctn.infra.fake_platform import ANCHOR, LIFT, WRITE_PRIORITY, RateLimited
 
 log = logging.getLogger("health")
 
@@ -38,6 +38,13 @@ WITHDRAW_AFTER = timedelta(hours=3)
 WITHDRAW_EVERY = 300.0
 REPLIES_KEY = "withdraw_replies"  # meta: whether our replies survive a deleted post ("survive" | "vanish")
 WITHDRAW_BATCH = 5  # a look and a delete each; the looks share Health's pace, the deletes the write lane
+# Teammates' replies lifting an anchor go once the anchor has (WITHDRAW_LIFTS), as soon as replies are known to outlive
+# it: on 24 October six lift replies, 5-6.5 hours old, were hidden after their anchors had been deleted at 3 hours,
+# and two of their accounts were suspended within the hour. With the anchor gone they lift nothing. A loop of their
+# own, so a delete waiting in the write lane never holds up an anchor's, at LIFT priority (behind citizen replies,
+# ahead of ordinary writes), and only those under LIFTS_MAX_AGE: every reply hidden to 24 October went within 12 hours.
+WITHDRAW_LIFTS = True
+LIFTS_MAX_AGE = timedelta(hours=24)
 
 
 def outcome(post: dict) -> str:
@@ -194,7 +201,7 @@ class Withdraw:
     for good (kept in meta across restarts)."""
 
     def __init__(self, platform, state, health: Health, online, locked=lambda: False,
-                 interval: float = WITHDRAW_EVERY, batch: int = WITHDRAW_BATCH) -> None:
+                 interval: float = WITHDRAW_EVERY, batch: int = WITHDRAW_BATCH, lifts: bool = False) -> None:
         self.platform = platform
         self.state = state
         self.health = health
@@ -202,6 +209,7 @@ class Withdraw:
         self.locked = locked
         self.interval = interval
         self.batch = batch
+        self.lifts = lifts  # this loop deletes lift replies under deleted anchors instead of anchors
         self.refused = set()  # accounts the platform refused a delete as suspended or blocked: left alone this run
         self.skipped = set()  # posts it refused a delete for any other reason: left alone this run
         found = state.get_meta(REPLIES_KEY)  # "survive" | "vanish", once looked at
@@ -215,16 +223,20 @@ class Withdraw:
         whose reply is looked at again, one at a time."""
         if self.stopped or self.locked():
             return 0
+        if self.lifts and (not WITHDRAW_LIFTS or self.state.get_meta(REPLIES_KEY) != "survive"):
+            return 0
         if self.probe is not None and self.state.withdrawn_status(self.probe[0]) == "deleted":
             await self._look_under()
             if self.stopped:
                 return 0
         now = datetime.now(timezone.utc)
         online = set(self.online())
-        due = [(u, p) for u, p in self.state.anchors_due(_iso(now - WITHDRAW_AFTER))
-               if u in online and u not in self.refused and p not in self.skipped]
+        due = ([(u, p, False) for u, p in self.state.lifts_due(_iso(now - LIFTS_MAX_AGE))] if self.lifts
+               else [(u, p, True) for u, p in self.state.anchors_due(_iso(now - WITHDRAW_AFTER))])
+        due = [(u, p, a) for u, p, a in due if u in online and u not in self.refused and p not in self.skipped]
         deleted = 0
-        for username, post_id in due[:self.batch]:
+        for username, post_id, is_anchor in due[:self.batch]:
+            kind = "anchor" if is_anchor else "lift reply"
             if username in self.refused or self.stopped or self.locked():
                 continue
             sent = self.state.withdrawn_status(post_id) == "deleting"
@@ -234,21 +246,21 @@ class Withdraw:
             except KeyError:
                 status = "missing"
             except RateLimited:
-                log.warning("rate limited looking at %s's anchor #%s; the rest wait", username, post_id)
+                log.warning("rate limited looking at %s's %s #%s; the rest wait", username, kind, post_id)
                 break
             except Exception as e:
-                log.warning("couldn't look at %s's anchor #%s: %s", username, post_id, str(e) or type(e).__name__)
+                log.warning("couldn't look at %s's %s #%s: %s", username, kind, post_id, str(e) or type(e).__name__)
                 continue
             if status != "visible":
                 if sent and status == "missing":
                     self.state.set_withdrawn(post_id, username, "deleted", _iso(datetime.now(timezone.utc)))
                     deleted += 1
-                    log.info("%s's anchor #%s is gone after our delete", username, post_id)
+                    log.info("%s's %s #%s is gone after our delete", username, kind, post_id)
                     continue
                 self.state.set_withdrawn(post_id, username, None, "")  # taken down before our delete landed
                 self.health.record(username, post_id, status)
                 continue
-            if self.replies_survive is None and self._untaken(post_id):
+            if is_anchor and self.replies_survive is None and self._untaken(post_id):
                 if self.probe is not None:
                     continue  # one such delete at a time until the question is settled
                 self.probe = await self._probe_for(post_id)
@@ -257,11 +269,11 @@ class Withdraw:
             self.state.set_withdrawn(post_id, username, "deleting", _iso(datetime.now(timezone.utc)))
             # Ahead of every queued write: at NORMAL a delete waited 15+ minutes in the write lane on 24 October,
             # and anchors were hidden and their accounts suspended 3.3 to 4.3 hours after posting while it waited.
-            priority = WRITE_PRIORITY.set(ANCHOR)
+            priority = WRITE_PRIORITY.set(ANCHOR if is_anchor else LIFT)
             try:
                 await self.platform.delete_post(username, post_id)
             except RateLimited:
-                log.warning("rate limited deleting %s's anchor #%s; tried again next round", username, post_id)
+                log.warning("rate limited deleting %s's %s #%s; tried again next round", username, kind, post_id)
                 self._drop_probe(post_id)
                 break
             except Exception as e:
@@ -274,16 +286,17 @@ class Withdraw:
                     else:
                         self.skipped.add(post_id)
                     self.state.set_withdrawn(post_id, username, None, "")
-                    log.warning("couldn't delete %s's anchor #%s: HTTP %s %s", username, post_id, code, text)
+                    log.warning("couldn't delete %s's %s #%s: HTTP %s %s", username, kind, post_id, code, text)
                 else:  # lost on the way: the next look settles it
-                    log.warning("couldn't delete %s's anchor #%s: %s", username, post_id, str(e) or type(e).__name__)
+                    log.warning("couldn't delete %s's %s #%s: %s", username, kind, post_id, str(e) or type(e).__name__)
                 self._drop_probe(post_id)
                 continue
             finally:
                 WRITE_PRIORITY.reset(priority)
             self.state.set_withdrawn(post_id, username, "deleted", _iso(datetime.now(timezone.utc)))
             deleted += 1
-            log.info("deleted %s's anchor #%s, past its time on Trending", username, post_id)
+            log.info("deleted %s's %s #%s, %s", username, kind, post_id,
+                     "past its time on Trending" if is_anchor else "its anchor deleted")
         return deleted
 
     def _drop_probe(self, post_id: int) -> None:
@@ -559,6 +572,44 @@ async def _demo() -> None:
         assert state.moderation_status(81) is None and state.moderation_status(85) is None
         again = Withdraw(p, state, health, online=lambda: {"ann"})
         assert again.stopped == vanishes and again.replies_survive is (not vanishes), "kept in meta"
+
+    # Once replies are known to outlive their post, a lift reply goes after its anchor, at the write lane's normal
+    # priority; not before that is known, nor while its anchor is still up.
+    p, state = Deleting(), StateStore(":memory:")
+    anchor(state, "ann", 90, timedelta(hours=4))
+    anchor(state, "ann", 92, timedelta(hours=1))
+    for reply, parent in ((91, 90), (93, 92)):
+        state.record("cat", _iso(datetime.now(timezone.utc) - timedelta(minutes=50)),
+                     Action("reply", post_id=parent, content="lift", made_id=reply))
+    p.answers = {i: {"hidden": False} for i in (90, 91, 92, 93)}
+    priorities = []
+    deletes = p.delete_post
+
+    async def noting(username: str, post_id: int) -> bool:
+        priorities.append((post_id, WRITE_PRIORITY.get()))
+        return await deletes(username, post_id)
+
+    p.delete_post = noting
+    state.set_meta(REPLIES_KEY, "survive")
+    health = Health(p, state, pace=0)
+    w = Withdraw(p, state, health, online=lambda: {"ann", "cat"})
+    lifts = Withdraw(p, state, health, online=lambda: {"ann", "cat"}, lifts=True)
+    assert await lifts.withdraw() == 0, "no lift reply is due while its anchor is up"
+    assert await w.withdraw() == 1 and p.deleted == [90], "the anchor loop deletes anchors only"
+    assert await lifts.withdraw() == 1 and p.deleted == [90, 91], "then the lift loop its lift reply"
+    assert priorities == [(90, ANCHOR), (91, LIFT)] and state.withdrawn_status(93) is None
+    state.set_meta(REPLIES_KEY, "")
+    anchor(state, "ann", 94, timedelta(hours=5))
+    state.record("cat", _iso(datetime.now(timezone.utc) - timedelta(hours=4)),
+                 Action("reply", post_id=94, content="lift", made_id=95))
+    p.answers.update({94: {"hidden": False}, 95: {"hidden": False}})
+    await w.withdraw()
+    assert await lifts.withdraw() == 0, "nothing until replies are known to outlive their post"
+    state.set_meta(REPLIES_KEY, "survive")
+    state.record("cat", _iso(datetime.now(timezone.utc) - LIFTS_MAX_AGE - timedelta(hours=1)),
+                 Action("reply", post_id=94, content="old lift", made_id=96))
+    p.answers[96] = {"hidden": False}
+    assert await lifts.withdraw() == 1 and 95 in p.deleted and 96 not in p.deleted, "past LIFTS_MAX_AGE: left"
 
     class Racing(Deleting):
         """Our delete lands while Health's round is under way."""

@@ -120,8 +120,9 @@ class Team:
                                  side=BLUE_SIDE)
         self.health = Health(platform, state)
         self.online = set()
-        self.withdraw = (Withdraw(platform, state, self.health, online=lambda: self.online, locked=lambda: self.locked)
-                         if WITHDRAW else None)
+        self.withdraw = ([Withdraw(platform, state, self.health, online=lambda: self.online,
+                                   locked=lambda: self.locked, lifts=lifts) for lifts in (False, True)]
+                         if WITHDRAW else [])  # anchors, and the lift replies under deleted ones
         self._logins = {}  # username -> the one login task its users share
         self.set_quiet(self.health.quiet())
         self.refresh()
@@ -453,7 +454,7 @@ class Team:
                 self.collector.run(until),
                 self._blue(until),
                 self.health.run(until, on_change=self.set_quiet),
-                *([self.withdraw.run(until)] if self.withdraw is not None else []),
+                *(w.run(until) for w in self.withdraw),
                 *(self._start(bot, until) for bot in self.bots),
             )
         finally:
