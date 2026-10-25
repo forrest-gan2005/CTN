@@ -32,9 +32,10 @@ HEALTH_BATCH = 150
 # hid anchors came later: of 61 hidden to 24 October, 57 were hidden 3+ hours after posting, many in waves such as
 # the one just after midnight, when each team's daily report allowance starts again. A report already in is still
 # ruled, so an anchor is deleted WITHDRAW_AFTER posting (if the platform still shows it), older ones too, which
-# leaves later reports nothing to land on. Points already scored stay.
+# leaves later reports nothing to land on. Points already scored stay. Two hours from 25 October (Forrest): an anchor
+# squad account was suspended for three hidden anchors, three of its six in a day hidden before the 3-hour delete.
 WITHDRAW = True
-WITHDRAW_AFTER = timedelta(hours=3)
+WITHDRAW_AFTER = timedelta(hours=2)
 WITHDRAW_EVERY = 300.0
 REPLIES_KEY = "withdraw_replies"  # meta: whether our replies survive a deleted post ("survive" | "vanish")
 WITHDRAW_BATCH = 5  # a look and a delete each; the looks share Health's pace, the deletes the write lane

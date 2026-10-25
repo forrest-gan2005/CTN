@@ -141,9 +141,8 @@ STORY_LEAD = {
     "yes": "They lean YES already; add no 'but' and no condition.",
     "yes-but": "They lean YES with a condition; don't take the condition up or add one of your own.",
 }
-STORY_GUIDE = ("Answer in one or two sentences about one concrete person or livelihood (someone waiting on a "
-               "transplant, a resident in aged care, a class of kids, a market stall, the island clinic): your own if "
-               "your life has one, otherwise people like them. End with a plain statement, in your own words, that "
+STORY_GUIDE = ("Answer in one or two sentences about one concrete person or livelihood: your own if your life has "
+               "one, otherwise people like them. End with a plain statement, in your own words, that "
                "you're voting yes. If one fact given above settles their worry outright (the certificate is separate "
                "from the ID card, under-12s aren't covered, medical exemptions), you may give it instead. Don't end "
                "with a question. Don't grant a condition or say you'd want one (an end date, a review, a list of "
@@ -161,14 +160,39 @@ STORY_AVOID_RE = re.compile(r"\b(not|isn'?t|aren'?t) on the ballot|\brules? out 
 # cut it; when they answer, the follow-up speaks to that
 # worry (a conversation reply, as ever). Each such reply's angle ends " elicit:1", the others it could have been
 # " elicit:0", to compare answers and agreement.
-ELICIT_SHARE = 0.5
+ELICIT_SHARE = 1.0  # 0.5 to 25 October noon: asking first was answered 14 of 58 times, the other 1 of 36
 ELICIT_LEANS = {"undecided", "no"}
 ELICIT_GUIDE = ("In one or two sentences, say in your own words that you're voting yes and give one concrete reason "
-                "from your own life or work. Then end with one short, open question asking what would matter most "
-                "to them in deciding, or, if they haven't said what bothers them, what worries them most about it. "
-                "Ask it as a genuine question, not a rhetorical one, and don't suggest an answer. Don't grant a "
-                "condition or say you'd want one (an end date, a review, a list of places), and never claim the "
-                "proposal has one.")
+                "from your own life or work. Then end with one short, open question, in your own words, from the "
+                "angle given next. Ask it as a genuine question, not a rhetorical one, and don't suggest an answer. "
+                "Don't grant a condition or say you'd want one (an end date, a review, a list of places), and never "
+                "claim the proposal has one.")
+# Variety (25 October): with one list of examples in STORY_GUIDE and one question in ELICIT_GUIDE, "on the transplant
+# list", "in aged care" and "weighing on you most" sank 50 drafts in four hours as phrases four teammates had used. Each
+# reply now gets STORY_PEOPLE_SHOWN people drawn from STORY_PEOPLE, and an asking one an angle from ELICIT_ANGLES.
+STORY_PEOPLE = ("a grandparent on dialysis", "a newborn too young for the jab", "someone halfway through cancer "
+                "treatment", "a fishing crew that can't work sick", "a café that shut for months in 2021", "a bus "
+                "driver who takes older people to appointments", "a nurse covering double shifts", "a school canteen",
+                "a sports club that lost a season", "a tourist lodge on an outer island", "a pharmacy counter in flu "
+                "season", "a market stall", "the island clinic", "someone waiting on a transplant", "a resident in "
+                "aged care", "a building crew that all got sick in the same week", "a class of kids", "a church "
+                "choir with older members")
+STORY_PEOPLE_SHOWN = 3
+ELICIT_ANGLES = ("what they'd most want to know before they vote", "how it would land in their own work or family",
+                 "which part they're still unsure about", "who they're thinking of when they decide", "what they've "
+                 "heard that gives them pause", "what a bad winter would mean for them", "what would make the choice "
+                 "feel easier", "what matters most to them in deciding")
+ELICIT_AVOID = "Don't say \"weighing on you\" or \"what worries you most\"."
+
+
+def story_people() -> str:
+    return "People you might draw on: " + "; ".join(random.sample(STORY_PEOPLE, STORY_PEOPLE_SHOWN)) + "."
+
+
+def elicit_angle() -> str:
+    return f"The angle for your question: {random.choice(ELICIT_ANGLES)}. {ELICIT_AVOID}"
+
+
 FOLLOW_UP_GUIDE = ("If they have told you what worries them, answer that worry directly, with one concrete fact given "
                    "above or one person or livelihood from your own life, and don't ask another question.")
 # Told only to add "a short story or another reason", three in five teammates' replies under an anchor went back to
@@ -410,7 +434,7 @@ ANCHOR_HIDDEN_CAP = 2
 # follows), stopping at SQUAD_ACTION_CAP actions and at ANCHOR_HIDDEN_CAP hidden posts; the rest of the team never
 # anchors, unless no anchor has gone up for SQUAD_GRACE and the slot is SQUAD_FALLBACK old. Nine at first, five since
 # the evening of 24 October: with nine out of lifting our anchors got 31-38 reposts against Vertex's 45 and lost #1.
-ANCHOR_SQUAD = frozenset({"semisilatu", "kavya2304", "jo_baptiste", "hemi_parata", "AstridSolberg"})
+ANCHOR_SQUAD = frozenset({"semisilatu", "kavya2304", "teuilatoleafoa", "hemi_parata", "AstridSolberg"})
 SQUAD_ACTION_CAP = 90
 SQUAD_GRACE = timedelta(minutes=75)
 SQUAD_FALLBACK = timedelta(minutes=20)
@@ -2304,8 +2328,8 @@ class Bot:
             if on_referendum:
                 shape = f" {random.choices(*zip(*TEAM_SHAPES))[0]}" if topic[1] == "team" else ""
                 lead = STORY_LEAD.get(topic[1], "Respond to their actual point.")
-                guide = (f"{lead} {ELICIT_GUIDE}" if story and self.eliciting
-                         else f"{lead} {STORY_GUIDE}" if story
+                guide = (f"{lead} {ELICIT_GUIDE} {elicit_angle()}" if story and self.eliciting
+                         else f"{lead} {STORY_GUIDE} {story_people()}" if story
                          else reply_guide(self.writing_arm or arm(), topic[1]))
                 parts.append(f"{guide}{shape} Never agree that the mandate is unfair and never make their argument "
                              "for them.")
