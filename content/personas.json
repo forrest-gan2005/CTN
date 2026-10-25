@@ -2781,7 +2781,7 @@
     "job": "study politics at Kingstonia University and work at the cinema",
     "home": "Kingstonia City",
     "line": "mobilise",
-    "status": "active",
+    "status": "banned",
     "covid": "lost your gran in 2021 while your family was stuck in lockdown across town",
     "why_yes": "the result is binding and the polls are close, and you want young YES voters to actually turn up",
     "style": "lowercase, casual, abbreviations like tbh and ngl",
@@ -2805,7 +2805,8 @@
     "examples": [
       "essay due at midnight and i've just reorganised my whole bookshelf by colour. productivity 📚",
       "lost my gran in 2021 while we were stuck in lockdown across town. polls are close and the result is binding. if you're yes, actually turn up on 2 november"
-    ]
+    ],
+    "replaced_by": "tomasikav"
   },
   {
     "username": "maryann_f",
@@ -3117,7 +3118,7 @@
     "job": "work as a teacher aide at a primary school in New Haven",
     "home": "New Haven",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "drove paper learning packs around New Haven in 2021 to families who had no internet at home",
     "why_yes": "you watched the kids without laptops fall furthest behind, and another round of closures would hit them first",
     "style": "bubbly, kind, lots of school stories, one emoji at most",
@@ -3141,7 +3142,8 @@
     "examples": [
       "A year two told me today her dog can read. She was very serious. I am choosing to believe her 🐶",
       "In 2021 I drove paper learning packs around New Haven because some families had no internet. Those kids fell furthest behind. Keeping schools open is my yes."
-    ]
+    ],
+    "replaced_by": "EruWaaka"
   },
   {
     "username": "Ngaire_TeHuia",
@@ -4521,7 +4523,7 @@
     "job": "are a retired builder who makes furniture in your shed",
     "home": "New Haven",
     "line": "persuade",
-    "status": "reserve",
+    "status": "active",
     "covid": "spent nearly three weeks in intensive care with COVID and came home weaker than you'd ever been",
     "why_yes": "you know how few intensive-care beds there are because you were in one, and getting ready beats waiting for those beds to fill",
     "style": "slow, plain, a man of few words, jokes about his knees",
@@ -5152,7 +5154,7 @@
     "job": "keep the grounds at the rugby stadium in Kingstonia City",
     "home": "Kingstonia City",
     "line": "mobilise",
-    "status": "reserve",
+    "status": "active",
     "covid": "mowed an empty stadium all through 2021 and missed hearing a crowd more than you ever expected",
     "why_yes": "you want crowds back in the stands and never empty again, and you think the yes side only wins if it turns out",
     "style": "proud, few words, rugby talk, quietly funny",
