@@ -418,9 +418,10 @@ ANCHOR_REST = timedelta(minutes=75)
 # morning (see rhythm.LOW_KEY_UNTIL).
 # Sydney hours with no anchor post (see rhythm.NIGHT_HOURS): the last one's 3-hour delete is done by 01:00.
 ANCHOR_NIGHT = (22, 7)
-# No anchors in this window either (Forrest, 24 October): from about 15:00 that day Trending posts below #1 got
-# almost no NPC views, so an anchor short of #1 scored nothing and only risked a report.
-ANCHOR_PAUSE = (datetime(2026, 10, 24, 20, 45, tzinfo=TIMEZONE), datetime(2026, 10, 25, 7, 0, tzinfo=TIMEZONE))
+# No anchors in this window either. 24 October 20:45 to 7:00 (Forrest): Trending below #1 then got no NPC views.
+# 25 October 16:00-22:00 (Forrest): a trial of replies to citizens alone, against that day's 07:00-15:00 with anchors,
+# since anchors and their lift replies brought most of the day's suspensions; on the x1 day, so it costs less.
+ANCHOR_PAUSE = (datetime(2026, 10, 25, 16, 0, tzinfo=TIMEZONE), datetime(2026, 10, 25, 22, 0, tzinfo=TIMEZONE))
 LOW_KEY_ANCHOR_GAP = timedelta(hours=1)
 LOW_KEY_LIFT_REPLIES = 10
 LOW_KEY_RUSH_PROB = 0.5
