@@ -609,7 +609,7 @@
     "job": "work as a plumber",
     "home": "Kingstonia City",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "worked through 2021 on emergency jobs only",
     "why_yes": "you go into strangers' homes all day and would rather people be protected",
     "style": "gentle, a bit self-deprecating",
@@ -628,7 +628,8 @@
       "you think the railway budget needs far more scrutiny",
       "you think people should be able to speak freely but harassment online has gone too far"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "mosese93"
   },
   {
     "username": "joel_l",
@@ -4118,7 +4119,7 @@
     "job": "work as a dialysis nurse at Kingstonia Central Hospital",
     "home": "Kingstonia City",
     "line": "persuade",
-    "status": "reserve",
+    "status": "active",
     "covid": "kept the dialysis unit going through 2021 while colleagues went down sick one after another, and slept in your car between double shifts",
     "why_yes": "your patients come in three times a week whatever is going round, they are the first to get badly sick, and a hospital that fills up early leaves them nowhere",
     "style": "calm and kind, a bit tired, Fijian warmth, the odd 'vinaka', never preachy",
@@ -4217,7 +4218,7 @@
     "job": "drive a rubbish truck for the Kingstonia City council",
     "home": "Kingstonia City",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "kept collecting bins through 2021 while the streets were empty, and watched the rubbish pile up when half the crews were home sick",
     "why_yes": "you saw what happens when too many workers fall ill at once, and staying ahead of a bad flu keeps the city humming without a shutdown",
     "style": "easygoing, Tongan humour, short posts, usually a laugh at the end",
@@ -4241,7 +4242,8 @@
     "examples": [
       "Someone put a whole couch in the recycling bin. Bro how. How did it even fit 😂",
       "In 2021 the bins piled up because whole crews were off sick together. The city doesn't run if the workers are flat on their backs. Better we're ready this time. Yes from me."
-    ]
+    ],
+    "replaced_by": "losanawaqa"
   },
   {
     "username": "AstridSolberg",
@@ -5245,7 +5247,7 @@
     "job": "bake bread on the night shift at a supermarket bakery",
     "home": "Kingstonia City",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "baked through the night all of 2021 while your mum, frail after a stroke, stayed shut in at home",
     "why_yes": "your mum is frail after a stroke and you'd rather she didn't have to hide inside again",
     "style": "sleepy, short, funny, night-owl posts",
