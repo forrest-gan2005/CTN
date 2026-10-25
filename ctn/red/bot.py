@@ -2,6 +2,7 @@ import asyncio
 import logging
 import random
 import re
+import zlib
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from datetime import date, datetime, timedelta, timezone
@@ -617,9 +618,10 @@ LIFT_TOPICS = ("anchor",)
 BOOST_WINDOW = timedelta(hours=2)
 BOOST_DELAY = timedelta(minutes=1)
 # Two anchors an hour at 45 reposts and 25 replies take about 140 of the 175 writes an hour the lane carries,
-# leaving 35 or so for other replies. Fitted over 160 Trending rows on 20 October, a reply now lifts a post about as
+# leaving 35 or so for other replies; 40 and 35 from 26 October (see REPLY_FIRST_ORDER), about 152 with the two
+# anchors themselves, leaving about 24. Fitted over 160 Trending rows on 20 October, a reply now lifts a post about as
 # much as a repost, and rivals' top posts had about 20 replies in their first 25 minutes.
-BOOST_LIMITS = {"like": 50, "repost": 45, "reply": 25}
+BOOST_LIMITS = {"like": 50, "repost": 40, "reply": 35}
 BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post still has places
 # Popular tags were all campaign accounts' on the opening night, a NO team's #keepkingstoniaopen first; the papers'
 # reporters write up what is popular here. The team carries the YES campaign's own words: on every anchor post, and
@@ -737,6 +739,15 @@ RUSH_PROB = 0.9
 # reply-first order an anchor had 15 reposts at 25 minutes against 26 the night before, and no daytime anchor
 # reached the top ten.
 RUSH_ORDER = ("like", "repost", "reply")
+# Half the team replies before it reposts (26 October): with every account reposting first, the 45 reposts filled the
+# write lane's first quarter-hour (three writes a minute for the team) and our anchors had 0-3 replies at 15 minutes and
+# 15-28 at the end, while the rival anchor holding Trending #1 had 17-25 at 15 minutes and 34-41 in all, nearly all
+# from its own 43 accounts. Which half: a hash of the username, the same every anchor.
+REPLY_FIRST_ORDER = ("like", "reply", "repost")
+
+
+def rush_order(username: str) -> tuple:
+    return REPLY_FIRST_ORDER if zlib.crc32(username.encode()) % 2 else RUSH_ORDER
 LIFT_ORDER = 1e-7  # per post id, for the write lane; post ids stay well under a million
 RUSH_WAIT = (20.0, 180.0)
 # The anchor post, then the reposts and replies lifting it in its rush, jump the write lane's queue: under S53 the
@@ -1996,8 +2007,9 @@ class Bot:
         BOOST_DELAY old, and nothing for an older anchor then. Nothing for a squad account, which lifts nothing."""
         if self._squad():
             return None
-        order = ([k for k in RUSH_ORDER if k == "like"] if self._dialogue_account()
-                 else [k for k in RUSH_ORDER if k != "reply"] if self.quiet else RUSH_ORDER)
+        mine = rush_order(self.username)
+        order = ([k for k in mine if k == "like"] if self._dialogue_account()
+                 else [k for k in mine if k != "reply"] if self.quiet else mine)
         now = datetime.now(timezone.utc)
         focus = self._focus(now)
         for _, post_id, content in self._lift_posts(now, RUSH_WINDOW):
@@ -2676,12 +2688,12 @@ class Bot:
         elif action.type in ("repost", "reply") and action.post_id is not None and \
                 action.post_id == self._focus(now := datetime.now(timezone.utc)):
             # A newer anchor's lifts go ahead of an older one's still queued (on 21 October 00:05 the new anchor
-            # had none at 15 minutes while 22 replies to the last one went out), and its reposts ahead of its
-            # replies. The fraction stays well under the gap to CITIZEN; with RUSH_FIRST, between ANCHOR and CITIZEN.
+            # had none at 15 minutes while 22 replies to the last one went out); its reposts and replies in the order
+            # they came (see REPLY_FIRST_ORDER). The fraction stays well under the gap to CITIZEN; with RUSH_FIRST,
+            # between ANCHOR and CITIZEN.
             early = RUSH_FIRST and any(post_id == action.post_id for _, post_id, _ in
                                        self.store.team_posts(LIFT_TOPICS, _iso(now - RUSH_FIRST_WINDOW), ""))
-            priority = ((CITIZEN - 0.5 if early else LIFT) - action.post_id * LIFT_ORDER
-                        - (LIFT_ORDER / 2 if action.type == "repost" else 0))
+            priority = (CITIZEN - 0.5 if early else LIFT) - action.post_id * LIFT_ORDER
         else:
             priority = NORMAL
         token = WRITE_PRIORITY.set(priority)
@@ -3609,7 +3621,9 @@ async def rush_check() -> None:
         eager = bot(writers[0], "Our boat crew lost a whole season in 2021, so I'm voting yes.")
         acted = [await eager.think(feed) for _ in range(4)]
         assert [(a.type, a.post_id) if a else None for a in acted] == \
-            [(kind, 900) for kind in RUSH_ORDER] + [None], acted
+            [(kind, 900) for kind in rush_order(writers[0]["username"])] + [None], acted
+        orders = {rush_order(p["username"]) for p in load_personas(status=None)}
+        assert orders == {RUSH_ORDER, REPLY_FIRST_ORDER}, "half the team replies first, half reposts first"
         assert eager._rush() is None, "nothing left to give, so it keeps its own rhythm"
         worn = eager.llm.prompts[0].split("These phrases are worn out here")[1].split("\n")[0]
         assert '"certificate at the door"' in worn and "ferry" not in worn and "voting yes" not in worn, worn
@@ -3618,8 +3632,9 @@ async def rush_check() -> None:
         assert '"certificate at the door"' in taken and "ferry" not in taken, taken
         dropped = bot(writers[1], "as an AI I can't write that")
         acted = [await dropped.think(feed) for _ in range(4)]
-        assert [(a.type, a.post_id) if a else None for a in acted] == [("like", 900), ("repost", 900), None, None], \
-            "the repost comes first, so a dropped reply leaves nothing to hand on"
+        moves = [(a.type, a.post_id) for a in acted if a]
+        assert sorted(moves) == [("like", 900), ("repost", 900)] and acted[-1] is None, \
+            "a dropped reply is never tried again, and leaves only the like and the repost, in either order"
         assert len(dropped.llm.prompts) == 1, "a dropped reply isn't drafted again in the rush"
         quiet = bot(writers[2], "Our boat crew lost a whole season in 2021, so I'm voting yes.")
         quiet.quiet = True
@@ -3667,7 +3682,7 @@ async def rush_check() -> None:
     kinds = [(kind, post_id, CITIZEN < p < NORMAL and LIFT - 0.01 < p <= LIFT or p) for kind, post_id, p in noting.sent]
     assert kinds == [("repost", 904, True), ("repost", 902, NORMAL), ("reply", 904, True), ("reply", 9, NORMAL),
                      ("reply", 8, CITIZEN), ("post", None, ANCHOR), ("post", None, NORMAL)], noting.sent
-    assert noting.sent[0][2] < noting.sent[2][2], "an anchor's reposts go ahead of its replies"
+    assert noting.sent[0][2] == noting.sent[2][2], "an anchor's reposts and replies queue as they come"
     two.record("lena_brook", _iso(datetime.now(timezone.utc)),
                Action("post", content="x", topic_kind="anchor", made_id=1904))
     await lifter.act(Action("repost", post_id=1904))
@@ -3749,9 +3764,10 @@ async def rush_first_check() -> None:
     global RUSH_FIRST
     saved = RUSH_FIRST
     try:
-        for first, order in ((False, ["anchor", "reply 8", "mention", "repost 904", "reply 904", "daily",
+        # an anchor's reply and repost queue in the order they came (the reply was queued first)
+        for first, order in ((False, ["anchor", "reply 8", "mention", "reply 904", "repost 904", "daily",
                                       "repost 902"]),
-                             (True, ["anchor", "repost 904", "reply 904", "reply 8", "mention", "daily",
+                             (True, ["anchor", "reply 904", "repost 904", "reply 8", "mention", "daily",
                                      "repost 902"])):
             RUSH_FIRST = first
             laned = Laned()
@@ -3772,7 +3788,7 @@ async def rush_first_check() -> None:
         b = Bot(persona, laned, FakeLLM(0, 0), load_world(), store=far)
         for action in (Action("repost", post_id=999_999), Action("reply", post_id=999_999, content="x")):
             await b.act(action)
-        assert all(ANCHOR < p < CITIZEN for _, p in laned.sent) and laned.sent[0][1] < laned.sent[1][1], laned.sent
+        assert all(ANCHOR < p < CITIZEN for _, p in laned.sent) and laned.sent[0][1] == laned.sent[1][1], laned.sent
         late = StateStore(":memory:")  # past RUSH_FIRST_WINDOW, still in its rush: back behind citizen replies
         late.record("rosa_dives", _iso(now - RUSH_FIRST_WINDOW - timedelta(minutes=3)),
                     Action("post", content="x", topic_kind="anchor", made_id=906))
@@ -5222,7 +5238,7 @@ async def dialogue_check() -> None:
         DIALOGUE_MODE = True
         assert lift_replies() == BOOST_LIMITS["reply"]
         DIALOGUE_LIFT_SHARE = 0.4
-        assert lift_replies() == 10
+        assert lift_replies() == round(BOOST_LIMITS["reply"] * 0.4)
         lifters = [p for p in personas if p["line"] == "background"][:lift_replies() + 2]
         lift = StateStore(":memory:")
         anchored(lift, 950)
