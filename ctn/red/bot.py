@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
+from ctn import paths
 from ctn.infra.fake_platform import ANCHOR, CITIZEN, LIFT, NORMAL, WRITE_LEFT, WRITE_PRIORITY, AmbiguousWrite, FakePlatform, RateLimited
 from ctn.infra.llm import FakeLLM, team_llms
 from ctn.infra.news import SHARE_DAYS, SHARE_PREFER_RE, SITES, YES_POLL_RE, NewsStore
@@ -466,6 +467,19 @@ ANCHOR_NIGHT = (22, 7)
 # 25 October 16:00-22:00 (Forrest): a trial of replies to citizens alone, against that day's 07:00-15:00 with anchors,
 # since anchors and their lift replies brought most of the day's suspensions; on the x1 day, so it costs less.
 ANCHOR_PAUSE = (datetime(2026, 10, 25, 16, 0, tzinfo=TIMEZONE), datetime(2026, 10, 25, 22, 0, tzinfo=TIMEZONE))
+# Two anchors an hour from 28 October to the end (Forrest, 25 October): x2 points banked then are certain, while x4
+# Trending will be fought over, and a failure there costs double. And in trial windows on 26 and 27 October, to
+# measure what a fast hour earns and costs at x2 before then. The cost is accounts: a squad account is suspended by its
+# third hidden post (it stays under 100 actions), and about half our anchors were hidden on 24-25 October.
+FAST_ANCHOR_GAP = timedelta(minutes=30)
+FAST_ANCHORS_FROM = datetime(2026, 10, 28, 0, 0, tzinfo=TIMEZONE)
+FAST_ANCHOR_TRIALS = tuple((datetime(2026, 10, day, 12, 0, tzinfo=TIMEZONE), datetime(2026, 10, day, 16, 0, tzinfo=TIMEZONE))
+                           for day in (26, 27))
+# A day's stop: no anchor on a Sydney date written in this file (one or more, whitespace apart). The patrol writes
+# the date once that day's suspensions reach its budget (6 a day to 27 October, 9 to 31 October, none for 1-2
+# November; 69 of 200 registrations were left on 25 October). The bot can't count suspensions itself: the squad
+# accounts suspended on 25 October had had every anchor deleted by us, on time, after the platform counted it hidden.
+ANCHOR_HOLD_FILE = paths.DATA / "anchor_hold"
 LOW_KEY_ANCHOR_GAP = timedelta(hours=1)
 LOW_KEY_LIFT_REPLIES = 10
 LOW_KEY_RUSH_PROB = 0.5
@@ -485,7 +499,7 @@ ANCHOR_HIDDEN_CAP = 2
 # follows), stopping at SQUAD_ACTION_CAP actions and at ANCHOR_HIDDEN_CAP hidden posts; the rest of the team never
 # anchors, unless no anchor has gone up for SQUAD_GRACE and the slot is SQUAD_FALLBACK old. Nine at first, five since
 # the evening of 24 October: with nine out of lifting our anchors got 31-38 reposts against Vertex's 45 and lost #1.
-ANCHOR_SQUAD = frozenset({"semisilatu", "kavya2304", "teuilatoleafoa", "hemi_parata", "AstridSolberg"})
+ANCHOR_SQUAD = frozenset({"semisilatu", "rico.almeida", "teuilatoleafoa", "hemi_parata", "AstridSolberg"})
 SQUAD_ACTION_CAP = 90
 SQUAD_GRACE = timedelta(minutes=75)
 SQUAD_FALLBACK = timedelta(minutes=20)
@@ -905,8 +919,24 @@ def low_key(now: Optional[datetime] = None) -> bool:
     return (now or datetime.now(timezone.utc)) < LOW_KEY_UNTIL
 
 
+def fast_anchors(now: datetime) -> bool:
+    return now >= FAST_ANCHORS_FROM or any(start <= now < end for start, end in FAST_ANCHOR_TRIALS)
+
+
 def anchor_gap(now: Optional[datetime] = None) -> timedelta:
-    return LOW_KEY_ANCHOR_GAP if low_key(now) else ANCHOR_GAP
+    now = now or datetime.now(timezone.utc)
+    if low_key(now):
+        return LOW_KEY_ANCHOR_GAP
+    return FAST_ANCHOR_GAP if fast_anchors(now) else ANCHOR_GAP
+
+
+def anchors_held(now: datetime) -> bool:
+    """Today (Sydney) is written in ANCHOR_HOLD_FILE: that day's suspensions reached its budget."""
+    try:
+        held = ANCHOR_HOLD_FILE.read_text(errors="replace").split()
+    except OSError:
+        return False
+    return now.astimezone(TIMEZONE).date().isoformat() in held
 
 
 def rush_prob() -> float:
@@ -1897,7 +1927,7 @@ class Bot:
         if MENTION_EXPERIMENT and self.username in MENTION_ACCOUNTS or self._dialogue_account():
             return None
         now = datetime.now(timezone.utc)
-        if at_night(now, ANCHOR_NIGHT) or ANCHOR_PAUSE[0] <= now < ANCHOR_PAUSE[1]:
+        if at_night(now, ANCHOR_NIGHT) or ANCHOR_PAUSE[0] <= now < ANCHOR_PAUSE[1] or anchors_held(now):
             return None
         if any(a.topic_kind == "anchor" and datetime.fromisoformat(ts) > now - ANCHOR_REST for ts, a in self.history):
             return None
@@ -2697,6 +2727,9 @@ class Bot:
                 self._drop(action, "the feed is locked")
             return None
         if action.type in ("post", "reply"):
+            if action.topic_kind == "anchor" and anchors_held(datetime.now(timezone.utc)):
+                self._drop(action, "anchors held today")  # the hold was written while this was being drafted
+                return None
             if self.quiet and not self._squad() and not (action.type == "reply"
                                                          and self._quiet_may_answer(action.target_author)):
                 self._drop(action, "went quiet")  # the account went quiet while this was being written
@@ -5953,6 +5986,65 @@ async def night_anchor_check() -> None:
     print("night anchors ok")
 
 
+async def anchor_pace_check() -> None:
+    """One anchor slot an hour, two in the trial windows and from FAST_ANCHORS_FROM; none on a held Sydney date."""
+    import tempfile
+    from pathlib import Path
+
+    class Says:
+        name = "says"
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            return "I run a cafe and lost five months in 2021, so I'm voting yes on the mandate."
+
+    global FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE, ANCHOR_FALLBACK, ANCHOR_BANK, ANCHOR_SQUAD
+    saved = FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE, ANCHOR_FALLBACK, ANCHOR_BANK, ANCHOR_SQUAD
+    try:
+        FAST_ANCHORS_FROM = datetime(2026, 10, 28, 0, 0, tzinfo=TIMEZONE)
+        FAST_ANCHOR_TRIALS = ((datetime(2026, 10, 26, 12, 0, tzinfo=TIMEZONE),
+                               datetime(2026, 10, 26, 16, 0, tzinfo=TIMEZONE)),)
+        at = lambda *t: datetime(2026, *t, tzinfo=TIMEZONE)
+        assert anchor_gap(at(10, 26, 11, 59)) == ANCHOR_GAP
+        assert anchor_gap(at(10, 26, 12, 0)) == anchor_gap(at(10, 26, 15, 59)) == FAST_ANCHOR_GAP
+        assert anchor_gap(at(10, 26, 16, 0)) == anchor_gap(at(10, 27, 23, 59)) == ANCHOR_GAP
+        assert anchor_gap(at(10, 28, 0, 0)) == anchor_gap(at(11, 2, 17, 0)) == FAST_ANCHOR_GAP
+        with tempfile.TemporaryDirectory() as tmp:
+            ANCHOR_HOLD_FILE = Path(tmp) / "anchor_hold"
+            assert not anchors_held(at(10, 28, 10, 0)), "no file, no hold"
+            ANCHOR_HOLD_FILE.write_text("2026-10-27\n2026-10-28\n")
+            assert anchors_held(at(10, 28, 0, 30)), "a Sydney date: 13:30 UTC the day before"
+            assert anchors_held(at(10, 27, 21, 0)) and not anchors_held(at(10, 29, 0, 5))
+            ANCHOR_FALLBACK, ANCHOR_BANK = timedelta(0), False
+            writer = [p for p in load_personas(status=None) if p["line"] in ANCHOR_LINES][0]
+            now = datetime.now(timezone.utc)
+            ANCHOR_HOLD_FILE.write_text(now.astimezone(TIMEZONE).date().isoformat())
+            assert await Bot(writer, FakePlatform(), Says(), load_world(), store=StateStore(":memory:"))._anchor() is None
+            ANCHOR_HOLD_FILE.write_text((now + timedelta(days=1)).astimezone(TIMEZONE).date().isoformat())
+            assert await Bot(writer, FakePlatform(), Says(), load_world(), store=StateStore(":memory:"))._anchor()
+            ANCHOR_HOLD_FILE.write_bytes(b"\xff\xfe\n" + now.astimezone(TIMEZONE).date().isoformat().encode())
+            assert anchors_held(now), "bad bytes around a date: still read, never raised"
+            ANCHOR_HOLD_FILE.write_bytes(b"\xff\xfe\x00")
+            assert not anchors_held(now)
+
+            class Holds(Says):  # the hold goes in while the anchor is being written
+                async def generate(self, system: str, prompt: str) -> Optional[str]:
+                    ANCHOR_HOLD_FILE.write_text(datetime.now(timezone.utc).astimezone(TIMEZONE).date().isoformat())
+                    return await super().generate(system, prompt)
+
+            ANCHOR_HOLD_FILE.unlink()
+            ANCHOR_SQUAD = frozenset({writer["username"]})
+            platform = FakePlatform()
+            bot = Bot(writer, platform, Holds(), load_world(), store=StateStore(":memory:"))
+            assert await bot.step() is None and not platform.posts, "drafted, then held: never sent"
+            assert not bot.store.holders("anchor:"), "and its slot is free again"
+    finally:
+        FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE, ANCHOR_FALLBACK, ANCHOR_BANK, ANCHOR_SQUAD = saved
+    print("anchor pace ok")
+
+
 async def squad_check() -> None:
     """A squad account only anchors (quiet or not), and stops at its caps; the rest of the team anchors only once
     the squad has gone silent for SQUAD_GRACE, and then only SQUAD_FALLBACK into the slot."""
@@ -6029,6 +6121,10 @@ if __name__ == "__main__":
     # and ANCHOR_BANK: anchor_bank_check (a persuader's step could post an entry without the model quiet_race waits on)
     bank, ANCHOR_BANK = ANCHOR_BANK, False
     daily, CITIZEN_DAILY_REPLIES = CITIZEN_DAILY_REPLIES, MAX_REPLIES_PER_AUTHOR  # the older cap: daily_reply_check
+    # one anchor slot an hour and no hold file in the other checks, whatever the date; anchor_pace_check sets them
+    fast_from, FAST_ANCHORS_FROM = FAST_ANCHORS_FROM, datetime(2100, 1, 1, tzinfo=TIMEZONE)
+    fast_trials, FAST_ANCHOR_TRIALS = FAST_ANCHOR_TRIALS, ()
+    hold_file, ANCHOR_HOLD_FILE = ANCHOR_HOLD_FILE, paths.DATA / "no-such-dir" / "anchor_hold"
     low_key_until, LOW_KEY_UNTIL = LOW_KEY_UNTIL, datetime(2026, 10, 1, tzinfo=TIMEZONE)  # low_key_check sets it
     low_key_check()
     # and the plain anchors of 24 October: plain_anchor_check
@@ -6037,6 +6133,7 @@ if __name__ == "__main__":
     anchor_pause, ANCHOR_PAUSE = ANCHOR_PAUSE, (datetime(2000, 1, 1, tzinfo=TIMEZONE),) * 2  # nor the pause
     asyncio.run(squad_check())
     asyncio.run(night_anchor_check())
+    asyncio.run(anchor_pace_check())
     asyncio.run(answer_check())
     plain_anchors = ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE
     ANCHOR_PLAIN, ANCHOR_QUESTION_PROB, TEAM_TAG_SHARE = False, 0.8, {"anchor": 1.0, "team": 0.8, "issue": 0.5}
@@ -6086,4 +6183,5 @@ if __name__ == "__main__":
     ANCHOR_NIGHT = anchor_night
     ANCHOR_PAUSE = anchor_pause
     ANCHOR_SQUAD = anchor_squad
+    FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE = fast_from, fast_trials, hold_file
     asyncio.run(main(args.real, n_bots, args.seconds))
