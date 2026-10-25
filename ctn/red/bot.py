@@ -199,6 +199,50 @@ def elicit_angle() -> str:
     return f"The angle for your question: {random.choice(ELICIT_ANGLES)}. {ELICIT_AVOID}"
 
 
+# Candour, A/B from 25 October 18:00 (Forrest; drafted with Codex): citizens answering us agreed about hospitals and
+# closures, then listed conditions for a YES (an end date, the venue list, a review), and hours brought 10-17 changes
+# towards neither side against a few towards YES. In the "candor" arm a reply answers the concern they already raised,
+# says plainly what the proposal includes and what it lacks, uses what a NO means (with "unless another referendum")
+# when it helps, and says why its writer still votes YES with that gap; the world it gets is the bare facts, not the
+# answers to NO worries. In two-hour blocks from CANDOR_START the whole team writes one arm or the other (STORY_GUIDE
+# and the rest as before), the order in each pair of blocks drawn from a seed; a follow-up keeps the arm of the reply
+# it answers. Each reply's angle ends " candor:1" or " candor:0".
+CANDOR_START = datetime(2026, 10, 25, 18, 0, tzinfo=TIMEZONE)
+CANDOR_BLOCK = timedelta(hours=2)
+CANDOR_LEAD = {"no": "They seem to lean NO.", "undecided": "They seem undecided.", "yes": "They lean YES already.",
+               "yes-but": "They lean YES with a condition."}
+CANDOR_FIRST = ("First answer the issue already in their post. If something the proposal includes settles it, say so "
+                "(who it covers, the medical exemptions, the staged start, the certificate kept off the ID card). If "
+                "what they want isn't in it, say so plainly: there is no end date, and the venue list hasn't been "
+                "published. Then give your own reason for voting YES despite that, from your life or one fact given "
+                "above. If it would help, end with one genuine question about the issue they raised, not a general "
+                "one. Never imply a missing safeguard is coming, and don't overstate what the requirement will do.")
+CANDOR_FOLLOW_UP = ("Use what they just said; don't restart your story or ask the same question again. If they ask "
+                    "for something the proposal includes, say exactly what it includes. If they want something it "
+                    "lacks, grant that it matters and name the gap plainly. Where it helps, say what a NO means: no "
+                    "H2D2 requirement for the life of this Assembly unless there's another referendum. Then say why "
+                    "you still vote YES with that gap; you may say you'd keep pushing for it, never that it will "
+                    "come. Usually end on a plain statement. If they stay firm, accept the disagreement kindly.")
+
+
+# Words that, in an answer to one of our referendum posts, take the referendum up, though REFERENDUM_RE needs more
+# context to be sure of them anywhere else ("an end date", "a review", "the exemptions").
+FOLLOW_UP_TOPIC_RE = re.compile(r"\b(end date|sunset|reviews?|review (clause|date)|expir\w*|time[- ]limit\w*|venues?|"
+                                r"exemptions?|safeguards?|oversight|blank cheque|temporary|permanent|scope)\b",
+                                re.IGNORECASE)
+
+
+def candor_arm(now: Optional[datetime] = None) -> Optional[bool]:
+    """Whether the team writes in the candour arm now: by two-hour blocks from CANDOR_START, the order in each pair
+    drawn from a seed; None before the start."""
+    now = now or datetime.now(timezone.utc)
+    if now < CANDOR_START:
+        return None
+    block = int((now - CANDOR_START) / CANDOR_BLOCK)
+    first = random.Random(f"candor:{block // 2}").random() < 0.5
+    return first if block % 2 == 0 else not first
+
+
 FOLLOW_UP_GUIDE = ("If they have told you what worries them, answer that worry directly, with one concrete fact given "
                    "above or one person or livelihood from your own life, and don't ask another question.")
 # Told only to add "a short story or another reason", three in five teammates' replies under an anchor went back to
@@ -976,6 +1020,7 @@ class Bot:
         self.last_grant = False  # whether the last draft was dropped for granting the citizen's point first
         self.ungrant = False  # the draft being written follows one dropped so
         self.eliciting = None  # for a reply that could ask first: whether this one does (ELICIT_SHARE); else None
+        self.candor = None  # for a story reply: whether it's written in the candour arm; else None
         self.shorter = None  # the length the draft being written is told to keep under
         self.avoid = []  # phrases the draft being written must not use
         self.conv_tries = {}  # reply to us -> times this process picked it to answer
@@ -1504,10 +1549,14 @@ class Bot:
             self.eliciting = (random.random() < ELICIT_SHARE
                               if (source != "conversation" and lean in ELICIT_LEANS and STORY_REPLIES
                                   and self._story_reply("reply", target, (source, lean))) else None)
+            self.candor = (self._candor_for(target, source)
+                           if STORY_REPLIES and self._story_reply("reply", target, (source, lean))
+                           and self.roster.classify(target["author"]) == "npc" else None)
             action = await self._compose("reply", target=target, topic=(source, lean), context=context,
                                          referendum=referendum)
         finally:
             eliciting, self.eliciting = self.eliciting, None
+            candor, self.candor = self.candor, None
             if action is None:  # nothing to send, even if writing it failed or was cancelled: free the post
                 self.store.end_pick(pick, "dropped")
                 if claim:
@@ -1517,8 +1566,10 @@ class Bot:
         if action is None:
             return None
         action.pick, action.hold = pick, hold
-        if eliciting is not None and action.topic_kind != "conversation":
+        if eliciting is not None and action.topic_kind != "conversation" and not candor:
             action.angle = f"{action.angle or ''} elicit:{int(eliciting)}".strip()
+        if candor is not None:
+            action.angle = f"{action.angle or ''} candor:{int(candor)}".strip()
         if DIALOGUE_MODE:
             bucket = (dialogue[0] if dialogue else "lift" if route == "team"
                       else "hard-no" if cls == "hard-no" else "other")
@@ -1583,9 +1634,11 @@ class Bot:
         to avoid the phrase, if teammates' wording is what sank it: one evening 26 of the 31 dropped replies to
         citizens went for a shared phrase ("tipped me to yes", "the vote on 2")."""
         if referendum is None and target is not None:  # decided once, so a redraft is framed as the first was
-            referendum = await self._takes_up_referendum(target, topic[1])
+            referendum = (await self._takes_up_referendum(target, topic[1])
+                          or topic[0] == "conversation" and bool(FOLLOW_UP_TOPIC_RE.search(target.get("content") or ""))
+                          and self._answers_our_referendum_post(target))
         if not referendum:
-            self.eliciting = None  # off the referendum: neither arm
+            self.eliciting = self.candor = None  # off the referendum: no arm
         avoid, shorter, ungrant = [], None, False
         for _ in range(1 + redrafts):
             self.last_shared, self.last_long, self.last_grant = None, None, False
@@ -1622,7 +1675,8 @@ class Bot:
         anchor = kind == "post" and topic[0] == "anchor"
         short = anchor and (ANCHOR_EXPERIMENT or ANCHOR_PLAIN) or mention
         story = self._story_reply(kind, target, topic)
-        system = self._system_prompt(examples, from_npcs, arguments=referendum, case=case, short=short,
+        frank = story and bool(self.candor)
+        system = self._system_prompt(examples, from_npcs, arguments=referendum and not frank, case=case, short=short,
                                      under=anchor_limit(self.sharing if anchor else None) - NEWS_SLACK
                                      if anchor and ANCHOR_PLAIN else None,
                                      story_reply=story)
@@ -1690,7 +1744,7 @@ class Bot:
             return None
         # Sign-offs are the code's to hand out: one the model adds unasked, often copied from a recent post, goes.
         content = strip_sign_off(content, [s for s in self._sign_offs() if s != sign])
-        if story:
+        if story and not frank:
             if not self.eliciting:
                 content = without_closing_question(content)
             avoid = STORY_AVOID_RE.search(content or "")
@@ -2090,6 +2144,27 @@ class Bot:
         """Whether a reply of `author`'s to us is answered past CITIZEN_DAILY_REPLIES: a known citizen's is."""
         return CONVERSE_FOLLOW_UP and self.roster.classify(author) == "npc"
 
+    def _answers_our_referendum_post(self, target: dict) -> bool:
+        """Whether `target` answers a post of ours that took up the referendum: with FOLLOW_UP_TOPIC_RE, "Still want
+        an end date though." is about it there, while "Thanks! How's your mum?" stays a chat."""
+        if target.get("parent_id") is None:
+            return False
+        row = self.store.db.execute("SELECT content, angle FROM history WHERE made_id = ?",
+                                    (target["parent_id"],)).fetchone()
+        return row is not None and (about_referendum(row[0] or "")
+                                    or bool(re.search(r"\b(candor|elicit):", row[1] or "")))
+
+    def _candor_for(self, target: dict, source: str) -> Optional[bool]:
+        """The candour arm for a reply: a follow-up keeps that of our post it answers, when it had one; anything else
+        takes the current block's (None before CANDOR_START)."""
+        if source == "conversation" and target.get("parent_id") is not None:
+            row = self.store.db.execute("SELECT angle FROM history WHERE made_id = ?",
+                                        (target["parent_id"],)).fetchone()
+            found = re.search(r"\bcandor:([01])\b", (row[0] or "") if row else "")
+            if found:
+                return found.group(1) == "1"
+        return candor_arm()
+
     def _quiet_may_answer(self, author: Optional[str]) -> bool:
         """Whether a quiet account may reply to `author`: a known citizen's, with QUIET_REPLIES, and not the press's."""
         return (QUIET_REPLIES and author is not None and self.roster.classify(author) == "npc"
@@ -2345,11 +2420,15 @@ class Bot:
             if on_referendum:
                 shape = f" {random.choices(*zip(*TEAM_SHAPES))[0]}" if topic[1] == "team" else ""
                 lead = STORY_LEAD.get(topic[1], "Respond to their actual point.")
-                guide = (f"{lead} {ELICIT_GUIDE} {elicit_angle()}" if story and self.eliciting
+                frank = story and self.candor
+                if frank:
+                    lead = CANDOR_LEAD.get(topic[1], "Respond to their actual point.")
+                guide = (f"{lead} {CANDOR_FOLLOW_UP if earlier is not None else CANDOR_FIRST}" if frank
+                         else f"{lead} {ELICIT_GUIDE} {elicit_angle()}" if story and self.eliciting
                          else f"{lead} {STORY_GUIDE} {story_people()}" if story
                          else reply_guide(self.writing_arm or arm(), topic[1]))
-                parts.append(f"{guide}{shape} Never agree that the mandate is unfair and never make their argument "
-                             "for them.")
+                parts.append(f"{guide}{shape}" + ("" if frank else " Never agree that the mandate is unfair and never "
+                                                             "make their argument for them."))
             else:
                 parts.append("It isn't about the referendum, so just reply like a normal person and leave the "
                              "referendum out." + (" Don't end with a question." if story else ""))
@@ -2357,7 +2436,7 @@ class Bot:
                 parts.append(
                     "They are replying to you. Carry the conversation on naturally; if they are only agreeing "
                     "or chatting, keep it short and friendly and don't restart the argument."
-                    + (f" {FOLLOW_UP_GUIDE}" if story and on_referendum else "")
+                    + (f" {FOLLOW_UP_GUIDE}" if story and on_referendum and not self.candor else "")
                 )
         elif topic[0] == "pitch":
             j = JOURNALISTS[topic[1]]
@@ -4767,8 +4846,9 @@ async def implicit_no_check() -> None:
 
 
 async def quiet_race() -> None:
-    """An account that goes quiet while a post or reply is being written publishes neither; it can still like."""
-    global ACTION_WEIGHTS, QUIET_ACTIONS
+    """An account that goes quiet while a post or reply is being written publishes neither, QUIET_REPLIES aside (a
+    reply to a known citizen then still goes: answer_check); it can still like."""
+    global ACTION_WEIGHTS, QUIET_ACTIONS, QUIET_REPLIES
 
     class Paused:
         name = "paused"
@@ -4785,8 +4865,9 @@ async def quiet_race() -> None:
             return "Ferry was packed this morning, standing room only again. Voting yes on the 2nd."
 
     persona = next(p for p in load_personas() if p["line"] == "persuade")
-    saved = ACTION_WEIGHTS, QUIET_ACTIONS
+    saved = ACTION_WEIGHTS, QUIET_ACTIONS, QUIET_REPLIES
     try:
+        QUIET_REPLIES = False
         for kind in ("post", "reply"):
             p, store, llm = FakePlatform(), StateStore(":memory:"), Paused()
             target = await p.post("npc_1", "anyone else stuck at the wharf this morning")
@@ -4804,7 +4885,7 @@ async def quiet_race() -> None:
         liked = await bot.step()
         assert liked.type == "like" and persona["username"] in p.posts[target["id"]]["likes"]
     finally:
-        ACTION_WEIGHTS, QUIET_ACTIONS = saved
+        ACTION_WEIGHTS, QUIET_ACTIONS, QUIET_REPLIES = saved
     print("quiet race ok")
 
 
@@ -5353,6 +5434,81 @@ async def citizen_targeting_check() -> None:
     finally:
         CITIZEN_TARGETING, ACTION_WEIGHTS, TEAM_REPLY_PROB, TOPICAL_REPLY_PROB, RUSH_PROB = saved
     print("citizen targeting ok")
+
+
+async def candor_check() -> None:
+    """The candour arm by two-hour blocks: CANDOR_FIRST and the bare facts in the prompt, no story-phrase screen and
+    the closing question kept, the arm in the angle; a follow-up keeps the arm of the post it answers."""
+    global CANDOR_START, STORY_REPLIES, ELICIT_SHARE
+
+    class Says:
+        name = "says"
+
+        def __init__(self, *texts: str) -> None:
+            self.texts, self.prompts, self.systems = list(texts), [], []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            self.systems.append(system)
+            return self.texts.pop(0) if len(self.texts) > 1 else self.texts[0]
+
+    now = datetime.now(timezone.utc)
+    saved = CANDOR_START, STORY_REPLIES, ELICIT_SHARE
+    try:
+        CANDOR_START = now + timedelta(hours=1)
+        assert candor_arm(now) is None, "nothing before the start"
+        CANDOR_START = now - timedelta(minutes=1)
+        a, b = candor_arm(now), candor_arm(now + CANDOR_BLOCK)
+        assert a is not None and b is not None and a != b, "the two blocks of a pair differ"
+        assert candor_arm(now) == candor_arm(now + timedelta(minutes=30)), "and hold for a block"
+        on = now if a else now + CANDOR_BLOCK  # a moment in a candour block
+        CANDOR_START = now - timedelta(minutes=1) - (on - now)  # so that now is in that block
+        assert candor_arm() is True
+        STORY_REPLIES, ELICIT_SHARE = True, 1.0
+        persuader = next(p for p in load_personas() if p["line"] == "persuade")
+        worry = {"id": 5, "author": "citizen_a", "parent_id": None,
+                 "content": "Where's the sunset clause in this referendum? Feels like a blank cheque to me."}
+        text = ("There's no end date in it, you're right. A NO means no requirement this Assembly unless there's "
+                "another referendum, and I'd still vote yes for my mum's ward. Is the end date the deciding bit?")
+        b_ = Bot(persuader, FakePlatform(), Says(text), load_world(), stance_llm=Says("SUPPORT"),
+                 roster=Roster(own={"teammate_1"}, npcs={"citizen_a"}), store=StateStore(":memory:"))
+
+        async def leans_no(author, t):
+            return "no"
+        b_._lean = leans_no
+        action = await b_._reply(dict(worry), "feed", "npc-random", referendum=True)
+        assert action is not None and action.angle.endswith("candor:1"), (action, b_.rejected)
+        assert CANDOR_FIRST in b_.llm.prompts[0] and STORY_GUIDE not in b_.llm.prompts[0]
+        assert action.content.endswith("?"), "the question stays"
+        assert "Answer with who it protects" not in b_.llm.systems[0], "the bare facts, not the reply answers"
+        assert b_.candor is None
+        # a follow-up keeps the arm of the post it answers, whatever the block
+        mine = await b_.platform.post(persuader["username"], "Voting yes for my mum's ward.")
+        b_.store.record(persuader["username"], _iso(now), Action("reply", post_id=1, content="Voting yes.",
+                                                                  angle="lean:no candor:0", made_id=mine["id"]))
+        follow = {**worry, "id": 8, "parent_id": mine["id"], "content": "Still want an end date though."}
+        assert b_._candor_for(follow, "conversation") is False and b_._candor_for(follow, "feed") is True
+        assert b_._answers_our_referendum_post(follow) and FOLLOW_UP_TOPIC_RE.search(follow["content"])
+        assert not FOLLOW_UP_TOPIC_RE.search("Thanks! How's your mum doing?"), "a chat under it stays a chat"
+        mine2 = await b_.platform.post(persuader["username"], "Voting yes for the ward.")
+        b_.store.record(persuader["username"], _iso(now), Action("reply", post_id=1, content="Voting yes for the ward.",
+                                                                  angle="lean:no candor:1", made_id=mine2["id"]))
+        b2 = Bot(persuader, b_.platform, Says("It isn't in the proposal, no. I'd still vote yes for the ward."),
+                 load_world(), stance_llm=Says("SUPPORT"), roster=b_.roster, store=b_.store)
+
+        async def leans_yes(author, t):
+            return "yes"
+        b2._lean = leans_yes
+        follow2 = {**worry, "id": 9, "parent_id": mine2["id"], "content": "Still want an end date though."}
+        action = await b2._reply(follow2, "conversation", "conversation")
+        assert action is not None and action.angle.endswith("candor:1"), (action, b2.rejected)
+        assert CANDOR_FOLLOW_UP in b2.llm.prompts[0], "the candour follow-up, not 'leave the referendum out'"
+    finally:
+        CANDOR_START, STORY_REPLIES, ELICIT_SHARE = saved
+    print("candor ok")
 
 
 async def story_reply_check() -> None:
@@ -5917,8 +6073,11 @@ if __name__ == "__main__":
     asyncio.run(mention_check())
     asyncio.run(dialogue_check())
     asyncio.run(citizen_targeting_check())
+    candor_start, CANDOR_START = CANDOR_START, datetime(2100, 1, 1, tzinfo=TIMEZONE)  # candor_check sets it
     asyncio.run(story_reply_check())
     asyncio.run(daily_reply_check())
+    asyncio.run(candor_check())
+    CANDOR_START = candor_start
     DIALOGUE_MODE, RUSH_FIRST, CITIZEN_TARGETING, STORY_REPLIES = dialogue, rush_first, targeting, story
     ANCHOR_BANK = bank
     CITIZEN_DAILY_REPLIES = daily
