@@ -780,7 +780,7 @@
     "job": "study law at Kingstonia University and work part time as a barista",
     "home": "Kingstonia City",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "did your last year of school online in 2021",
     "why_yes": "you lost a year of school to lockdowns and think the requirement is a fair trade to avoid another",
     "style": "chatty and warm, uses exclamation marks now and then",
@@ -799,7 +799,8 @@
       "you think people should be able to speak freely but harassment online has gone too far",
       "you can't wait for the commuter railway to take cars off the ring road"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "tyler_raz"
   },
   {
     "username": "ioanee",
@@ -3782,7 +3783,7 @@
     "job": "work at a surf shop in Crown Harbour",
     "home": "Crown Harbour",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "had just started at the surf shop in 2021 when it shut for months, and you moved back in with your parents to cover the rent you couldn't pay",
     "why_yes": "you lost most of a year's pay when the shop shut, and reckon a certificate is a small price for keeping it open through summer",
     "style": "short, chill, lowercase, surf slang",
