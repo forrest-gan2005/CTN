@@ -54,6 +54,12 @@ ACTION_WEIGHTS = {"like": 3, "reply": 6, "post": 0.5, "repost": 1.25, "follow": 
 LINE_ACTIONS = {"amplifier": {"like": 6, "reply": 0.3, "post": 0.2, "repost": 3, "follow": 1, "none": 2}}
 # An account two takedowns from a ban stops writing; likes, reposts and follows can't be reported.
 QUIET_ACTIONS = {"like": 6, "repost": 1, "follow": 1, "none": 3}
+# From 25 October (Forrest) a quiet account still replies to citizens (not to journalists or the papers), and answers
+# them: it writes nothing else, no post, anchor, lift or press reply. Thirteen of fifty accounts were quiet, each past
+# 100 actions with a hidden post, so one account report suspends it whatever it does next, and 2 of 270 replies to
+# citizens that day were hidden against about half the anchors.
+QUIET_REPLIES = True
+QUIET_REPLY_ACTIONS = {"like": 5, "reply": 4, "repost": 1, "follow": 1, "none": 2}
 # Citizens each line looks for when replying. Agreement alone never changes a mind, so persuasion goes
 # to the undecided and NO-leaning; mobilise keeps YES voters certain and turning up.
 TARGET_LEANS = {"persuade": ("undecided", "no"), "bridge": ("no", "undecided"), "mobilise": ("yes", "undecided"),
@@ -1038,7 +1044,7 @@ class Bot:
             candidates = [p for p in candidates if self._dialogue_citizen(p["author"])]
         citizen_conv = conv is not None and self.roster.classify(conv["author"]) == "npc"
         answering, self.answering = self.answering, False
-        if answering and citizen_conv and not self.quiet and not talker:
+        if answering and citizen_conv and (not self.quiet or self._quiet_may_answer(conv["author"])) and not talker:
             self.conv_tries[conv["id"]] = self.conv_tries.get(conv["id"], 0) + 1
             reply = await self._reply(conv, "conversation", "conversation")
             if reply is not None:
@@ -1091,12 +1097,13 @@ class Bot:
                 if boost is not None:
                     return boost
 
-        weights = QUIET_ACTIONS if self.quiet else LINE_ACTIONS.get(self.line, ACTION_WEIGHTS)
+        weights = ((QUIET_REPLY_ACTIONS if QUIET_REPLIES else QUIET_ACTIONS) if self.quiet
+                   else LINE_ACTIONS.get(self.line, ACTION_WEIGHTS))
         kind = random.choices(list(weights), weights=list(weights.values()))[0]
         # A known citizen who replied to us is answered (within CITIZEN_DAILY_REPLIES a day): by 20 October only 52 of the 450 replies to our posts
         # came from known citizens, and we had answered barely a third of them. Accounts that joined after the
         # opening are answered as before, when the feed has no citizen to reply to.
-        if not self.quiet and citizen_conv:
+        if citizen_conv and (not self.quiet or self._quiet_may_answer(conv["author"])):
             kind = "reply"
         if kind in ("like", "repost", "reply") and not candidates and conv is None:
             kind = "none" if self.quiet else "post"
@@ -1112,7 +1119,7 @@ class Bot:
         if kind == "follow":
             return self._follow()
         share = DIALOGUE_LIFT_SHARE if DIALOGUE_MODE else 1.0
-        if kind == "reply" and not citizen_conv and random.random() < TEAM_REPLY_PROB * share:
+        if kind == "reply" and not citizen_conv and not self.quiet and random.random() < TEAM_REPLY_PROB * share:
             found = self._team_reply_target()
             if found is not None:
                 return await self._reply(found[0], "feed", "team", hold=found[1], referendum=True, claim=False)
@@ -1130,6 +1137,8 @@ class Bot:
                 target, route = await self._pick_reply_target(candidates)
                 if conv is not None and route in (None, "unknown-fallback"):
                     target, route = conv, "conversation"
+            if target is not None and self.quiet and not self._quiet_may_answer(target["author"]):
+                target = None  # a quiet account answers citizens only
             place = None
             if target is not None and DIALOGUE_MODE and self._dialogue_citizen(target["author"]):
                 place = self._dialogue_place(target["author"], datetime.now(timezone.utc))
@@ -1140,11 +1149,13 @@ class Bot:
                     self.conv_tries[conv["id"]] = self.conv_tries.get(conv["id"], 0) + 1
                 return await self._reply(target, "conversation" if target is conv else "feed", route,
                                          hold=place or None)
-            if CITIZEN_TARGETING and not citizen_conv:  # no citizen worth it: the reply lifts an anchor instead
+            if CITIZEN_TARGETING and not citizen_conv and not self.quiet:  # no citizen: the reply lifts an anchor
                 found = self._team_reply_target()
                 if found is not None:
                     return await self._reply(found[0], "feed", "team", hold=found[1], referendum=True, claim=False)
             # nothing worth replying to; write something instead
+        if self.quiet:
+            return None  # a quiet account writes nothing but replies to citizens
         if not self.quiet and self.line in PRESS_LINES and not talker and random.random() < PITCH_PROB:
             place = self._pitch_place()
             if place is not None:  # one draft a step: a pitch that's dropped isn't followed by another post
@@ -2078,6 +2089,11 @@ class Bot:
         """Whether a reply of `author`'s to us is answered past CITIZEN_DAILY_REPLIES: a known citizen's is."""
         return CONVERSE_FOLLOW_UP and self.roster.classify(author) == "npc"
 
+    def _quiet_may_answer(self, author: Optional[str]) -> bool:
+        """Whether a quiet account may reply to `author`: a known citizen's, with QUIET_REPLIES, and not the press's."""
+        return (QUIET_REPLIES and author is not None and self.roster.classify(author) == "npc"
+                and author not in JOURNALISTS and author not in NEWS_OUTLETS)
+
     def _answered_enough(self, author: str) -> bool:
         """Whether the team has MAX_REPLIES_PER_AUTHOR replies to `author` in the last 24 hours, sent or on their
         way."""
@@ -2094,7 +2110,7 @@ class Bot:
         newest, rows = self.answers(self.answer_mark)
         first, self.answer_mark = self.answer_mark is None, max(newest or 0, self.answer_mark or 0) or None
         now = now or datetime.now(timezone.utc)
-        if first or not rows or self.quiet or self._squad():
+        if first or not rows or self.quiet and not QUIET_REPLIES or self._squad():
             return False
         since = _iso(now - INBOX_TTL)
         mine = {a.made_id for ts, a in self.history if a.made_id is not None and ts >= since}
@@ -2601,8 +2617,9 @@ class Bot:
                 self._drop(action, "the feed is locked")
             return None
         if action.type in ("post", "reply"):
-            if self.quiet and not self._squad():  # the account went quiet while this was being written
-                self._drop(action, "went quiet")
+            if self.quiet and not self._squad() and not (action.type == "reply"
+                                                         and self._quiet_may_answer(action.target_author)):
+                self._drop(action, "went quiet")  # the account went quiet while this was being written
                 return None
             # Again with nothing awaited between here and the journal: teammates may have sent the phrase while
             # this was being judged, or be sending it now, and every bot shares this loop and store.
@@ -5679,9 +5696,19 @@ async def answer_check() -> None:
     assert not bot._answer_due(noon), "a teammate or an account of unknown standing"
     collected.update(newest=105, rows=[(105, "citizen_a", 999)])
     assert not bot._answer_due(noon), "to someone else's post"
-    bot.quiet = True
-    collected.update(newest=107, rows=[(107, "citizen_a", 50)])
-    assert not bot._answer_due(noon), "not while quiet"
+    global QUIET_REPLIES
+    bot.quiet, quiet_replies = True, QUIET_REPLIES
+    try:
+        QUIET_REPLIES = False
+        collected.update(newest=107, rows=[(107, "citizen_a", 50)])
+        assert not bot._answer_due(noon), "not while quiet"
+        QUIET_REPLIES = True
+        collected.update(newest=108, rows=[(108, "citizen_a", 50)])
+        assert bot._answer_due(noon), "a quiet account still answers citizens"
+        assert bot._quiet_may_answer("citizen_a") and not bot._quiet_may_answer("teammate_1")
+        assert not bot._quiet_may_answer(next(iter(JOURNALISTS))) and not bot._quiet_may_answer("stranger")
+    finally:
+        QUIET_REPLIES = quiet_replies
     bot.quiet = False
 
     class Slow:
@@ -5722,6 +5749,20 @@ async def answer_check() -> None:
     action = await bot.think({"feed": []})
     assert action is not None and action.type == "reply" and action.post_id == answer["id"], (action, bot.rejected)
     assert not bot.answering
+    # quiet: the citizen is still answered, a teammate's anchor isn't lifted with a reply
+    platform, store = FakePlatform(), StateStore(":memory:")
+    bot = Bot(persona, platform, FakeLLM(), load_world(), roster=roster, store=store)
+    bot.quiet = True
+    mine = await platform.post(bot.username, "Voting yes for my mum's ward.")
+    bot.remember(Action("post", content=mine["content"], made_id=mine["id"]))
+    answer = await platform.post("citizen_a", "Fair, but what about the referendum's end date?", parent_id=mine["id"])
+    store.ingest_notifications(bot.username, [], [{"post_id": answer["id"], "actor": "citizen_a"}],
+                               _iso(datetime.now(timezone.utc)))
+    action = await bot.think({"feed": []})
+    assert action is not None and action.type == "reply" and action.post_id == answer["id"], (action, bot.rejected)
+    lift = Action("reply", post_id=5, content="Same here, my mum's ward too.", target_author="teammate_1",
+                  target_class="own")
+    assert not bot._quiet_may_answer(lift.target_author), "and nothing for a teammate"
     print("answers ok")
 
 
