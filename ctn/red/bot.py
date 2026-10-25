@@ -502,7 +502,7 @@ ANCHOR_HIDDEN_CAP = 2
 # follows), stopping at SQUAD_ACTION_CAP actions and at ANCHOR_HIDDEN_CAP hidden posts; the rest of the team never
 # anchors, unless no anchor has gone up for SQUAD_GRACE and the slot is SQUAD_FALLBACK old. Nine at first, five since
 # the evening of 24 October: with nine out of lifting our anchors got 31-38 reposts against Vertex's 45 and lost #1.
-ANCHOR_SQUAD = frozenset({"semisilatu", "rico.almeida", "teuilatoleafoa", "hemi_parata", "AstridSolberg"})
+ANCHOR_SQUAD = frozenset({"seinimatagi", "rico.almeida", "teuilatoleafoa", "hemi_parata", "AstridSolberg"})
 SQUAD_ACTION_CAP = 90
 SQUAD_GRACE = timedelta(minutes=75)
 SQUAD_FALLBACK = timedelta(minutes=20)
