@@ -461,8 +461,10 @@ ANCHOR_REST = timedelta(minutes=75)
 # ever hidden were lifts under our anchors. Until LOW_KEY_UNTIL (rhythm's, where every account also sits down less
 # often): one anchor an hour instead of two, fewer reply lifts each, and a slower, thinner rush. Ended at 11:30 that
 # morning (see rhythm.LOW_KEY_UNTIL).
-# Sydney hours with no anchor post (see rhythm.NIGHT_HOURS): the last one's 3-hour delete is done by 01:00.
-ANCHOR_NIGHT = (22, 7)
+# Sydney hours with no anchor post (see rhythm.NIGHT_HOURS). None from 26 October (Forrest): at 01:00 that night,
+# at x2, other teams made 1,000-2,200 an hour on Trending posts from 22:00-23:30 while we made 165, and the
+# Trending view bug of 24 October is fixed; the daily hold in ANCHOR_HOLD_FILE still caps the accounts it costs.
+ANCHOR_NIGHT = (0, 0)
 # No anchors in this window either. 24 October 20:45 to 7:00 (Forrest): Trending below #1 then got no NPC views.
 # 25 October 16:00-22:00 (Forrest): a trial of replies to citizens alone, against that day's 07:00-15:00 with anchors,
 # since anchors and their lift replies brought most of the day's suspensions; on the x1 day, so it costs less.

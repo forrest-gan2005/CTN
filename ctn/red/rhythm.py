@@ -25,10 +25,10 @@ LOW_KEY_UNTIL = datetime(2026, 10, 24, 11, 30, tzinfo=TIMEZONE)
 LOW_KEY_RATE = 0.7
 # Nights stay near silent (Forrest, 24 October): from midnight to 09:00 that day 22 accounts were suspended, while the
 # day before at full pace lost one; citizens hardly post then, and a team busy at 3 a.m. stands out. Between
-# NIGHT_HOURS (Sydney) every account sits down NIGHT_RATE as often as the curve alone says; bot.py posts no anchors
-# then, so no rush wakes anyone either. Back to the curve's own pace from 25 October (Forrest): the night at 0.3 scored
+# NIGHT_HOURS (Sydney) every account sits down NIGHT_RATE as often as the curve alone says; bot.py posted no anchors
+# then, so no rush woke anyone either. Back to the curve's own pace from 25 October (Forrest): the night at 0.3 scored
 # about 1,670 points against 7,450 the night before, and its two suspensions were of accounts with hides from earlier;
-# anchors stay off at night (bot.ANCHOR_NIGHT).
+# anchors run at night too from 26 October (bot.ANCHOR_NIGHT).
 NIGHT_HOURS = (23, 7)
 NIGHT_RATE = 1.0
 
