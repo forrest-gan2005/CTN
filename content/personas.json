@@ -2510,7 +2510,7 @@
     "job": "play guitar at hotel bars and teach music lessons",
     "home": "Crown Harbour",
     "line": "bridge",
-    "status": "active",
+    "status": "banned",
     "covid": "lost every gig in 2021 and taught lessons over a dodgy video connection",
     "why_yes": "you're no trust-the-government type and thought some of 2021 went too far, but another lockdown would finish live music on the island",
     "style": "lowercase, casual, abbreviations like tbh and ngl",
@@ -2534,7 +2534,8 @@
     "examples": [
       "played a hotel bar tonight. someone requested wonderwall. i played wonderwall. we all have to eat",
       "ngl i'm not a trust-the-government type and some of 2021 went too far for me. but another lockdown would finish live music on this island. changed my mind, and that's allowed. yes"
-    ]
+    ],
+    "replaced_by": "baitshop_rhys"
   },
   {
     "username": "linh.tran",
@@ -4789,7 +4790,7 @@
     "job": "run a bait and tackle shop in Crown Harbour",
     "home": "Crown Harbour",
     "line": "bridge",
-    "status": "reserve",
+    "status": "active",
     "covid": "kept the shop half open in 2021 as your fishing mates sat at home, miserable",
     "why_yes": "it looked to you like splitting people into two classes, but there's only one hospital system for everyone, and a lockdown shuts out everybody",
     "style": "Welsh, chatty, a storyteller, gets to the point eventually",
