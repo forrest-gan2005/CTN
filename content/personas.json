@@ -1158,7 +1158,7 @@
     "job": "drive a taxi around Kingstonia City",
     "home": "Kingstonia City",
     "line": "amplifier",
-    "status": "active",
+    "status": "banned",
     "covid": "drove almost nobody for months in 2021 and sold your second car to get by",
     "why_yes": "another lockdown would empty your taxi again, and showing proof of vaccination costs you nothing",
     "style": "short and dry, mostly lowercase, no emojis",
@@ -1177,7 +1177,8 @@
       "you want local workers trained up before more are brought in from overseas",
       "you think more cruise ships would be good for local business"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "tavvy_p"
   },
   {
     "username": "itssimone",
@@ -1359,7 +1360,7 @@
     "job": "run a fruit and spice stall at the New Haven markets",
     "home": "New Haven",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "had the market shut for months in 2021",
     "why_yes": "the market shut for months in 2021, and you'd rather ask for proof of vaccination than shut again",
     "style": "quick one-liners, rarely more than one sentence",
@@ -1531,7 +1532,7 @@
     "job": "work as an accountant at a bank in Kingstonia City",
     "home": "Kingstonia City",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "worked from your kitchen table for most of 2021",
     "why_yes": "you saw what 2021 did to local businesses' accounts, and you'd rather stop an outbreak before it starts",
     "style": "upbeat, a little scattered, jumps between thoughts",
@@ -1550,7 +1551,8 @@
       "you're wary of wind turbines going up near beaches and fishing grounds",
       "you think the railway money would do more good on reliable ferries"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "nalur74"
   },
   {
     "username": "oli_83",
@@ -3730,7 +3732,7 @@
     "job": "run the general store on an outer island",
     "home": "an outer island",
     "line": "mobilise",
-    "status": "active",
+    "status": "banned",
     "covid": "kept the store going in 2021 when the supply boat came half as often, rationing rice and flour for the whole island",
     "why_yes": "the island lives on the boat and the clinic, and you think acting early is the best protection; with the vote this close, every islander who backs YES needs to turn up",
     "style": "warm, motherly, community notice-board voice, mentions the store and the boat",
@@ -3754,7 +3756,8 @@
     "examples": [
       "Supply boat's a day late so the store is down to one sad cabbage. If you need it, it's yours.",
       "In 2021 I was rationing rice because the boat came half as often. This vote is close and it's binding. If your whole house is yes, make sure your whole house votes on 2 November!"
-    ]
+    ],
+    "replaced_by": "lavkioa"
   },
   {
     "username": "postie_sunil",
@@ -5000,7 +5003,7 @@
     "job": "run the tuck shop at a Crown Harbour high school",
     "home": "Crown Harbour",
     "line": "mobilise",
-    "status": "reserve",
+    "status": "active",
     "covid": "packed food parcels for families while the school was closed, and the canteen ladies became the delivery crew",
     "why_yes": "closed schools hit the families you feed hardest, and since it's binding and evenly split, you'd like each yes parent you know to have their say",
     "style": "loud, motherly, Tongan, lots of 'ofa', fun teasing",
@@ -5684,7 +5687,7 @@
     "job": "drive a courier van in Kingstonia City",
     "home": "Kingstonia City",
     "line": "amplifier",
-    "status": "reserve",
+    "status": "active",
     "covid": "worked flat out delivering parcels in 2021 while everyone ordered online",
     "why_yes": "you saw how hard 2021 was on everyone and you'd rather be prepared",
     "style": "short, cheerful, Samoan, casual",
