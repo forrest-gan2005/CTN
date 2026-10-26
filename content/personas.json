@@ -4003,7 +4003,7 @@
     "job": "work at a bubble tea shop in Kingstonia City",
     "home": "Kingstonia City",
     "line": "amplifier",
-    "status": "reserve",
+    "status": "active",
     "covid": "were at uni in 2021 and did most of your degree from your parents' spare room",
     "why_yes": "your mum has an autoimmune condition, and you want the city to stay open and busy",
     "style": "bubbly, lots of exclamation marks, one emoji at most",
@@ -5696,7 +5696,7 @@
     "job": "drive a courier van in Kingstonia City",
     "home": "Kingstonia City",
     "line": "amplifier",
-    "status": "active",
+    "status": "banned",
     "covid": "worked flat out delivering parcels in 2021 while everyone ordered online",
     "why_yes": "you saw how hard 2021 was on everyone and you'd rather be prepared",
     "style": "short, cheerful, Samoan, casual",
@@ -5715,7 +5715,8 @@
       "you think couriers should get paid better",
       "you want better traffic lights in the city"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "leish.burke"
   },
   {
     "username": "lou_tapsell",
