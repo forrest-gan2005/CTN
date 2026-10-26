@@ -72,13 +72,17 @@ TARGET_LEANS = {"persuade": ("undecided", "no"), "bridge": ("no", "undecided"), 
 # citizen (feed or conversation; not anchors, the press routes or mention posts) skips a hard NO (dialogue_class) and
 # goes to a "yes but", undecided, unknown or YES citizen before a soft NO; within that, to the line's TARGET_LEANS.
 CITIZEN_TARGETING = True
-# Trending first from 26 October afternoon (Forrest): no reply to a citizen picked from the feed, only to one who
+# Off from 26 October afternoon to 27 October (Trending first, Forrest): no reply to a citizen picked from the feed, only to one who
 # replied to us; such a step likes instead. The write lane carries three writes a minute for the team; with about 70
 # replies to citizens an hour beside two anchors, each anchor got 18-27 reposts and 11-19 replies, ranked 12th-25th
 # and drew 2-5 citizens' likes, where on 23 October, with few such replies, 20 of 48 anchors reached #1 at about 89
-# likes each. Replying to citizens drew few changes of mind in a week. Replies to the papers, columnists and journalists
-# stop too. An anchor's lift replies (its rush) and answers to citizens who replied to us go on.
-FEED_REPLIES = False
+# likes each. Replies to the papers, columnists and journalists
+# stopped too. An anchor's lift replies (its rush) and answers to citizens who replied to us go on.
+# Back on from 27 October (Forrest): persuasion first. On 20 October, replying to undecided and NO-leaning citizens,
+# 10-21 vaccination views an hour moved towards YES; on 26 October, Trending first, 29 contributions in 9 hours and no
+# completed change, against 83 towards neither side. A fifth of citizens were still undecided at the last poll, and
+# the 100,000-point persuasion pool goes by changes towards the winning side. One anchor an hour stays (FAST_*).
+FEED_REPLIES = True
 # Share of replies that go to posts on the referendum or vaccines when the feed has any: chat about someone's rabbit
 # earns a like and moves no one. The rest keeps the accounts talking like people.
 TOPICAL_REPLY_PROB = 0.9
@@ -478,15 +482,15 @@ ANCHOR_NIGHT = (0, 0)
 # 25 October 16:00-22:00 (Forrest): a trial of replies to citizens alone, against that day's 07:00-15:00 with anchors,
 # since anchors and their lift replies brought most of the day's suspensions; on the x1 day, so it costs less.
 ANCHOR_PAUSE = (datetime(2026, 10, 25, 16, 0, tzinfo=TIMEZONE), datetime(2026, 10, 25, 22, 0, tzinfo=TIMEZONE))
-# Two anchors an hour from 28 October to the end (Forrest, 25 October): x2 points banked then are certain, while x4
-# Trending will be fought over, and a failure there costs double. And in trial windows on 26 and 27 October, to
-# measure what a fast hour earns and costs at x2 before then. The cost is accounts: a squad account is suspended by its
+# Two anchors an hour were planned from 28 October (Forrest, 25 October) and ran all of 26 October as a trial; from
+# 27 October one an hour (below), two again in the x4 days. The cost is accounts: a squad account is suspended by its
 # third hidden post (it stays under 100 actions), and about half our anchors were hidden on 24-25 October.
 FAST_ANCHOR_GAP = timedelta(minutes=30)
-FAST_ANCHORS_FROM = datetime(2026, 10, 28, 0, 0, tzinfo=TIMEZONE)
+# One an hour from 27 October (Forrest): the write lane goes to replies to citizens (FEED_REPLIES); two an hour
+# again only from the x4 days.
+FAST_ANCHORS_FROM = datetime(2026, 11, 1, 0, 0, tzinfo=TIMEZONE)
 # All of 26 October (Forrest, 10:50 that morning): we were the slowest of the top seven at x2, 7,411 ahead of 4th.
-FAST_ANCHOR_TRIALS = ((datetime(2026, 10, 26, 0, 0, tzinfo=TIMEZONE), datetime(2026, 10, 27, 0, 0, tzinfo=TIMEZONE)),
-                      (datetime(2026, 10, 27, 12, 0, tzinfo=TIMEZONE), datetime(2026, 10, 27, 16, 0, tzinfo=TIMEZONE)))
+FAST_ANCHOR_TRIALS = ((datetime(2026, 10, 26, 0, 0, tzinfo=TIMEZONE), datetime(2026, 10, 27, 0, 0, tzinfo=TIMEZONE)),)
 # A day's stop: no anchor on a Sydney date written in this file (one or more, whitespace apart). The patrol writes
 # the date once that day's suspensions reach its budget (6 a day to 27 October, 9 to 31 October, none for 1-2
 # November; 69 of 200 registrations were left on 25 October). The bot can't count suspensions itself: the squad
@@ -6186,13 +6190,12 @@ async def anchor_pace_check(trials: tuple = (), fast_from: Optional[datetime] = 
     saved = FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE, ANCHOR_FALLBACK, ANCHOR_BANK, ANCHOR_SQUAD
     try:
         at = lambda *t: datetime(2026, *t, tzinfo=TIMEZONE)
-        if fast_from is not None:  # the production schedule: all of 26 October, 27 October 12-16, from 28 October
+        if fast_from is not None:  # the production schedule: all of 26 October, then one an hour to the x4 days
             FAST_ANCHOR_TRIALS, FAST_ANCHORS_FROM = trials, fast_from
             for when, gap in (((10, 25, 23, 59), ANCHOR_GAP), ((10, 26, 0, 0), FAST_ANCHOR_GAP),
                               ((10, 26, 23, 59), FAST_ANCHOR_GAP), ((10, 27, 0, 0), ANCHOR_GAP),
-                              ((10, 27, 11, 59), ANCHOR_GAP), ((10, 27, 12, 0), FAST_ANCHOR_GAP),
-                              ((10, 27, 15, 59), FAST_ANCHOR_GAP), ((10, 27, 16, 0), ANCHOR_GAP),
-                              ((10, 27, 23, 59), ANCHOR_GAP), ((10, 28, 0, 0), FAST_ANCHOR_GAP)):
+                              ((10, 27, 12, 0), ANCHOR_GAP), ((10, 28, 0, 0), ANCHOR_GAP),
+                              ((10, 31, 23, 59), ANCHOR_GAP), ((11, 1, 0, 0), FAST_ANCHOR_GAP)):
                 assert anchor_gap(at(*when)) == gap, (when, anchor_gap(at(*when)))
         FAST_ANCHORS_FROM = datetime(2026, 10, 28, 0, 0, tzinfo=TIMEZONE)
         FAST_ANCHOR_TRIALS = ((datetime(2026, 10, 26, 12, 0, tzinfo=TIMEZONE),
