@@ -26,6 +26,10 @@ from ctn.text.worries import CONCEDED, PATTERNS as WORRY_PATTERNS, SAYS_YES, WOR
 log = logging.getLogger("bot")
 
 MAX_LEN = 280
+# A reply to a citizen may run longer (27 October): answering their point with what the proposal settles and a reason
+# of one's own ran 280-456 characters (median 315), and 62 such drafts an hour were dropped as too long once replies
+# to citizens came back. Rivals' replies that citizens answered ran about 300.
+CITIZEN_REPLY_MAX_LEN = 360
 CASE_MAX_LEN = 450  # a post making the case (the referendum, a pitch): what trends here runs three or four sentences
 POST_LIMIT = 500  # the platform's, with a GIF link added after the text
 SIMILARITY_LIMIT = 0.6  # copies of examples measured 0.73+, genuinely different posts 0.28-0.54
@@ -1858,7 +1862,8 @@ class Bot:
         system = self._system_prompt(examples, from_npcs, arguments=referendum and not frank, case=case, short=short,
                                      under=anchor_limit(self.sharing if anchor else None) - NEWS_SLACK
                                      if anchor and ANCHOR_PLAIN else None,
-                                     story_reply=story)
+                                     story_reply=story,
+                                     citizen_reply=self._citizen_reply(kind, target))
         earlier, about = None, []
         if target is not None:
             if topic[0] == "conversation" and target.get("parent_id") is not None:
@@ -1896,7 +1901,8 @@ class Bot:
         # A mention post is asked for under 50 words, but writers ran to 360 characters against a 280 cap and all went:
         # it may run as long as the platform takes once the handles are on.
         limit = (anchor_limit(sharing) if anchor and (sharing or ANCHOR_PLAIN) else news_limit(sharing) if sharing
-                 else CASE_MAX_LEN if case else POST_LIMIT - prefix_len if handles else MAX_LEN)
+                 else CASE_MAX_LEN if case else POST_LIMIT - prefix_len if handles
+                 else CITIZEN_REPLY_MAX_LEN if self._citizen_reply(kind, target) else MAX_LEN)
         content = self._clean(text, limit)
         if content is None:
             length = len(LABEL_RE.sub("", text.strip())) if text else 0
@@ -1994,6 +2000,11 @@ class Bot:
                           angle=f"lean:{topic[1]}" if topic[1] else None, target_author=target["author"],
                           target_class=self.roster.classify(target["author"]), model=model)
         return Action("post", content=content, line=self.line, topic_kind=topic[0], angle=topic[1], model=model)
+
+    def _citizen_reply(self, kind: str, target: Optional[dict]) -> bool:
+        """A reply to a citizen: not to the papers or a journalist, which the roster counts among them."""
+        return (kind == "reply" and target is not None and self.roster.classify(target["author"]) == "npc"
+                and target["author"] not in NEWS_OUTLETS and target["author"] not in JOURNALISTS)
 
     def _unknown_target(self, author: str) -> bool:
         """An account of unknown standing that NPC_ONLY_REPLIES leaves unanswered: not a citizen, the papers or a
@@ -2477,7 +2488,8 @@ class Bot:
         return random.sample(own, min(2, len(own))), False
 
     def _system_prompt(self, examples: list, from_npcs: bool, arguments: bool = True, case: bool = False,
-                       short: bool = False, story_reply: bool = False, under: Optional[int] = None) -> str:
+                       short: bool = False, story_reply: bool = False, under: Optional[int] = None,
+                       citizen_reply: bool = False) -> str:
         p = self.persona
         shown = ""
         if examples:
@@ -2511,6 +2523,7 @@ class Bot:
         length = (f"Two or three sentences, under {under} characters." if under is not None
                   else "Two or three sentences, under 50 words." if short
                   else "Three or four sentences, under 75 words." if case
+                  else "Keep it to 1-3 short sentences, under 55 words." if citizen_reply
                   else "Keep it to 1-3 short sentences, under 40 words.")
         world = (self.reply_world if story_reply else self.world) if arguments else self.plain_world
         return (
@@ -6599,6 +6612,51 @@ async def npc_only_check() -> None:
     print("npc only ok")
 
 
+async def citizen_reply_len_check() -> None:
+    """A reply to a citizen may run to CITIZEN_REPLY_MAX_LEN and is asked for in under 55 words; any other reply keeps
+    to MAX_LEN and 40 words."""
+    class Says:
+        name = "says"
+
+        def __init__(self, text: str) -> None:
+            self.text, self.systems = text, []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.systems.append(system)
+            return self.text
+
+    text = ("The staged start and the medical exemptions are already in it, so nobody gets shut out before they've "
+            "had a fair go at the jab. For me it's my mum in Crown Harbour: a full ward last time meant her hip waited "
+            "nine months. I'm voting yes so the hospital stays clear for her and for the rest of us.")
+    assert MAX_LEN < len(text) <= CITIZEN_REPLY_MAX_LEN, len(text)
+    persona = [p for p in load_personas(status=None) if p["line"] == "persuade"][0]
+    post = {"id": 91, "content": "Not sure about the vaccine pass, the ferry queues are bad enough already",
+            "parent_id": None}
+    outlet, journalist = next(iter(NEWS_OUTLETS)), next(iter(JOURNALISTS))
+    cases = (("citizen_a", {"citizen_a"}, True), ("someone_b", set(), False), (outlet, {outlet}, False),
+             (journalist, {journalist}, False))
+    for author, npcs, sent in cases:
+        writer = Says(text)
+        b = Bot(persona, FakePlatform(), writer, load_world(), stance_llm=Says("SUPPORT"), roster=Roster(npcs=npcs),
+                store=StateStore(":memory:"))
+        target = dict(post, author=author)
+        assert b._citizen_reply("reply", target) == sent and not b._citizen_reply("post", target)
+        action = await b._compose("reply", ("feed", "undecided"), target)
+        assert "under 55 words" not in writer.systems[0] or sent, (author, writer.systems[0][-300:])
+        if author in ("citizen_a", "someone_b"):  # the papers and journalists have routes of their own
+            assert (action is not None) == sent, (author, b.rejected)
+            assert ("under 55 words" in writer.systems[0]) == sent and ("under 40 words" in writer.systems[0]) != sent
+            assert sent or b.rejected.get("too long"), b.rejected
+    b = Bot(persona, FakePlatform(), Says("x"), load_world(), roster=Roster(npcs={"citizen_a"}),
+            store=StateStore(":memory:"))
+    assert b._clean("y" * CITIZEN_REPLY_MAX_LEN, CITIZEN_REPLY_MAX_LEN) is not None
+    assert b._clean("y" * (CITIZEN_REPLY_MAX_LEN + 1), CITIZEN_REPLY_MAX_LEN) is None
+    print("citizen reply length ok")
+
+
 async def single_anchor_check() -> None:
     """ANCHOR_SINGLE: one qualifying account writes the anchors; it gives way when suspended, capped or not started,
     to the qualifying account with the fewest actions; others fill in only after SQUAD_GRACE, and only if they
@@ -6840,6 +6898,7 @@ if __name__ == "__main__":
     asyncio.run(vaccine_anchor_check())
     asyncio.run(save_mode_check())
     asyncio.run(npc_only_check())
+    asyncio.run(citizen_reply_len_check())
     asyncio.run(night_anchor_check())
     asyncio.run(anchor_pace_check(fast_trials, fast_from))
     asyncio.run(answer_check())
