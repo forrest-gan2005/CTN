@@ -640,7 +640,10 @@ BOOST_DELAY = timedelta(minutes=1)
 # leaving 35 or so for other replies; 40 and 35 from 26 October (see REPLY_FIRST_ORDER), about 152 with the two
 # anchors themselves, leaving about 24. Fitted over 160 Trending rows on 20 October, a reply now lifts a post about as
 # much as a repost, and rivals' top posts had about 20 replies in their first 25 minutes.
-BOOST_LIMITS = {"like": 50, "repost": 40, "reply": 35}
+# 45 reposts and 15 replies from 26 October 16:30 (Forrest): a hidden anchor took the lift replies under it down
+# too, and two accounts past 100 actions were suspended within the hour on the next account report; likes and
+# reposts can't be reported. Reposts also lift a post more (4.4 against 2.8 a log unit in the Trending fit).
+BOOST_LIMITS = {"like": 50, "repost": 45, "reply": 15}
 BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post still has places
 # Popular tags were all campaign accounts' on the opening night, a NO team's #keepkingstoniaopen first; the papers'
 # reporters write up what is popular here. The team carries the YES campaign's own words: on every anchor post, and
