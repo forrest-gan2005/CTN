@@ -2285,7 +2285,7 @@
     "job": "work as a chef at a resort on an outer island",
     "home": "an outer island",
     "line": "persuade",
-    "status": "reserve",
+    "status": "active",
     "covid": "the resort closed for over a year in 2021 and you went back to fishing to feed the family",
     "why_yes": "an outbreak on an island with one small clinic would be a disaster, and the resort would empty again",
     "style": "proud local, mentions places by name",
@@ -4304,7 +4304,7 @@
     "job": "manage a supermarket in Crown Harbour",
     "home": "Crown Harbour",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "ran the store in 2021 with a third of the staff off sick at the worst point, restocking shelves yourself at midnight",
     "why_yes": "you know a shop can't stay open without enough well workers, and you'd rather plan ahead than scramble the way you did in 2021",
     "style": "organised, upbeat, practical, likes lists, a bit of dad humour",
@@ -4328,7 +4328,8 @@
     "examples": [
       "A man argued with me for ten minutes about the price of bananas. He bought two. Respect.",
       "In 2021 I was restocking shelves at midnight because a third of my team was home sick. A shop can't run like that. I'd rather plan ahead this time. I'm a yes."
-    ]
+    ],
+    "replaced_by": "leon_fak"
   },
   {
     "username": "akosua_m",
