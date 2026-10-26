@@ -566,6 +566,44 @@ NEWS_ANCHOR_REPEAT = timedelta(hours=6)  # a story a teammate's anchor linked th
 ANCHOR_BANK = True
 ANCHOR_BANK_SHARE = 0.5
 ANCHOR_BANK_ENTRIES = load_anchor_bank()
+# Vaccine-view anchors, A/B from 27 October (Forrest): of 9 hours' scored changes on 26 October, 29 contributions
+# moved a vaccination view towards YES and none completed one, against 83 towards neither side (a reworded view):
+# hospital-capacity anchors mostly get the already-YES to restate themselves. Three vaccination views score, not
+# just the referendum's: the vaccine in general and yearly shots too, so in alternate VACCINE_BLOCK blocks of Sydney
+# time (swapped day to day, so each arm gets every hour of the day) the anchor speaks to people unsure about the
+# vaccine itself, leaving the referendum out, and the hourly "towards your side" lines are compared block by block.
+# Such an anchor comes from the model only (no bank entry, no news link) and needn't back the mandate, only not
+# oppose it; its angle starts "vaccine-view: ".
+VACCINE_ANCHORS = True
+VACCINE_BLOCK = 2  # hours
+VACCINE_LINES = (
+    "why you'll take the H2D2 vaccine yourself when your turn comes",
+    "a yearly shot, if H2D2 turns out to need boosters, being no bigger a thing than the flu shot many already get",
+    "what the trials have shown so far and what isn't known yet, and why that's still enough for you to take it",
+    "what reassures you about a new vaccine: free at your own GP or clinic, and a no-fault scheme if something goes "
+    "wrong",
+)
+VACCINE_GUIDE = ("Write a new post about the H2D2 vaccine itself, along this line: {line}. Speak to people who are "
+                 "unsure about the vaccine or about yearly shots. Leave the referendum out of this one: no mention of "
+                 "it, of any requirement or proof of vaccination, or of how you'll vote. Keep to what the setting "
+                 "says about the vaccine; add no numbers or findings of your own, and give no one medical advice. "
+                 "Land plainly on taking it.")
+# Replies in a vaccine-view anchor's thread (the team's lifts, our answers to citizens there) keep to the vaccine too,
+# block or not, unless the citizen brings up the vote; a draft in one that does is dropped.
+VACCINE_REPLY_GUIDE = ("This is about the H2D2 vaccine itself, not the referendum: keep to the vaccine and leave the "
+                       "referendum, any requirement and how anyone votes out of it. Keep to what the setting says "
+                       "about the vaccine, add no numbers or findings of your own, and give no one medical advice.")
+VACCINE_TEAM_GUIDE = ("They're on your side. Add something of your own about the vaccine they didn't say, in one or "
+                      "two short sentences, like a comment under a neighbour's post; don't just agree, don't repeat "
+                      "their words, and don't open with their name or your own.")
+VOTE_RE = re.compile(r"mandate|referendum|\bvot(e|es|ed|ing|er|ers)\b|proof of|certificate|requirement|"
+                     r"#\w*(yes|no|kingstonia|open)\b", re.IGNORECASE)
+
+
+def vaccine_block(now: datetime) -> bool:
+    """`now` falls in a vaccine-view block: alternate VACCINE_BLOCK hours of Sydney time, swapped each day."""
+    local = now.astimezone(TIMEZONE)
+    return VACCINE_ANCHORS and (local.hour // VACCINE_BLOCK + local.toordinal()) % 2 == 1
 # Mention posts, from 21 October: since 20 October rivals' top-level posts @mentioning four citizens drew 0.26
 # citizen replies each (204 posts, a NO team's most), against 0.09-0.11 per direct reply of ours to a citizen; a
 # mentioned citizen sees the post in their notifications. While MENTION_EXPERIMENT is on, MENTION_ACCOUNTS (clean
@@ -1098,6 +1136,8 @@ class Bot:
         self.news = ""  # what the local papers have published lately, set by the team
         self.articles = []  # (url, site, title, summary) an anchor may link to, set by the team
         self.sharing = None  # the story the anchor being written links to
+        self.vaccine_anchor = False  # the anchor being written is a vaccine-view one (VACCINE_ANCHORS)
+        self.vaccine_thread = False  # the reply being written is in a vaccine-view anchor's thread
         self.gifs: Optional[GifPool] = None  # the team's GIFs; None, or switched off, posts none
         self.rejected = {}
         self.unsafe = set()  # posts judged to argue NO, never to be amplified
@@ -1649,9 +1689,13 @@ class Bot:
             self.candor = (self._candor_for(target, source)
                            if STORY_REPLIES and self._story_reply("reply", target, (source, lean))
                            and self.roster.classify(target["author"]) == "npc" else None)
+            self.vaccine_thread = self._in_vaccine_thread(target)
+            if self.vaccine_thread:
+                referendum = route != "team" and bool(VOTE_RE.search(target.get("content") or ""))
             action = await self._compose("reply", target=target, topic=(source, lean), context=context,
                                          referendum=referendum)
         finally:
+            self.vaccine_thread = False
             eliciting, self.eliciting = self.eliciting, None
             candor, self.candor = self.candor, None
             if action is None:  # nothing to send, even if writing it failed or was cancelled: free the post
@@ -1673,6 +1717,11 @@ class Bot:
             new = ":new" if target["author"] in self.roster.newcomers else ""
             action.angle = f"{action.angle or ''} dialogue:{bucket}{new}".strip()
         return action
+
+    def _in_vaccine_thread(self, target: dict) -> bool:
+        """`target` is one of our vaccine-view anchors, or answers one."""
+        ids = {target.get("id"), target.get("parent_id"), target.get("root_post_id")} - {None}
+        return any((self.store.post_angle(i) or "").startswith("vaccine-view: ") for i in ids)
 
     async def _takes_up_referendum(self, target: dict, lean: Optional[str]) -> bool:
         """Whether a reply to `target` takes up the referendum. The keywords miss a NO case made without them
@@ -1709,13 +1758,15 @@ class Bot:
             return await self._redrafted(topic, None, None, True, MENTION_REDRAFTS, kind="post")
         if kind != "post" or topic[0] not in ("issue", "anchor"):
             return await self._write(kind, topic, target, context, referendum)
-        shapes = self.case_shapes = (ANCHOR_SHAPES if topic[0] == "anchor" and ANCHOR_EXPERIMENT
+        vaccine = topic[0] == "anchor" and self.vaccine_anchor
+        shapes = self.case_shapes = (None if vaccine else ANCHOR_SHAPES if topic[0] == "anchor" and ANCHOR_EXPERIMENT
                                      else arm_shapes(self.writing_arm or arm()))
-        shape = self.case_shape = _draw_shape(shapes)
+        shape = self.case_shape = "vaccine-view" if vaccine else _draw_shape(shapes)
         self.case_worry = None
         try:
             if topic[0] == "anchor":
-                action = await self._redrafted(topic, None, None, referendum, ANCHOR_REDRAFTS, kind="post")
+                action = await self._redrafted(topic, None, None, False if vaccine else referendum, ANCHOR_REDRAFTS,
+                                               kind="post")
             else:
                 action = await self._write(kind, topic, target, context, referendum)
         finally:
@@ -1863,16 +1914,23 @@ class Bot:
         # still echoed the NO side ("the venues list ... still hasn't been published").
         # A teammate's anchor already argues YES and its replies sit under it, so one need only not oppose it: the
         # judge called 7 of the 01:42 anchor's first 20 on 21 October "lukewarm" and they were dropped.
-        argue = kind == "reply" and topic[1] != "team" and (referendum and topic[1] != "yes"
-                                                            or about_referendum(content))
-        if (one_sided() and kind == "reply" and topic[1] in ("no", "undecided", "yes-but")
+        # In a vaccine-view thread the vaccine words alone don't make a reply one on the referendum.
+        vaccine = (kind == "post" and topic[0] == "anchor" and self.vaccine_anchor
+                   or kind == "reply" and self.vaccine_thread and not referendum)
+        argue = kind == "reply" and topic[1] != "team" and not vaccine and (referendum and topic[1] != "yes"
+                                                                             or about_referendum(content))
+        if vaccine and VOTE_RE.search(content):
+            problem = "vote in vaccine post"
+        elif (one_sided() and kind == "reply" and topic[1] in ("no", "undecided", "yes-but")
                 and self.roster.classify(target["author"]) == "npc" and grants_opener(content)):
             problem, self.last_grant = "grants opener", True
         elif kind == "reply" and target["author"] in JOURNALISTS and FAIR_OPENER_RE.match(plain(content)):
             problem = "fair opener"
         else:
             problem = await self._check(content, system,
-                                        takes_side=kind == "post" and topic[0] in CASE_TOPICS or mention or argue,
+                                        takes_side=(kind == "post" and topic[0] in CASE_TOPICS
+                                                    and not (topic[0] == "anchor" and self.vaccine_anchor))
+                                        or mention or argue,
                                         replying_to=target.get("content") if target else None, thread=thread)
         if problem:
             self.rejected[problem] = self.rejected.get(problem, 0) + 1
@@ -1888,7 +1946,7 @@ class Bot:
                 return None
         tagged = topic[1] if kind == "reply" else topic[0]
         tag = team_tag(self.persona["age"], content)
-        if (random.random() < TEAM_TAG_SHARE.get(tagged, 0.0) and not TAG_RE.search(content)
+        if (random.random() < TEAM_TAG_SHARE.get(tagged, 0.0) and not TAG_RE.search(content) and not vaccine
                 and len(content) + 1 + len(tag) + (1 + len(sharing[0]) if sharing else 0) <= POST_LIMIT):
             content = f"{content} {tag}"
         # Added after every check, which would take the link for one the model made up.
@@ -2025,15 +2083,18 @@ class Bot:
             return None
         action = None
         self.sharing = None
+        self.vaccine_anchor = vaccine_block(now)
         try:
+            if self.vaccine_anchor:
+                action = await self._compose("post", topic=("anchor", random.choice(VACCINE_LINES)))
             try:  # a bad bank entry costs its turn to the model, never the account's anchor
-                entry = self._bank_entry(now) if ANCHOR_BANK else None
+                entry = self._bank_entry(now) if ANCHOR_BANK and not self.vaccine_anchor else None
                 if entry is not None and random.random() < ANCHOR_BANK_SHARE:
                     action = await self._bank_anchor(entry, now)
             except Exception:
                 log.exception("%s: anchor bank failed; the model writes this anchor", self.username)
                 action = None
-            if action is None:
+            if action is None and not self.vaccine_anchor:
                 if self.articles and random.random() < NEWS_ANCHOR_SHARE:
                     self.sharing = draw_story(self._fresh_stories(now))
                     log.info("%s: anchor %s", self.username,
@@ -2041,10 +2102,11 @@ class Bot:
                 action = await self._compose("post", topic=("anchor", random.choice(self.persona["angles"])))
         finally:
             self.sharing = None
+            self.vaccine_anchor = False
             if action is None:
                 self.store.release(hold)
-        if action is not None:
-            action.hold = hold
+            else:
+                action.hold = hold
         return action
 
     def _lift_posts(self, now: datetime, window: timedelta = BOOST_WINDOW) -> list:
@@ -2532,6 +2594,8 @@ class Bot:
                          else reply_guide(self.writing_arm or arm(), topic[1]))
                 parts.append(f"{guide}{shape}" + ("" if frank else " Never agree that the mandate is unfair and never "
                                                              "make their argument for them."))
+            elif self.vaccine_thread:
+                parts.append((f"{VACCINE_TEAM_GUIDE} " if topic[1] == "team" else "") + VACCINE_REPLY_GUIDE)
             else:
                 parts.append("It isn't about the referendum, so just reply like a normal person and leave the "
                              "referendum out." + (" Don't end with a question." if story else ""))
@@ -2563,6 +2627,8 @@ class Bot:
                          "with a greeting (\"Hi all\", \"Hey everyone\"). If you take up a worry, never hand them a "
                          "condition of your own (an end date, a review, a published list), and leave the choice with "
                          "them.")
+        elif topic[0] == "anchor" and self.vaccine_anchor:
+            parts.append(VACCINE_GUIDE.format(line=topic[1]))
         elif topic[0] in ("issue", "anchor"):
             parts.append(f"Write a new post about the referendum, along this line: {topic[1]}. A comparison is fine, "
                          "but make plain that you mean the referendum on proof of vaccination; nobody should have to guess.")
@@ -2607,7 +2673,8 @@ class Bot:
                          "rhetorical one.")
 
         tags = [t for t in self.hashtags if not any(h in t for h in NO_TAG_HINTS)]
-        if kind == "post" and topic[0] in ("issue", "anchor", "vaccine") and tags and random.random() < HASHTAG_PROB:
+        if (kind == "post" and topic[0] in ("issue", "anchor", "vaccine") and tags and random.random() < HASHTAG_PROB
+                and not (topic[0] == "anchor" and self.vaccine_anchor)):
             parts.append(f"People on Legit Social are using these hashtags today: {' '.join(tags[:5])}. "
                          "Use one only if it fits naturally.")
 
@@ -6168,6 +6235,129 @@ async def feed_replies_check() -> None:
     print("feed replies ok")
 
 
+async def vaccine_anchor_check() -> None:
+    """VACCINE_ANCHORS: in alternate VACCINE_BLOCK blocks of Sydney time, swapped each day, the anchor speaks to the
+    vaccine itself from the model (no bank entry, no news link), leaves the referendum out, and needs only not to
+    oppose the mandate; outside them anchors are as before."""
+    class Says:
+        name = "says"
+
+        def __init__(self, text: str) -> None:
+            self.text, self.prompts, self.systems = text, [], []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            self.systems.append(system)
+            return self.text
+
+    from ctn.text.content import ARGUMENTS, CONTENT_DIR
+    global VACCINE_ANCHORS, ANCHOR_BANK, ANCHOR_BANK_SHARE, ANCHOR_FALLBACK, NEWS_ANCHOR_SHARE, vaccine_block
+    global ANCHOR_BANK_ENTRIES, HASHTAG_PROB
+    saved = (VACCINE_ANCHORS, ANCHOR_BANK, ANCHOR_BANK_SHARE, ANCHOR_FALLBACK, NEWS_ANCHOR_SHARE, ANCHOR_BANK_ENTRIES,
+             HASHTAG_PROB)
+    argued = (CONTENT_DIR / ARGUMENTS[WORDING]).read_text(encoding="utf-8").strip().splitlines()[0]
+    day = datetime(2026, 10, 27, 0, 30, tzinfo=TIMEZONE)
+    try:
+        VACCINE_ANCHORS = True
+        arms = [vaccine_block(day + timedelta(hours=h)) for h in range(48)]
+        assert all(arms[h] == arms[h - h % VACCINE_BLOCK] for h in range(48)), "one arm a block"
+        assert arms[0] != arms[VACCINE_BLOCK], "blocks alternate"
+        assert all(arms[h] != arms[h + 24] for h in range(24)), "swapped day to day"
+        assert sum(arms[:24]) == 24 // 2
+        VACCINE_ANCHORS = False
+        assert not any(vaccine_block(day + timedelta(hours=h)) for h in range(48))
+        VACCINE_ANCHORS = True
+        writer = next(p for p in load_personas(status=None) if p["line"] in ANCHOR_LINES)
+        text = ("Booked in for the H2D2 shot at my GP once my turn comes. Free, and the trials showed less serious "
+                "illness, which is enough for me.")
+        ANCHOR_BANK, ANCHOR_BANK_SHARE, ANCHOR_FALLBACK, NEWS_ANCHOR_SHARE = True, 1.0, timedelta(0), 1.0
+        story = ("https://sites.legitreal.com/kingstonia-herald/articles/first-case", "kingstonia-herald",
+                 "First H2D2 case confirmed", "A traveller is in hospital, stable.")
+        for stance, sent in (("NEUTRAL", True), ("SUPPORT", True), ("OPPOSE", False)):
+            judge = Says(stance)
+            b = Bot(writer, FakePlatform(), Says(text), load_world(), stance_llm=judge, store=StateStore(":memory:"))
+            b.articles = [story]
+            b.vaccine_anchor = True
+            action = await b._compose("post", ("anchor", VACCINE_LINES[0]))
+            assert (action is not None) == sent, (stance, b.rejected)
+            prompt = b.llm.prompts[0]
+            assert VACCINE_GUIDE.format(line=VACCINE_LINES[0]) in prompt and CASE_FOCUS not in prompt, prompt
+            assert "Write a new post about the referendum" not in prompt and judge.prompts, "still judged"
+            if action is not None:
+                assert action.angle.startswith("vaccine-view: ") and story[0] not in action.content, action
+            b.vaccine_anchor = False
+            if stance == "NEUTRAL":  # outside a block an anchor must still back the mandate
+                assert await b._compose("post", ("anchor", "acting early")) is None
+                assert b.rejected.get("off topic"), b.rejected
+        # the vaccine anchor's system prompt leaves the referendum's arguments out; offered no hashtags; vote talk sinks
+        HASHTAG_PROB = 1.0
+        b = Bot(writer, FakePlatform(), Says(text), load_world(), stance_llm=Says("NEUTRAL"),
+                store=StateStore(":memory:"))
+        b.hashtags = ["#VoteYes", "#H2D2"]
+        b.vaccine_anchor = True
+        assert await b._compose("post", ("anchor", VACCINE_LINES[1])) is not None, b.rejected
+        assert argued not in b.llm.systems[0] and "hashtags today" not in b.llm.prompts[0]
+        b.llm.text = text + " #VoteYes"
+        assert await b._compose("post", ("anchor", VACCINE_LINES[1])) is None
+        assert b.rejected.get("vote in vaccine post") == 1, b.rejected
+        b.vaccine_anchor = False
+        # _anchor in a block: the model writes it, though the account has a bank entry and a story to link; the flag
+        # is cleared after
+        me = writer["username"]
+        ANCHOR_BANK_ENTRIES = [{"id": "vb", "username": me, "text": "Voting yes in the referendum, for the wards.",
+                                "topic": "test"}]
+        b = Bot(writer, FakePlatform(), Says(text), load_world(), stance_llm=Says("SUPPORT"),
+                store=StateStore(":memory:"))
+        b.articles = [story]
+        assert b._bank_entry(datetime.now(timezone.utc)) is not None, "the account does have an entry"
+        real_block = vaccine_block
+        try:
+            vaccine_block = lambda now: True
+            action = await b._anchor()
+        finally:
+            vaccine_block = real_block
+        assert action is not None and action.angle.startswith("vaccine-view: "), action
+        assert story[0] not in action.content and action.hold and not b.vaccine_anchor
+        assert VACCINE_GUIDE.split("{")[0] in b.llm.prompts[0] and not b.store.bank_used(["vb"])
+        # its thread keeps to the vaccine, whatever the block: a teammate's lift, then a citizen's question on
+        # boosters (vaccine words alone don't make it the referendum), then one about the vote, argued as ever
+        b.store.record(me, _iso(datetime.now(timezone.utc)), Action("post", content=action.content, made_id=901,
+                                                                    topic_kind="anchor", angle=action.angle))
+        anchor_post = {"id": 901, "author": me, "content": action.content, "parent_id": None}
+        mate_persona = next(p for p in load_personas(status=None) if p["username"] != me)
+        lift = "Same here, booked at the GP for when my turn comes."
+        mate = Bot(mate_persona, FakePlatform(), Says(lift), load_world(), stance_llm=Says("NEUTRAL"), store=b.store)
+        reply = await mate._reply(anchor_post, "feed", "team", referendum=True, claim=False)
+        assert reply is not None, mate.rejected
+        assert VACCINE_TEAM_GUIDE in mate.llm.prompts[0] and VACCINE_REPLY_GUIDE in mate.llm.prompts[0]
+        assert LEAN_GUIDE["team"] not in mate.llm.prompts[0] and argued not in mate.llm.systems[0]
+        assert not TAG_RE.search(reply.content) and not mate.vaccine_thread
+        question = {"id": 902, "author": "citizen_v", "content": "Will we need an H2D2 booster every year though?",
+                    "parent_id": 901, "root_post_id": 901}
+        answer = "Maybe, nobody knows yet how long it lasts. A yearly shot like the flu one wouldn't put me off."
+        for post_id, who, content, vaccine_only in (
+                (902, "citizen_v", question["content"], True),
+                (905, "citizen_w", "Fine, but I'm still voting no on the mandate.", False)):
+            mine = Bot(writer, FakePlatform(), Says(answer), load_world(), stance_llm=Says("NEUTRAL"),
+                       roster=Roster(npcs={who}), store=b.store)
+            sent = await mine._reply(dict(question, id=post_id, author=who, content=content), "feed", "feed")
+            prompt = next(p for p in mine.llm.prompts if "Write a reply" in p)
+            assert (VACCINE_REPLY_GUIDE in prompt) == vaccine_only, prompt
+            if vaccine_only:
+                assert sent is not None, mine.rejected
+            else:  # on the referendum: must back the mandate, and a NEUTRAL judge sinks it
+                assert sent is None and (mine.rejected.get("lukewarm") or mine.rejected.get("off topic")), mine.rejected
+        # an anchor that isn't vaccine-view: its thread as before
+        assert not b._in_vaccine_thread({"id": 903, "parent_id": 904}) and b._in_vaccine_thread(anchor_post)
+    finally:
+        (VACCINE_ANCHORS, ANCHOR_BANK, ANCHOR_BANK_SHARE, ANCHOR_FALLBACK, NEWS_ANCHOR_SHARE, ANCHOR_BANK_ENTRIES,
+         HASHTAG_PROB) = saved
+    print("vaccine anchors ok")
+
+
 async def single_anchor_check() -> None:
     """ANCHOR_SINGLE: one qualifying account writes the anchors; it gives way when suspended, capped or not started,
     to the qualifying account with the fewest actions; others fill in only after SQUAD_GRACE, and only if they
@@ -6394,12 +6584,14 @@ if __name__ == "__main__":
     # and the plain anchors of 24 October: plain_anchor_check
     anchor_squad, ANCHOR_SQUAD = ANCHOR_SQUAD, frozenset()  # no squad in the other checks; squad_check sets one
     anchor_single, ANCHOR_SINGLE = ANCHOR_SINGLE, False  # nor one anchor account; single_anchor_check sets it
+    vaccine_anchors, VACCINE_ANCHORS = VACCINE_ANCHORS, False  # whatever the hour; vaccine_anchor_check sets it
     feed_replies, FEED_REPLIES = FEED_REPLIES, True  # replies to citizens as before; feed_replies_check sets it
     anchor_night, ANCHOR_NIGHT = ANCHOR_NIGHT, (0, 0)  # no night in the checks; night_anchor_check sets it
     anchor_pause, ANCHOR_PAUSE = ANCHOR_PAUSE, (datetime(2000, 1, 1, tzinfo=TIMEZONE),) * 2  # nor the pause
     asyncio.run(squad_check())
     asyncio.run(single_anchor_check())
     asyncio.run(feed_replies_check())
+    asyncio.run(vaccine_anchor_check())
     asyncio.run(night_anchor_check())
     asyncio.run(anchor_pace_check(fast_trials, fast_from))
     asyncio.run(answer_check())
@@ -6452,6 +6644,7 @@ if __name__ == "__main__":
     ANCHOR_PAUSE = anchor_pause
     ANCHOR_SQUAD = anchor_squad
     ANCHOR_SINGLE = anchor_single
+    VACCINE_ANCHORS = vaccine_anchors
     FEED_REPLIES = feed_replies
     FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE = fast_from, fast_trials, hold_file
     asyncio.run(main(args.real, n_bots, args.seconds))

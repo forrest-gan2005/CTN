@@ -202,6 +202,14 @@ class StateStore:
             "(SELECT 1 FROM moderation m WHERE m.post_id = h.made_id AND m.status != 'restored')",
             (username, since)).fetchone()[0]
 
+    def post_angle(self, post_id: Optional[int]) -> Optional[str]:
+        """The angle our post `post_id` was written with, or None if it isn't ours."""
+        if post_id is None:
+            return None
+        row = self.db.execute("SELECT angle FROM history WHERE made_id = ? AND type = 'post' ORDER BY id DESC LIMIT 1",
+                              (post_id,)).fetchone()
+        return row[0] if row else None
+
     def last_anchor_author(self) -> Optional[str]:
         """The account that wrote our newest published anchor post."""
         row = self.db.execute("SELECT username FROM history WHERE topic_kind = 'anchor' AND made_id IS NOT NULL "
