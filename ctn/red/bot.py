@@ -71,6 +71,13 @@ TARGET_LEANS = {"persuade": ("undecided", "no"), "bridge": ("no", "undecided"), 
 # citizen (feed or conversation; not anchors, the press routes or mention posts) skips a hard NO (dialogue_class) and
 # goes to a "yes but", undecided, unknown or YES citizen before a soft NO; within that, to the line's TARGET_LEANS.
 CITIZEN_TARGETING = True
+# Trending first from 26 October afternoon (Forrest): no reply to a citizen picked from the feed, only to one who
+# replied to us; such a step likes instead. The write lane carries three writes a minute for the team; with about 70
+# replies to citizens an hour beside two anchors, each anchor got 18-27 reposts and 11-19 replies, ranked 12th-25th
+# and drew 2-5 citizens' likes, where on 23 October, with few such replies, 20 of 48 anchors reached #1 at about 89
+# likes each. Replying to citizens drew few changes of mind in a week. Replies to the papers, columnists and journalists
+# stop too. An anchor's lift replies (its rush) and answers to citizens who replied to us go on.
+FEED_REPLIES = False
 # Share of replies that go to posts on the referendum or vaccines when the feed has any: chat about someone's rabbit
 # earns a like and moves no one. The rest keeps the accounts talking like people.
 TOPICAL_REPLY_PROB = 0.9
@@ -771,7 +778,7 @@ RUSH_WAIT = (20.0, 180.0)
 # RUSH_FIRST_WINDOW old, when a lift counts most for Trending; later ones, and an older anchor's, stay behind them, so
 # back-to-back rushes don't hold citizen replies for most of the day.
 RUSH_FIRST = True
-RUSH_FIRST_WINDOW = timedelta(minutes=12)
+RUSH_FIRST_WINDOW = timedelta(minutes=30)  # 12 until 26 October: Trending first, the whole rush (see FEED_REPLIES)
 # A phrase SHARED_LIMIT teammates used lately is refused in another's draft, and the writer kept reaching for
 # the same few: "certificate at the door" cost 18 drafts in S52's first half-hour. The most worn of the last day are
 # listed in every prompt as ones to leave alone.
@@ -1180,14 +1187,14 @@ class Bot:
             reply = await self._reply(conv, "conversation", "conversation")
             if reply is not None:
                 return reply
-        if not self.quiet and self.line in DESK_LINES:
+        if not self.quiet and self.line in DESK_LINES and FEED_REPLIES:  # the papers' posts: feed replies too
             found = await self._desk_target(obs["feed"])
             if found is not None:
                 press, context, hold = found
                 self.desk_tries[press["id"]] = self.desk_tries.get(press["id"], 0) + 1
                 return await self._reply(press, "feed", "desk", context=context, hold=hold, referendum=True,
                                          claim=False)
-        if not self.quiet and self.line in PRESS_LINES and not talker:
+        if not self.quiet and self.line in PRESS_LINES and not talker and FEED_REPLIES:
             found = await self._column_target(obs["feed"])
             if found is not None:
                 press, context, hold = found
@@ -1236,6 +1243,8 @@ class Bot:
         # opening are answered as before, when the feed has no citizen to reply to.
         if citizen_conv and (not self.quiet or self._quiet_may_answer(conv["author"])):
             kind = "reply"
+        elif kind == "reply" and not FEED_REPLIES:
+            kind = "like"
         if kind in ("like", "repost", "reply") and not candidates and conv is None:
             kind = "none" if self.quiet else "post"
 
@@ -3840,14 +3849,14 @@ async def rush_first_check() -> None:
         for action in (Action("repost", post_id=999_999), Action("reply", post_id=999_999, content="x")):
             await b.act(action)
         assert all(ANCHOR < p < CITIZEN for _, p in laned.sent) and laned.sent[0][1] == laned.sent[1][1], laned.sent
-        late = StateStore(":memory:")  # past RUSH_FIRST_WINDOW, still in its rush: back behind citizen replies
-        late.record("rosa_dives", _iso(now - RUSH_FIRST_WINDOW - timedelta(minutes=3)),
+        late = StateStore(":memory:")  # near the end of its rush: still ahead of citizen replies (26 October on)
+        late.record("rosa_dives", _iso(now - min(RUSH_FIRST_WINDOW, RUSH_WINDOW) + timedelta(minutes=2)),
                     Action("post", content="x", topic_kind="anchor", made_id=906))
         RUSH_FIRST, laned = True, Laned()
         b = Bot(persona, laned, FakeLLM(0, 0), load_world(), store=late)
-        assert b._focus(now) == 906
+        assert b._focus(now) == 906 and RUSH_FIRST_WINDOW >= RUSH_WINDOW
         await b.act(Action("repost", post_id=906))
-        assert CITIZEN < laned.sent[0][1] <= LIFT, laned.sent
+        assert ANCHOR < laned.sent[0][1] < CITIZEN, laned.sent
     finally:
         RUSH_FIRST = saved
     print("rush first ok")
@@ -6123,6 +6132,37 @@ async def anchor_pace_check(trials: tuple = (), fast_from: Optional[datetime] = 
     print("anchor pace ok")
 
 
+async def feed_replies_check() -> None:
+    """FEED_REPLIES off: a step that would reply to a citizen picked from the feed likes instead."""
+    global ACTION_WEIGHTS, FEED_REPLIES, RUSH_PROB, BOOST_PROB, ANCHOR_PAUSE
+    saved = ACTION_WEIGHTS, FEED_REPLIES, RUSH_PROB, BOOST_PROB, ANCHOR_PAUSE
+    try:
+        ACTION_WEIGHTS, RUSH_PROB, BOOST_PROB = {"reply": 1}, 0.0, 0.0
+        now = datetime.now(timezone.utc)
+        ANCHOR_PAUSE = (now - timedelta(minutes=5), now + timedelta(minutes=5))  # no anchor slot in the way
+        persona = [p for p in load_personas(status=None) if p["line"] == "persuade"][0]
+        feed = {"feed": [{"id": 77, "author": "citizen_a", "content": "Not sure about the vaccine pass, the ferry "
+                          "queues are bad enough already", "parent_id": None}]}
+        FEED_REPLIES = False
+        llm = FakeLLM(0, 0)
+        b = Bot(persona, FakePlatform(), llm, load_world(), roster=Roster(npcs={"citizen_a"}),
+                store=StateStore(":memory:"))
+        action = await b.think(feed)
+        assert action is not None and action.type == "like" and action.post_id == 77, action
+        assert llm.calls == 0, "nothing drafted"
+        desk = [p for p in load_personas(status=None) if p["line"] in DESK_LINES][0]
+        paper = {"feed": [{"id": 78, "author": "DailyKingstonia", "content": "Referendum: vaccine pass vote set for "
+                           "2 November, with a phased start", "parent_id": None,
+                           "created_at": _iso(datetime.now(timezone.utc) - timedelta(minutes=5))}]}
+        llm = FakeLLM(0, 0)
+        b = Bot(desk, FakePlatform(), llm, load_world(), roster=Roster(npcs={"citizen_a"}), store=StateStore(":memory:"))
+        action = await b.think(paper)
+        assert (action is None or action.type != "reply") and llm.calls == 0, "no reply to the papers either"
+    finally:
+        ACTION_WEIGHTS, FEED_REPLIES, RUSH_PROB, BOOST_PROB, ANCHOR_PAUSE = saved
+    print("feed replies ok")
+
+
 async def single_anchor_check() -> None:
     """ANCHOR_SINGLE: one qualifying account writes the anchors; it gives way when suspended, capped or not started,
     to the qualifying account with the fewest actions; others fill in only after SQUAD_GRACE, and only if they
@@ -6341,10 +6381,12 @@ if __name__ == "__main__":
     # and the plain anchors of 24 October: plain_anchor_check
     anchor_squad, ANCHOR_SQUAD = ANCHOR_SQUAD, frozenset()  # no squad in the other checks; squad_check sets one
     anchor_single, ANCHOR_SINGLE = ANCHOR_SINGLE, False  # nor one anchor account; single_anchor_check sets it
+    feed_replies, FEED_REPLIES = FEED_REPLIES, True  # replies to citizens as before; feed_replies_check sets it
     anchor_night, ANCHOR_NIGHT = ANCHOR_NIGHT, (0, 0)  # no night in the checks; night_anchor_check sets it
     anchor_pause, ANCHOR_PAUSE = ANCHOR_PAUSE, (datetime(2000, 1, 1, tzinfo=TIMEZONE),) * 2  # nor the pause
     asyncio.run(squad_check())
     asyncio.run(single_anchor_check())
+    asyncio.run(feed_replies_check())
     asyncio.run(night_anchor_check())
     asyncio.run(anchor_pace_check(fast_trials, fast_from))
     asyncio.run(answer_check())
@@ -6397,5 +6439,6 @@ if __name__ == "__main__":
     ANCHOR_PAUSE = anchor_pause
     ANCHOR_SQUAD = anchor_squad
     ANCHOR_SINGLE = anchor_single
+    FEED_REPLIES = feed_replies
     FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE = fast_from, fast_trials, hold_file
     asyncio.run(main(args.real, n_bots, args.seconds))
