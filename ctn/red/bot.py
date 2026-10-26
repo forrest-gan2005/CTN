@@ -2005,7 +2005,9 @@ class Bot:
         exposed = hidden + self.store.pending_anchors(self.username, _iso(now - ANCHOR_PENDING))
         gap = anchor_gap(now).total_seconds()
         slot = int(now.timestamp() // gap)
-        wait = ANCHOR_HIDDEN_FALLBACK if hidden else timedelta(0) if exposed else ANCHOR_FALLBACK
+        single = ANCHOR_SINGLE and self._squad()  # the one anchor account: no teammate to leave the slot to
+        wait = (ANCHOR_HIDDEN_FALLBACK if hidden and not single else timedelta(0) if exposed or single
+                else ANCHOR_FALLBACK)
         if (ANCHOR_SINGLE or ANCHOR_SQUAD) and not self._squad():  # the rest only fill in when it has gone silent,
             if ANCHOR_SINGLE and not anchor_qualifies(self.store, self.username, now):  # and only qualifying ones
                 return None
@@ -6224,7 +6226,15 @@ async def single_anchor_check() -> None:
         solo = Bot(writers[2], FakePlatform(), Says(), load_world(), roster=Roster(own={fresh, heavy}), store=again)
         solo.history.append((then, last))
         assert solo._squad() and SINGLE_REST + timedelta(minutes=5) < ANCHOR_REST
-        assert await solo._anchor() is not None, "its next anchor after SINGLE_REST"
+        global ANCHOR_HIDDEN_FALLBACK
+        saved_hidden = ANCHOR_HIDDEN_FALLBACK
+        try:  # with a hidden post it still writes at once: no teammate to leave the slot to
+            ANCHOR_HIDDEN_FALLBACK = timedelta(hours=2)
+            again.set_moderation(990, fresh, "hidden", "t")
+            again.anchor_pick = None
+            assert solo._squad() and await solo._anchor() is not None, "its next anchor after SINGLE_REST"
+        finally:
+            ANCHOR_HIDDEN_FALLBACK = saved_hidden
 
         # The anchor account silent past SQUAD_GRACE: a qualifying teammate fills in, the heavy one never does
         quiet = StateStore(":memory:")
