@@ -272,6 +272,10 @@ DEFAULT_GUIDE = (("Respond to their actual point. If they lean NO, name it in a 
                  ("Respond to their actual point. If they lean NO, acknowledge their worry in a few words, then give "
                   "your own reason for voting YES."))
 NPC_REPLY_PREF = 0.8  # how strongly reply targeting prefers citizens over unknown accounts
+# Citizens only, from 27 October 03:30 (Forrest): in the first hour of persuasion first, 29 of 73 replies went to
+# accounts of unknown standing (mostly other teams' bots) and 28 to citizens. With NPC_ONLY_REPLIES on, no reply goes
+# to such an account, from the feed or in answer to one that replied to us; the papers and journalists are as before.
+NPC_ONLY_REPLIES = True
 INBOX_TTL = timedelta(hours=12)  # answering a much older reply looks odd
 # A four-word run two teammates had used in a week sank 294 drafts in the three hours to 23:00 on 20 October, against
 # 112 replies sent; what a reader or another team could notice is the same words often in a day, or side by side
@@ -1308,7 +1312,7 @@ class Bot:
         elif kind == "reply" and (not FEED_REPLIES or saving()):
             kind = "like"
         if kind in ("like", "repost", "reply") and not candidates and conv is None:
-            kind = "none" if self.quiet else "post"
+            kind = "none" if self.quiet or NPC_ONLY_REPLIES else "post"
 
         if kind == "none":
             return None
@@ -1337,7 +1341,7 @@ class Bot:
                 target, route = conv, "conversation"
             else:  # a citizen in the feed before an account of unknown standing that answered us
                 target, route = await self._pick_reply_target(candidates)
-                if conv is not None and route in (None, "unknown-fallback"):
+                if conv is not None and route in (None, "unknown-fallback") and not self._unknown_target(conv["author"]):
                     target, route = conv, "conversation"
             if target is not None and self.quiet and not self._quiet_may_answer(target["author"]):
                 target = None  # a quiet account answers citizens only
@@ -1355,6 +1359,8 @@ class Bot:
                 found = self._team_reply_target()
                 if found is not None:
                     return await self._reply(found[0], "feed", "team", hold=found[1], referendum=True, claim=False)
+            if NPC_ONLY_REPLIES and candidates:  # no citizen to answer: a like, not a post in its place
+                return await self._amplify("like", candidates)
             # nothing worth replying to; write something instead
         if self.quiet:
             return None  # a quiet account writes nothing but replies to citizens
@@ -1989,6 +1995,12 @@ class Bot:
                           target_class=self.roster.classify(target["author"]), model=model)
         return Action("post", content=content, line=self.line, topic_kind=topic[0], angle=topic[1], model=model)
 
+    def _unknown_target(self, author: str) -> bool:
+        """An account of unknown standing that NPC_ONLY_REPLIES leaves unanswered: not a citizen, the papers or a
+        journalist."""
+        return (NPC_ONLY_REPLIES and self.roster.classify(author) == "unknown" and author not in JOURNALISTS
+                and author not in NEWS_OUTLETS and author not in COLUMNISTS)
+
     async def _conversation_target(self) -> Optional[dict]:
         """The oldest reply to us that still deserves an answer, known citizens' before the rest: those wait, now, for
         a feed with no citizen in it, and must not hold a citizen's reply up behind them."""
@@ -1999,6 +2011,7 @@ class Bot:
         for post_id, actor, received_at in inbox:
             post = None
             if (self.conv_tries.get(post_id, 0) < CONV_ATTEMPTS and post_id not in self.seen and received_at >= stale and actor not in rivals
+                    and not self._unknown_target(actor)
                     and not self.store.claimed([f"post:{post_id}"])  # a teammate answered it from the feed
                     and self.store.replies_to(actor, since) < MAX_REPLIES_PER_AUTHOR
                     and (actor in JOURNALISTS or actor in NEWS_OUTLETS or self._follow_up(actor)
@@ -2299,11 +2312,13 @@ class Bot:
         """(post, route), or (None, None). Only replies to citizens score; prefer them, but still engage unknown
         (post-start) accounts."""
         open_ = self._open_targets(candidates)
+        if NPC_ONLY_REPLIES:  # before the topical pick, so an unknown account's post can't crowd a citizen's out
+            open_ = [p for p in open_ if self.roster.classify(p["author"]) == "npc"]
         topical = [p for p in open_ if about_referendum(p.get("content") or "")]
         if topical and self.line != "amplifier" and random.random() < TOPICAL_REPLY_PROB:
             open_ = topical
         npcs = [p for p in open_ if self.roster.classify(p["author"]) == "npc"]
-        unknown = [p for p in open_ if self.roster.classify(p["author"]) == "unknown"]
+        unknown = [] if NPC_ONLY_REPLIES else [p for p in open_ if self.roster.classify(p["author"]) == "unknown"]
         wanted = TARGET_LEANS.get(self.line)
         people = [p for p in npcs if p["author"] not in NEWS_OUTLETS]
         if CITIZEN_TARGETING:
@@ -6518,6 +6533,72 @@ async def save_mode_check() -> None:
     print("save mode ok")
 
 
+async def npc_only_check() -> None:
+    """NPC_ONLY_REPLIES: no reply to an account of unknown standing, picked from the feed or answering us (its reply
+    isn't even fetched); citizens as before; the papers and journalists aren't caught by it."""
+    class Counting(FakePlatform):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fetched = []
+
+        async def get_post(self, post_id: int) -> dict:
+            self.fetched.append(post_id)
+            return {"id": post_id, "author": "citizen_a" if post_id == 502 else "rival_x", "parent_id": 400,
+                    "content": "Not sure about the vaccine pass, the ferry queues are bad enough already",
+                    "hidden": False}
+
+    global NPC_ONLY_REPLIES
+    saved = NPC_ONLY_REPLIES
+    try:
+        NPC_ONLY_REPLIES = True
+        persona = [p for p in load_personas(status=None) if p["line"] == "persuade"][0]
+        platform, store = Counting(), StateStore(":memory:")
+        b = Bot(persona, platform, FakeLLM(0, 0), load_world(), roster=Roster(npcs={"citizen_a"}), store=store)
+        rival = {"id": 77, "author": "rival_x", "content": "Not sure about the vaccine pass, honestly",
+                 "parent_id": None}
+        citizen = dict(rival, id=78, author="citizen_a")
+        assert await b._pick_reply_target([rival]) == (None, None)
+        assert (await b._pick_reply_target([rival, citizen]))[0]["author"] == "citizen_a"
+        journalist = next(iter(JOURNALISTS))
+        assert b._unknown_target("rival_x") and not b._unknown_target("citizen_a")
+        assert not b._unknown_target(journalist) and not b._unknown_target(next(iter(NEWS_OUTLETS)))
+        now = _iso(datetime.now(timezone.utc))
+        with store.db:
+            store.db.execute("INSERT INTO inbox VALUES (?, ?, ?, ?)", (persona["username"], 501, "rival_x", now))
+        assert await b._conversation_target() is None and 501 not in platform.fetched, "not even fetched"
+        with store.db:
+            store.db.execute("INSERT INTO inbox VALUES (?, ?, ?, ?)", (persona["username"], 502, "citizen_a", now))
+        found = await b._conversation_target()
+        assert found is not None and found["author"] == "citizen_a", found
+        # an unknown account's referendum post doesn't crowd out a citizen's everyday one
+        everyday = dict(rival, id=79, author="citizen_a", content="Lovely swell at the point this morning")
+        for _ in range(20):
+            assert (await b._pick_reply_target([rival, everyday]))[0]["author"] == "citizen_a"
+        # no citizen to answer: a like, never a post drafted in its place
+        global ACTION_WEIGHTS, RUSH_PROB, BOOST_PROB, ANCHOR_PAUSE
+        kept = ACTION_WEIGHTS, RUSH_PROB, BOOST_PROB, ANCHOR_PAUSE
+        try:
+            ACTION_WEIGHTS, RUSH_PROB, BOOST_PROB = {"reply": 1}, 0.0, 0.0
+            moment = datetime.now(timezone.utc)
+            ANCHOR_PAUSE = (moment - timedelta(minutes=5), moment + timedelta(minutes=5))
+            llm = FakeLLM(0, 0)
+            c = Bot(persona, FakePlatform(), llm, load_world(), roster=Roster(npcs={"citizen_a"}),
+                    store=StateStore(":memory:"))
+            actions = [await c.think({"feed": [dict(rival, id=600 + i)]}) for i in range(10)]
+            assert all(a is None or a.type == "like" for a in actions), actions
+            assert any(a is not None for a in actions) and llm.calls == 0, "likes, nothing drafted"
+            ACTION_WEIGHTS = {"like": 1}
+            assert await c.think({"feed": []}) is None and llm.calls == 0, "an empty feed: idle, not a post"
+        finally:
+            ACTION_WEIGHTS, RUSH_PROB, BOOST_PROB, ANCHOR_PAUSE = kept
+        NPC_ONLY_REPLIES = False
+        assert not b._unknown_target("rival_x")
+        assert (await b._pick_reply_target([rival]))[1] == "unknown-fallback"
+    finally:
+        NPC_ONLY_REPLIES = saved
+    print("npc only ok")
+
+
 async def single_anchor_check() -> None:
     """ANCHOR_SINGLE: one qualifying account writes the anchors; it gives way when suspended, capped or not started,
     to the qualifying account with the fewest actions; others fill in only after SQUAD_GRACE, and only if they
@@ -6749,6 +6830,7 @@ if __name__ == "__main__":
     anchor_squad, ANCHOR_SQUAD = ANCHOR_SQUAD, frozenset()  # no squad in the other checks; squad_check sets one
     anchor_single, ANCHOR_SINGLE = ANCHOR_SINGLE, False  # nor one anchor account; single_anchor_check sets it
     vaccine_anchors, VACCINE_ANCHORS = VACCINE_ANCHORS, False  # whatever the hour; vaccine_anchor_check sets it
+    npc_only, NPC_ONLY_REPLIES = NPC_ONLY_REPLIES, False  # unknown accounts answered as before; npc_only_check
     feed_replies, FEED_REPLIES = FEED_REPLIES, True  # replies to citizens as before; feed_replies_check sets it
     anchor_night, ANCHOR_NIGHT = ANCHOR_NIGHT, (0, 0)  # no night in the checks; night_anchor_check sets it
     anchor_pause, ANCHOR_PAUSE = ANCHOR_PAUSE, (datetime(2000, 1, 1, tzinfo=TIMEZONE),) * 2  # nor the pause
@@ -6757,6 +6839,7 @@ if __name__ == "__main__":
     asyncio.run(feed_replies_check())
     asyncio.run(vaccine_anchor_check())
     asyncio.run(save_mode_check())
+    asyncio.run(npc_only_check())
     asyncio.run(night_anchor_check())
     asyncio.run(anchor_pace_check(fast_trials, fast_from))
     asyncio.run(answer_check())
@@ -6810,6 +6893,7 @@ if __name__ == "__main__":
     ANCHOR_SQUAD = anchor_squad
     ANCHOR_SINGLE = anchor_single
     VACCINE_ANCHORS = vaccine_anchors
+    NPC_ONLY_REPLIES = npc_only
     FEED_REPLIES = feed_replies
     FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE = fast_from, fast_trials, hold_file
     rhythm_module.SAVE_FILE = save_file
