@@ -1642,7 +1642,7 @@
     "job": "grow mangoes on a small orchard outside New Haven",
     "home": "New Haven",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "couldn't get your fruit to market for weeks in 2021",
     "why_yes": "you couldn't get fruit to market in 2021, and you'd rather the island be ready this time",
     "style": "plain and practical, full sentences, no slang",
@@ -1661,7 +1661,8 @@
       "you think climate change matters but worry about what it costs ordinary families",
       "you think the fix for rents is building more homes, not caps"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "ikaika_p"
   },
   {
     "username": "mele_d",
@@ -1670,7 +1671,7 @@
     "job": "work as a tester at a fintech startup",
     "home": "Kingstonia City",
     "line": "amplifier",
-    "status": "active",
+    "status": "banned",
     "covid": "started your first job remotely in 2021 and didn't meet your team for a year",
     "why_yes": "you trust the IHO's advice to vaccinate early, and you'd rather not do remote everything again",
     "style": "careful and thoughtful, hedges with 'I think'",
@@ -1689,7 +1690,8 @@
       "you want university to be cheaper for local kids",
       "you want the coast guard's old frigates replaced before someone gets hurt"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "afalemalu"
   },
   {
     "username": "maile_96",
@@ -5453,7 +5455,7 @@
     "job": "fit tyres at a tyre shop in Crown Harbour",
     "home": "Crown Harbour",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "was stood down for a few months in 2021, so you helped out on your aunty's banana plantation",
     "why_yes": "you don't want another stretch with no work",
     "style": "short, chill, Hawaiian slang now and then",
@@ -5621,7 +5623,7 @@
     "job": "work at a takeaway in Kingstonia City and play club rugby",
     "home": "Kingstonia City",
     "line": "amplifier",
-    "status": "reserve",
+    "status": "active",
     "covid": "lost the 2021 rugby season and saw your grandad nearly die of COVID",
     "why_yes": "your grandad nearly died of COVID, and seeing him that sick once was enough",
     "style": "short, young, lowercase, emojis sometimes",
