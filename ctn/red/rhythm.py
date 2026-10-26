@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Sequence
 from zoneinfo import ZoneInfo
 
+from ctn import paths
+
 TIMEZONE = ZoneInfo("Australia/Sydney")
 
 # Relative posting activity per Sydney hour (0-23), used until the collector has enough citizen posts.
@@ -31,6 +33,26 @@ LOW_KEY_RATE = 0.7
 # anchors run at night too from 26 October (bot.ANCHOR_NIGHT).
 NIGHT_HOURS = (23, 7)
 NIGHT_RATE = 1.0
+# Saving for the x4 days (Forrest, 27 October): once registrations are down to 20, the team stops everything a report
+# can reach until X4_START (bot.py: no anchors, no replies, only posts off the referendum) and every account sits down
+# SAVE_RATE as often, so the accounts and registrations left go to the x4 days. On while SAVE_FILE exists, which the
+# patrol writes; delete it to end saving early. After X4_START it has no effect.
+SAVE_FILE = paths.DATA / "save_mode"
+X4_START = datetime(2026, 11, 1, 0, 0, tzinfo=TIMEZONE)
+SAVE_RATE = 0.5
+SAVE_TTL = 30.0  # seconds a look at SAVE_FILE is reused
+_save_seen = [float("-inf"), False]  # (monotonic time of the last look, whether the file was there)
+
+
+def saving(now: Optional[datetime] = None) -> bool:
+    """Saving for the x4 days at `now`: SAVE_FILE is there and X4_START hasn't come."""
+    import time
+    if (now or datetime.now(timezone.utc)) >= X4_START:
+        return False
+    tick = time.monotonic()
+    if tick - _save_seen[0] >= SAVE_TTL:
+        _save_seen[:] = [tick, SAVE_FILE.exists()]
+    return _save_seen[1]
 
 
 def at_night(t: datetime, hours: tuple = NIGHT_HOURS) -> bool:
@@ -101,7 +123,8 @@ class Rhythm:
         frac = h - i
         weight = self.curve[i % 24] * (1 - frac) + self.curve[(i + 1) % 24] * frac
         return (self.sessions_per_day * weight * (LOW_KEY_RATE if t < LOW_KEY_UNTIL else 1.0)
-                * (NIGHT_RATE if at_night(t - timedelta(hours=self.shift)) else 1.0))  # nights by its own habits
+                * (NIGHT_RATE if at_night(t - timedelta(hours=self.shift)) else 1.0)  # nights by its own habits
+                * (SAVE_RATE if saving(t) else 1.0))
 
     def next_wait(self, now: datetime) -> float:
         """Seconds until this account's next action."""
@@ -151,6 +174,27 @@ if __name__ == "__main__":
     uneven = [f"2026-10-18T{h:02d}:00:00+00:00" for h in range(0, 24) for _ in range(20)] + \
              [f"2026-10-19T{h:02d}:00:00+00:00" for h in range(0, 12) for _ in range(20)]
     assert max(npc_curve(uneven)) / min(npc_curve(uneven)) < 1.05
+
+    import tempfile
+    from pathlib import Path
+    saved_file = SAVE_FILE
+    with tempfile.TemporaryDirectory() as tmp:
+        SAVE_FILE = Path(tmp) / "save_mode"
+        _save_seen[:] = [float("-inf"), False]
+        early, late = datetime(2026, 10, 30, 12, tzinfo=TIMEZONE), X4_START + timedelta(hours=12)
+        flat = Rhythm("joe_tama", [1.0] * 24)
+        full = flat.rate(early)
+        assert not saving(early)
+        SAVE_FILE.write_text("2026-10-29")
+        assert not saving(early), "a look is reused for SAVE_TTL"
+        _save_seen[0] = float("-inf")
+        assert saving(early) and not saving(late), "saving: until X4_START only"
+        assert abs(flat.rate(early) - SAVE_RATE * full) < 1e-9 and abs(flat.rate(late) - full) < 1e-9
+        SAVE_FILE.unlink()
+        _save_seen[0] = float("-inf")
+        assert not saving(early)
+    SAVE_FILE = saved_file
+    _save_seen[:] = [float("-inf"), False]
 
     r = Rhythm("joe_tama", curve)
     assert Rhythm("joe_tama", curve).shift == r.shift

@@ -14,7 +14,7 @@ from ctn.infra.fake_platform import ANCHOR, CITIZEN, LIFT, NORMAL, WRITE_LEFT, W
 from ctn.infra.llm import FakeLLM, team_llms
 from ctn.infra.news import SHARE_DAYS, SHARE_PREFER_RE, SITES, YES_POLL_RE, NewsStore
 from ctn.infra.state import StateStore
-from ctn.red.rhythm import LOW_KEY_UNTIL, UniformPacer, at_night
+from ctn.red.rhythm import LOW_KEY_UNTIL, UniformPacer, at_night, saving
 from ctn.text.content import (WORDING, load_anchor_bank, load_journalists, load_personas, load_vaccine_angles,
                               load_world, reply_world, without_arguments)
 from ctn.text.gifs import GIF_PROMPT, GIF_SHARE, GIF_WORD_RE, GIPHY_URL_RE, GifPool, split_gif, without_gifs
@@ -37,6 +37,7 @@ TIMEZONE = ZoneInfo("Australia/Sydney")  # in-world dates follow Sydney time
 # either direction; daily: everyday life.
 # Live, everyday posts drew a like or two and moved no one, and another issue's views don't score, so every line
 # mostly makes the case; a quarter or so of everyday posts is left so the accounts still read as people.
+SAVE_TOPICS = ("vaccine", "view", "daily")  # what an account's own posts may be while saving (rhythm.saving)
 TOPIC_MIX = {
     "persuade": {"issue": 0.55, "vaccine": 0.2, "view": 0.05, "daily": 0.2},
     "mobilise": {"issue": 0.4, "vaccine": 0.15, "view": 0.05, "daily": 0.4},
@@ -596,6 +597,16 @@ VACCINE_REPLY_GUIDE = ("This is about the H2D2 vaccine itself, not the referendu
 VACCINE_TEAM_GUIDE = ("They're on your side. Add something of your own about the vaccine they didn't say, in one or "
                       "two short sentences, like a comment under a neighbour's post; don't just agree, don't repeat "
                       "their words, and don't open with their name or your own.")
+VACCINE_WORDS_RE = re.compile(r"vacc\w*|\bvax\w*|\bjabs?\b|h2d2|dolphin flu", re.IGNORECASE)
+
+
+def on_referendum_while_saving(text: str, stance: Optional[str]) -> bool:
+    """A post that takes up the referendum, which saving for the x4 days rules out: the judge gave it a side, or it
+    names the vote, the rule or how it would work (the referendum keywords, a vaccine word alone aside)."""
+    return (stance in ("SUPPORT", "OPPOSE") or bool(VOTE_RE.search(text or ""))
+            or about_referendum(VACCINE_WORDS_RE.sub(" ", text or "")))
+
+
 VOTE_RE = re.compile(r"mandate|referendum|\bvot(e|es|ed|ing|er|ers)\b|proof of|certificate|requirement|"
                      r"#\w*(yes|no|kingstonia|open)\b", re.IGNORECASE)
 
@@ -1030,7 +1041,10 @@ def anchor_account(store, team, now: datetime) -> Optional[str]:
 
 
 def anchors_held(now: datetime) -> bool:
-    """Today (Sydney) is written in ANCHOR_HOLD_FILE: that day's suspensions reached its budget."""
+    """Today (Sydney) is written in ANCHOR_HOLD_FILE: that day's suspensions reached its budget; or the team is saving
+    for the x4 days (rhythm.saving)."""
+    if saving(now):
+        return True
     try:
         held = ANCHOR_HOLD_FILE.read_text(errors="replace").split()
     except OSError:
@@ -1138,6 +1152,7 @@ class Bot:
         self.sharing = None  # the story the anchor being written links to
         self.vaccine_anchor = False  # the anchor being written is a vaccine-view one (VACCINE_ANCHORS)
         self.vaccine_thread = False  # the reply being written is in a vaccine-view anchor's thread
+        self.last_stance = None  # what the stance judge said of the last draft _check judged
         self.gifs: Optional[GifPool] = None  # the team's GIFs; None, or switched off, posts none
         self.rejected = {}
         self.unsafe = set()  # posts judged to argue NO, never to be amplified
@@ -1284,9 +1299,9 @@ class Bot:
         # A known citizen who replied to us is answered (within CITIZEN_DAILY_REPLIES a day): by 20 October only 52 of the 450 replies to our posts
         # came from known citizens, and we had answered barely a third of them. Accounts that joined after the
         # opening are answered as before, when the feed has no citizen to reply to.
-        if citizen_conv and (not self.quiet or self._quiet_may_answer(conv["author"])):
+        if citizen_conv and (not self.quiet or self._quiet_may_answer(conv["author"])) and not saving():
             kind = "reply"
-        elif kind == "reply" and not FEED_REPLIES:
+        elif kind == "reply" and (not FEED_REPLIES or saving()):
             kind = "like"
         if kind in ("like", "repost", "reply") and not candidates and conv is None:
             kind = "none" if self.quiet else "post"
@@ -1339,7 +1354,8 @@ class Bot:
             # nothing worth replying to; write something instead
         if self.quiet:
             return None  # a quiet account writes nothing but replies to citizens
-        if not self.quiet and self.line in PRESS_LINES and not talker and random.random() < PITCH_PROB:
+        if (not self.quiet and self.line in PRESS_LINES and not talker and random.random() < PITCH_PROB
+                and not saving()):
             place = self._pitch_place()
             if place is not None:  # one draft a step: a pitch that's dropped isn't followed by another post
                 return await self._pitch(place)
@@ -1492,7 +1508,7 @@ class Bot:
     def _mention_due(self, now: datetime) -> bool:
         """Whether this account may write a mention post now: one of MENTION_ACCOUNTS while the experiment is on,
         under MENTION_PER_HOUR in the last hour, none sent or tried within MENTION_GAP."""
-        if not MENTION_EXPERIMENT or self.username not in MENTION_ACCOUNTS:
+        if not MENTION_EXPERIMENT or self.username not in MENTION_ACCOUNTS or saving(now):
             return False
         if self.mention_tried is not None and now - self.mention_tried < MENTION_GAP:
             return False
@@ -1646,7 +1662,12 @@ class Bot:
         """`hold` is a quota place taken for this reply, given back unless it is sent; `context` and `referendum`
         what the target answers and whether it takes up the referendum, when already known. With `claim` the post
         is this account's alone (a teammate's post takes its replies by places instead). `dialogue` is the
-        (bucket, class) a dialogue pick found."""
+        (bucket, class) a dialogue pick found. None while saving for the x4 days (rhythm.saving): a reply can be
+        reported."""
+        if saving():
+            if hold is not None:
+                self.store.release(hold)
+            return None
         if target["author"] in JOURNALISTS:
             if referendum is None:  # from another route (a journalist answering us): decided as the press route does
                 referendum, context = await self._press_topic(target)
@@ -1932,6 +1953,8 @@ class Bot:
                                                     and not (topic[0] == "anchor" and self.vaccine_anchor))
                                         or mention or argue,
                                         replying_to=target.get("content") if target else None, thread=thread)
+        if not problem and kind == "post" and saving() and on_referendum_while_saving(content, self.last_stance):
+            problem = "referendum while saving"
         if problem:
             self.rejected[problem] = self.rejected.get(problem, 0) + 1
             source = f" (replying to #{target['id']} by {target['author']})" if target else ""
@@ -2414,6 +2437,8 @@ class Bot:
 
     def _pick_topic(self) -> tuple:
         mix = topic_mix(self.line, datetime.now(TIMEZONE).date())
+        if saving():  # nothing on the referendum while saving for the x4 days
+            mix = {k: w for k, w in mix.items() if k in SAVE_TOPICS} or {"daily": 1.0}
         kind = random.choices(list(mix), weights=list(mix.values()))[0]
         if kind == "issue":
             return ("issue", random.choice(self.persona["angles"]))
@@ -2732,6 +2757,7 @@ class Bot:
         doesn't plainly back the mandate is dropped too: a hint the reader has to decode moves nobody. A reply's side
         is judged next to `replying_to`, the post it answers. Without `judge` (a hand-written anchor) no model is
         asked, as offline."""
+        self.last_stance = None
         if STOCK_OPENER_RE.match(plain(text)):
             return "stock opener"
         if self.twins is not None and self.twins.closest(text)[1] >= TWIN:
@@ -2751,7 +2777,7 @@ class Bot:
             return problem
         if self.stance_llm is None or not judge:  # offline: naming the referendum at least, for a post
             return "off topic" if takes_side and replying_to is None and not about_referendum(text) else None
-        stance = await judge_stance(self.stance_llm, text, replying_to)
+        stance = self.last_stance = await judge_stance(self.stance_llm, text, replying_to)
         if stance is None:
             return "stance unknown"
         if stance == "OPPOSE":
@@ -2869,6 +2895,11 @@ class Bot:
         if action.type in ("post", "reply"):
             if action.topic_kind == "anchor" and anchors_held(datetime.now(timezone.utc)):
                 self._drop(action, "anchors held today")  # the hold was written while this was being drafted
+                return None
+            # Saving for the x4 days, maybe since this was drafted: no reply, nothing on the referendum.
+            if saving() and (action.type == "reply" or action.topic_kind not in SAVE_TOPICS
+                             or on_referendum_while_saving(action.content, None)):
+                self._drop(action, "saving for the x4 days")
                 return None
             if self.quiet and not self._squad() and not (action.type == "reply"
                                                          and self._quiet_may_answer(action.target_author)):
@@ -6358,6 +6389,132 @@ async def vaccine_anchor_check() -> None:
     print("vaccine anchors ok")
 
 
+async def save_mode_check() -> None:
+    """Saving for the x4 days (rhythm.saving): no anchor, no reply of any kind (its place given back), no pitch, and an
+    account's own posts keep off the referendum; a reply the step would make is a like. Back to normal at X4_START,
+    or when the file goes."""
+    import tempfile
+    from pathlib import Path
+    from ctn.red import rhythm
+    global ACTION_WEIGHTS, RUSH_PROB, BOOST_PROB, ANCHOR_PAUSE, PITCH_PROB
+    saved = rhythm.SAVE_FILE, rhythm.X4_START, ACTION_WEIGHTS, RUSH_PROB, BOOST_PROB, ANCHOR_PAUSE, PITCH_PROB
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            rhythm.SAVE_FILE = Path(tmp) / "save_mode"
+            rhythm.SAVE_FILE.write_text("on")
+            rhythm._save_seen[:] = [float("-inf"), False]
+            now = datetime.now(timezone.utc)
+            rhythm.X4_START = now + timedelta(days=1)
+            assert saving() and anchors_held(now), "no anchors while saving"
+            writer = next(p for p in load_personas(status=None) if p["line"] in ANCHOR_LINES)
+            store = StateStore(":memory:")
+            b = Bot(writer, FakePlatform(), FakeLLM(0, 0), load_world(), roster=Roster(npcs={"citizen_a"}),
+                    store=store)
+            assert await b._anchor() is None and b.llm.calls == 0
+            citizen = {"id": 77, "author": "citizen_a", "content": "Not sure about the vaccine pass, the ferry queues are "
+                       "bad enough already", "parent_id": None}
+            hold = store.reserve("boost:reply:77:", writer["username"], 1)
+            assert await b._reply(citizen, "feed", "feed", hold=hold) is None and b.llm.calls == 0
+            assert store.reserve("boost:reply:77:", "other", 1) is not None, "its place given back"
+            assert all(b._pick_topic()[0] in SAVE_TOPICS for _ in range(200)), "no referendum posts"
+            ACTION_WEIGHTS, RUSH_PROB, BOOST_PROB = {"reply": 1}, 0.0, 0.0
+            ANCHOR_PAUSE = (now - timedelta(minutes=5), now + timedelta(minutes=5))
+            other = [p for p in load_personas(status=None) if p["line"] == "persuade"][0]
+            c = Bot(other, FakePlatform(), FakeLLM(0, 0), load_world(), roster=Roster(npcs={"citizen_a"}),
+                    store=StateStore(":memory:"))
+            action = await c.think({"feed": [citizen]})
+            assert action is not None and action.type == "like" and c.llm.calls == 0, action
+            press = next((p for p in load_personas(status=None) if p["line"] in PRESS_LINES), None)
+            if press is not None:
+                PITCH_PROB = 1.0
+                d = Bot(press, FakePlatform(), FakeLLM(0, 0), load_world(), store=StateStore(":memory:"))
+                d.quiet = False
+                ACTION_WEIGHTS = {"post": 1}
+                action = await d.think({"feed": []})
+                assert action is None or action.topic_kind in SAVE_TOPICS, action
+            # saving that starts while a reply or a post is being written: dropped at the step, its places given
+            # back; and a post off the referendum by topic that campaigns anyway is dropped too
+            class Flips:
+                name = "flips"
+
+                def __init__(self, text: str) -> None:
+                    self.text, self.calls = text, 0
+
+                def delay(self) -> float:
+                    return 0.0
+
+                async def generate(self, system: str, prompt: str) -> Optional[str]:
+                    self.calls += 1
+                    rhythm.SAVE_FILE.write_text("on")
+                    rhythm._save_seen[:] = [float("-inf"), False]
+                    return self.text
+
+            class Judge:
+                name = "judge"
+
+                def delay(self) -> float:
+                    return 0.0
+
+                async def generate(self, system: str, prompt: str) -> Optional[str]:
+                    return "SUPPORT"
+
+            rhythm.SAVE_FILE.unlink()
+            rhythm._save_seen[:] = [float("-inf"), False]
+            ACTION_WEIGHTS = {"reply": 1}
+            store = StateStore(":memory:")
+            e = Bot(other, FakePlatform(), Flips("The ferry queues are bad, but a few minutes at the door beats "
+                                                 "another winter shut. Voting yes."), load_world(),
+                    roster=Roster(npcs={"citizen_a"}), stance_llm=Judge(), store=store)
+            e.think = lambda obs: e._reply(citizen, "feed", "feed")  # a reply begun before saving
+            assert await e.step() is None and e.llm.calls >= 1 and not e.history, "drafted, then dropped"
+            assert not store.claimed(["post:77"]), "the citizen's post freed for later"
+            rhythm.SAVE_FILE.unlink()
+            rhythm._save_seen[:] = [float("-inf"), False]
+            ACTION_WEIGHTS = {"post": 1}
+            f = Bot(other, FakePlatform(), Flips("Off to the netball tonight, then voting yes in the referendum on "
+                                                 "Sunday."), load_world(), stance_llm=Judge(),
+                    store=StateStore(":memory:"))
+            f._pick_topic = lambda: ("daily", "netball")
+            assert await f.step() is None and f.llm.calls >= 1 and not f.history, "a daily post that campaigns"
+            assert saving()
+            # while saving, a post that takes the referendum up in other words is refused too, by the judge or the
+            # referendum keywords; one on a jab of one's own goes
+            class Says:
+                name = "says"
+
+                def __init__(self, text: str) -> None:
+                    self.text = text
+
+                def delay(self) -> float:
+                    return 0.0
+
+                async def generate(self, system: str, prompt: str) -> Optional[str]:
+                    return self.text
+
+            door = "A YES on Sunday keeps door checks available when we need them."
+            jab = "Got my flu jab at the GP on my lunch break today, in and out in ten minutes."
+            for text, stance, sent in ((door, "SUPPORT", False), (door, "NEUTRAL", False),
+                                       ("Thinking of voting no.", "NEUTRAL", False), (jab, "NEUTRAL", True)):
+                g = Bot(other, FakePlatform(), Says(text), load_world(), stance_llm=Says(stance),
+                        store=StateStore(":memory:"))
+                action = await g._compose("post", ("vaccine", "getting your yearly flu shot"))
+                assert (action is not None) == sent, (text, stance, g.rejected)
+                assert sent or g.rejected.get("referendum while saving") == 1, g.rejected
+            assert on_referendum_while_saving(door, None) and not on_referendum_while_saving(jab, None)
+            # the x4 days: as before
+            rhythm.X4_START = now - timedelta(minutes=1)
+            assert not saving() and not anchors_held(now)
+            assert any(b._pick_topic()[0] not in SAVE_TOPICS for _ in range(200))
+            rhythm.X4_START = now + timedelta(days=1)
+            rhythm.SAVE_FILE.unlink()
+            rhythm._save_seen[:] = [float("-inf"), False]
+            assert not saving() and not anchors_held(now), "the file gone: saving ends"
+    finally:
+        (rhythm.SAVE_FILE, rhythm.X4_START, ACTION_WEIGHTS, RUSH_PROB, BOOST_PROB, ANCHOR_PAUSE, PITCH_PROB) = saved
+        rhythm._save_seen[:] = [float("-inf"), False]
+    print("save mode ok")
+
+
 async def single_anchor_check() -> None:
     """ANCHOR_SINGLE: one qualifying account writes the anchors; it gives way when suspended, capped or not started,
     to the qualifying account with the fewest actions; others fill in only after SQUAD_GRACE, and only if they
@@ -6581,6 +6738,8 @@ if __name__ == "__main__":
     fast_from, FAST_ANCHORS_FROM = FAST_ANCHORS_FROM, datetime(2100, 1, 1, tzinfo=TIMEZONE)
     fast_trials, FAST_ANCHOR_TRIALS = FAST_ANCHOR_TRIALS, ()
     hold_file, ANCHOR_HOLD_FILE = ANCHOR_HOLD_FILE, paths.DATA / "no-such-dir" / "anchor_hold"
+    from ctn.red import rhythm as rhythm_module  # nor saving for the x4 days, whatever the live team is doing
+    save_file, rhythm_module.SAVE_FILE = rhythm_module.SAVE_FILE, paths.DATA / "no-such-dir" / "save_mode"
     low_key_until, LOW_KEY_UNTIL = LOW_KEY_UNTIL, datetime(2026, 10, 1, tzinfo=TIMEZONE)  # low_key_check sets it
     low_key_check()
     # and the plain anchors of 24 October: plain_anchor_check
@@ -6594,6 +6753,7 @@ if __name__ == "__main__":
     asyncio.run(single_anchor_check())
     asyncio.run(feed_replies_check())
     asyncio.run(vaccine_anchor_check())
+    asyncio.run(save_mode_check())
     asyncio.run(night_anchor_check())
     asyncio.run(anchor_pace_check(fast_trials, fast_from))
     asyncio.run(answer_check())
@@ -6649,4 +6809,5 @@ if __name__ == "__main__":
     VACCINE_ANCHORS = vaccine_anchors
     FEED_REPLIES = feed_replies
     FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE = fast_from, fast_trials, hold_file
+    rhythm_module.SAVE_FILE = save_file
     asyncio.run(main(args.real, n_bots, args.seconds))
