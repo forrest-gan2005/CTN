@@ -1214,7 +1214,7 @@
     "job": "work as a plumber",
     "home": "New Haven",
     "line": "amplifier",
-    "status": "active",
+    "status": "banned",
     "covid": "worked through 2021 on emergency jobs only",
     "why_yes": "you go into strangers' homes all day and would rather people be protected",
     "style": "careful and thoughtful, hedges with 'I think'",
@@ -1233,7 +1233,8 @@
       "you think the railway money would do more good on reliable ferries",
       "you want the island off diesel and onto solar and wind"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "tuilagis"
   },
   {
     "username": "yasminm88",
@@ -1784,7 +1785,7 @@
     "job": "work as a radio operator for the coast guard",
     "home": "Kingstonia City",
     "line": "amplifier",
-    "status": "reserve",
+    "status": "active",
     "covid": "kept the radio room running in 2021 with half the crew in isolation",
     "why_yes": "you saw how thin the crews got when people were sick in 2021, and prevention matters to you",
     "style": "careful and thoughtful, hedges with 'I think'",
