@@ -3943,7 +3943,7 @@
     "job": "work at the island post office and sell woven mats on the side",
     "home": "an outer island",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "were seventeen in 2021 and finished school by correspondence because the ferry to the bigger school stopped",
     "why_yes": "the island clinic is tiny, and you want the main island ready so nobody here waits on a helicopter",
     "style": "shy, short posts, lowercase, island pride",
@@ -3962,7 +3962,8 @@
       "you want proper internet on the outer islands",
       "you think young islanders shouldn't have to move to the city for work"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "miliamavea"
   },
   {
     "username": "GordonMcA",
@@ -5495,7 +5496,7 @@
     "job": "gut and sell fish at the wharf market on your island",
     "home": "an outer island",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "kept selling fish at the wharf in 2021 but couldn't cross to see your sister on the main island for the better part of the year",
     "why_yes": "you'd rather show a certificate than be cut off from family again",
     "style": "warm, short, island life, simple English",
