@@ -638,7 +638,7 @@
     "job": "work at the port loading containers",
     "home": "Kingstonia City",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "kept the port running in 2021 on double shifts",
     "why_yes": "the port nearly stopped in 2021 with crews off sick, and the whole island felt it",
     "style": "grumpy but fair, complains about small things",
@@ -657,7 +657,8 @@
       "you think the island is already packed in high season and tourism needs limits",
       "you want local workers trained up before more are brought in from overseas"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "kalopulu79"
   },
   {
     "username": "tama.sutton",
@@ -5351,7 +5352,7 @@
     "job": "clean offices at night in Kingstonia City",
     "home": "Kingstonia City",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "kept cleaning empty office blocks through 2021, then did extra shifts disinfecting the ones that reopened",
     "why_yes": "germs get round a building fast, you've watched it, and you'd rather everyone was protected",
     "style": "quiet, humble, short, few posts",
