@@ -6362,6 +6362,8 @@ async def single_anchor_check() -> None:
     """ANCHOR_SINGLE: one qualifying account writes the anchors; it gives way when suspended, capped or not started,
     to the qualifying account with the fewest actions; others fill in only after SQUAD_GRACE, and only if they
     qualify; the anchor account writes again after SINGLE_REST, not ANCHOR_REST."""
+    from ctn.infra.health import SUSPENDED as HEALTH_SUSPENDED
+    assert HEALTH_SUSPENDED == SUSPENDED, "Health marks a suspension under the key anchor_qualifies reads"
     class Says:
         name = "says"
 

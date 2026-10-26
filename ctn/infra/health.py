@@ -60,6 +60,12 @@ def outcome(post: dict) -> str:
     return "visible"
 
 
+# bot.SUSPENDED: the meta key prefix of an account the platform refused as suspended. Set here too: on 26 October the
+# anchor account was suspended while every draft it wrote was dropped, so no write of its was refused, nothing marked
+# it, and the anchor slots waited on it until set by hand.
+SUSPENDED = "suspended:"
+
+
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
 
@@ -281,9 +287,13 @@ class Withdraw:
                 response = getattr(e, "response", None)
                 code = getattr(response, "status_code", None)
                 if code is not None and 400 <= code < 500:  # refused: the post is watched again
-                    text = (getattr(response, "text", "") or "")[:200]
-                    if code == 401 or any(w in text.lower() for w in ("suspend", "block", "banned")):
+                    body = (getattr(response, "text", "") or "").lower()
+                    text = body[:200]
+                    if code == 401 or any(w in body for w in ("suspend", "block", "banned")):
                         self.refused.add(username)
+                    # as a refused write does in bot.step(); a team's reporting stand-down says "suspended" too
+                    if code == 403 and "suspend" in body and "reporting" not in body:
+                        self.state.set_meta(SUSPENDED + username, _iso(datetime.now(timezone.utc)))
                     else:
                         self.skipped.add(post_id)
                     self.state.set_withdrawn(post_id, username, None, "")
@@ -530,6 +540,15 @@ async def _demo() -> None:
     p.refuse = {69: "account suspended", 71: "account suspended"}
     w.online = lambda: {"ann", "bob"}
     assert await w.withdraw() == 0 and w.refused == {"bob"} and state.withdrawn_status(71) is None
+    assert state.get_meta(SUSPENDED + "bob") and state.get_meta(SUSPENDED + "ann") is None, "a suspension is marked"
+    # read in full, however long the body; a reporting stand-down isn't an account's suspension
+    for who, pid, why in (("cy", 72, "x" * 300 + " account suspended"), ("di", 73, "reporting is suspended until 10:00")):
+        anchor(state, who, pid, timedelta(hours=4))
+        p.answers[pid] = {"hidden": False}
+        p.refuse[pid] = why
+    w.online = lambda: {"cy", "di"}
+    await w.withdraw()
+    assert state.get_meta(SUSPENDED + "cy") and state.get_meta(SUSPENDED + "di") is None
 
     # After the first delete, a teammate's reply to it is looked at: if it vanished too, withdrawing stops and
     # the reply isn't counted as a takedown; if it is still there, no more looks.
