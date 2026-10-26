@@ -695,7 +695,7 @@
     "job": "drive a taxi around Kingstonia City",
     "home": "Kingstonia City",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "drove almost nobody for months in 2021 and sold your second car to get by",
     "why_yes": "another lockdown would empty your taxi again, and showing proof of vaccination costs you nothing",
     "style": "lowercase, casual, abbreviations like tbh and ngl",
@@ -714,7 +714,8 @@
       "you think the island is already packed in high season and tourism needs limits",
       "you think rent in Kingstonia City has got out of hand and want it capped"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "nikau.mokena"
   },
   {
     "username": "paularua",
@@ -1300,7 +1301,7 @@
     "job": "work as a librarian at the Kingstonia public library",
     "home": "Kingstonia City",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "ran story time over video calls in 2021",
     "why_yes": "you want the library open for the kids and older people who rely on it",
     "style": "matter-of-fact, gives one concrete detail and stops",
@@ -1319,7 +1320,8 @@
       "you think schools get forgotten every budget",
       "you think climate change matters but worry about what it costs ordinary families"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "arnav_joshi"
   },
   {
     "username": "ana_76",
@@ -5316,7 +5318,7 @@
     "job": "work at a video game shop in a city mall",
     "home": "Kingstonia City",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "spent your final school year in 2021 on a webcam, seeing friends mostly on a headset",
     "why_yes": "you don't want young people stuck at home on laptops again",
     "style": "gamer slang, short, casual, lowercase",
@@ -5400,7 +5402,7 @@
     "job": "look after parks and gardens for the council in Crown Harbour",
     "home": "Crown Harbour",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "mowed empty parks through 2021 with every playground taped off",
     "why_yes": "you want the parks full of kids, not taped off",
     "style": "outdoorsy, easygoing, short, likes nature pics",
