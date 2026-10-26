@@ -202,6 +202,12 @@ class StateStore:
             "(SELECT 1 FROM moderation m WHERE m.post_id = h.made_id AND m.status != 'restored')",
             (username, since)).fetchone()[0]
 
+    def last_anchor_author(self) -> Optional[str]:
+        """The account that wrote our newest published anchor post."""
+        row = self.db.execute("SELECT username FROM history WHERE topic_kind = 'anchor' AND made_id IS NOT NULL "
+                              "ORDER BY ts DESC LIMIT 1").fetchone()
+        return row[0] if row else None
+
     def last_anchor(self, username: str, angle_prefix: str) -> Optional[str]:
         """The account's newest anchor post whose angle starts with `angle_prefix`, or None."""
         row = self.db.execute(
@@ -748,6 +754,10 @@ class StateStore:
     def get_meta(self, key: str) -> Optional[str]:
         row = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row[0] if row else None
+
+    def clear_meta(self, key: str) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM meta WHERE key = ?", (key,))
 
     def set_meta(self, key: str, value: str) -> None:
         with self.db:

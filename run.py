@@ -21,7 +21,7 @@ from ctn.infra.llm import FakeLLM, anchor_llm, game_day_start, ledger, load_env,
 from ctn.infra.news import News, NewsStore
 from ctn.infra.real_platform import WRITE_GAP, AccountStore, MockLegitSocial, RealPlatform
 from ctn.infra.state import StateStore
-from ctn.red.bot import COLUMN_WINDOW, COLUMNISTS, JOURNALISTS, LOW_PROFILE, NEWS_OUTLETS, PRESS_WINDOW, Bot, Roster
+from ctn.red.bot import COLUMN_WINDOW, COLUMNISTS, JOURNALISTS, LOW_PROFILE, NEWS_OUTLETS, PRESS_WINDOW, SUSPENDED, Bot, Roster
 from ctn.red.rhythm import Rhythm, UniformPacer, npc_curve
 from ctn.text.content import load_personas, load_world
 from ctn.text.examples import NpcExamples
@@ -125,6 +125,8 @@ class Team:
                                  side=BLUE_SIDE)
         self.health = Health(platform, state)
         self.online = set()
+        for bot in self.bots:  # ANCHOR_SINGLE picks its anchor account among the accounts logged in
+            bot.team = self.online
         self.withdraw = ([Withdraw(platform, state, self.health, online=lambda: self.online,
                                    locked=lambda: self.locked, lifts=lifts) for lifts in (False, True)]
                          if WITHDRAW else [])  # anchors, and the lift replies under deleted ones
@@ -366,11 +368,15 @@ class Team:
             try:
                 await asyncio.wait_for(self.platform.ensure_account(username, self.names[username]),
                                        until - loop.time())
+                self.state.clear_meta(SUSPENDED + username)  # in again: whatever was refused was not a suspension
                 if username in PRIVATE_ACCOUNTS:
                     await self._make_private(username)
                 return True
             except Exception as e:
                 log.warning("%s could not log in (%s)", username, str(e) or type(e).__name__)
+                response = getattr(e, "response", None)
+                if getattr(response, "status_code", None) == 403 and "suspend" in (getattr(response, "text", "") or "").lower():
+                    self.state.set_meta(SUSPENDED + username, datetime.now(timezone.utc).isoformat(timespec="seconds"))
                 await asyncio.sleep(max(0.0, min(LOGIN_RETRY, until - loop.time())))
         return False
 

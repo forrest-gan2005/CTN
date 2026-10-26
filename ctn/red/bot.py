@@ -505,6 +505,17 @@ ANCHOR_HIDDEN_CAP = 2
 # the evening of 24 October: with nine out of lifting our anchors got 31-38 reposts against Vertex's 45 and lost #1.
 ANCHOR_SQUAD = frozenset({"seinimatagi", "rico.almeida", "teuilatoleafoa", "hemi_parata", "AstridSolberg"})
 SQUAD_ACTION_CAP = 90
+# One anchor account at a time from 26 October (Forrest): an account of ours that qualifies (under SQUAD_ACTION_CAP
+# actions and ANCHOR_HIDDEN_CAP hidden posts, never refused as suspended, its planned start passed) writes every anchor:
+# the last one to anchor while it still qualifies, else the qualifying account with the fewest actions. Suspended or
+# capped, the next takes over, with no registration needed. An anchor account still costs about six anchors (three
+# hidden, with no account report able to suspend it under 100 actions), as in the squad, but only one at a time
+# carries hidden posts, as did a rival's anchor account that held Trending #1 with 14 posts in 19 hours.
+ANCHOR_SINGLE = True
+SINGLE_REST = timedelta(minutes=25)  # the anchor account writes every slot; ANCHOR_SPACING still keeps them apart
+ANCHOR_WAKE = 60.0  # seconds between the anchor account's looks at the slot, whatever its pacer says
+SUSPENDED = "suspended:"  # meta key prefix: an account a write or login was refused for as suspended
+ANCHOR_PICK_TTL = 30.0  # seconds the team's pick is reused
 SQUAD_GRACE = timedelta(minutes=75)
 SQUAD_FALLBACK = timedelta(minutes=20)
 ANCHOR_HIDDEN_FALLBACK = timedelta(minutes=20)
@@ -944,6 +955,32 @@ def anchor_gap(now: Optional[datetime] = None) -> timedelta:
     return FAST_ANCHOR_GAP if fast_anchors(now) else ANCHOR_GAP
 
 
+def anchor_qualifies(store, username: str, now: datetime) -> bool:
+    """May write ANCHOR_SINGLE's anchors: under the action and hidden-post caps, never refused as suspended, started."""
+    taken = store.moderation_counts().get(username, {})
+    start = store.planned_start(username)
+    return (store.get_meta(SUSPENDED + username) is None and store.action_total(username) < SQUAD_ACTION_CAP
+            and taken.get("suspected", 0) + taken.get("confirmed", 0) < ANCHOR_HIDDEN_CAP
+            and (start is None or start <= _iso(now)))
+
+
+def anchor_account(store, team, now: datetime) -> Optional[str]:
+    """ANCHOR_SINGLE's anchor account: the last account of `team` to anchor while it still qualifies, else the
+    qualifying one with the fewest actions (then by name); None if none qualifies. The same for every bot, as it is
+    read from the shared store; worked out every ANCHOR_PICK_TTL seconds."""
+    cached = getattr(store, "anchor_pick", None)
+    if cached is not None and cached[0] > now and cached[2] == frozenset(team):
+        return cached[1]
+    last = store.last_anchor_author()
+    if last in team and anchor_qualifies(store, last, now):
+        pick = last
+    else:
+        pool = sorted((store.action_total(u), u) for u in team if anchor_qualifies(store, u, now))
+        pick = pool[0][1] if pool else None
+    store.anchor_pick = (now + timedelta(seconds=ANCHOR_PICK_TTL), pick, frozenset(team))
+    return pick
+
+
 def anchors_held(now: datetime) -> bool:
     """Today (Sydney) is written in ANCHOR_HOLD_FILE: that day's suspensions reached its budget."""
     try:
@@ -1045,6 +1082,7 @@ class Bot:
         self.worries = []  # the NO worries citizens raise most at the moment, as arguments.md quotes them
         self.twins = twins  # semantic.NearIndex of the whole team's recent posts; None skips the check
         self.injection = injection  # injection.InjectionClassifier; None leaves probe-spotting to the regexes
+        self.team = None  # the accounts logged in (run.py's), ANCHOR_SINGLE's pool; None: the roster's own
         self.quiet = False  # set by the team's health check once QUIET_AT of this account's posts were taken down
         self.locked = False  # set by the team while the platform's feed is locked: nothing would go through
         self.news = ""  # what the local papers have published lately, set by the team
@@ -1099,6 +1137,9 @@ class Bot:
         return DIALOGUE_MODE and self.username in DIALOGUE_ACCOUNTS
 
     def _squad(self) -> bool:
+        if ANCHOR_SINGLE:
+            team = self.team if self.team is not None else self.roster.own | {self.username}
+            return self.username == anchor_account(self.store, team, datetime.now(timezone.utc))
         return self.username in ANCHOR_SQUAD
 
     async def _squad_step(self) -> Optional[Action]:
@@ -1943,7 +1984,8 @@ class Bot:
         now = datetime.now(timezone.utc)
         if at_night(now, ANCHOR_NIGHT) or ANCHOR_PAUSE[0] <= now < ANCHOR_PAUSE[1] or anchors_held(now):
             return None
-        if any(a.topic_kind == "anchor" and datetime.fromisoformat(ts) > now - ANCHOR_REST for ts, a in self.history):
+        rest = SINGLE_REST if ANCHOR_SINGLE and self._squad() else ANCHOR_REST
+        if any(a.topic_kind == "anchor" and datetime.fromisoformat(ts) > now - rest for ts, a in self.history):
             return None
         if self.store.team_posts(LIFT_TOPICS, _iso(now - ANCHOR_SPACING), ""):
             return None  # a late anchor's rush is still going: two at once split the lane
@@ -1955,7 +1997,9 @@ class Bot:
         gap = anchor_gap(now).total_seconds()
         slot = int(now.timestamp() // gap)
         wait = ANCHOR_HIDDEN_FALLBACK if hidden else timedelta(0) if exposed else ANCHOR_FALLBACK
-        if ANCHOR_SQUAD and not self._squad():  # the squad's job: the rest only fill in when it has gone silent
+        if (ANCHOR_SINGLE or ANCHOR_SQUAD) and not self._squad():  # the rest only fill in when it has gone silent,
+            if ANCHOR_SINGLE and not anchor_qualifies(self.store, self.username, now):  # and only qualifying ones
+                return None
             if self.store.team_posts(LIFT_TOPICS, _iso(now - SQUAD_GRACE), ""):
                 return None
             wait = max(wait, SQUAD_FALLBACK)
@@ -2734,7 +2778,7 @@ class Bot:
     async def step(self) -> Optional[Action]:
         if self.locked:  # no reading, no writing, no LLM calls for posts that can't go out
             return None
-        action = await self.think(await self.read())
+        action = await (self._squad_step() if self._squad() else self.think(await self.read()))
         if action is None:
             return None
         if self.locked:  # locked while this was being written
@@ -2777,6 +2821,8 @@ class Bot:
             return action
         except BaseException as e:  # including cancellation mid-request
             status = getattr(getattr(e, "response", None), "status_code", None)
+            if status == 403 and "suspend" in (getattr(e.response, "text", "") or "").lower():
+                self.store.set_meta(SUSPENDED + self.username, _iso(datetime.now(timezone.utc)))
             if self.gifs is not None and status in (400, 422) and GIPHY_URL_RE.search(action.content or ""):
                 self.gifs.disable(f"the platform refused {self.username}'s post with a GIF (HTTP {status})")
             if write is None and action.hold is not None and _never_sent(e):  # a like or repost that never went
@@ -2838,6 +2884,8 @@ class Bot:
         loop = asyncio.get_running_loop()
         while True:
             wait = pacer.next_wait(datetime.now(timezone.utc))
+            if ANCHOR_SINGLE and self._squad():  # the anchor account looks at each slot as it comes
+                wait = min(wait, random.uniform(0.5, 1.0) * ANCHOR_WAKE)
             soon, late = rush_wait()
             if wait > soon and self._rush_due():
                 wait = min(wait, random.uniform(soon, late))
@@ -2852,6 +2900,8 @@ class Bot:
                     rush_looked = loop.time()
                     if end - loop.time() > soon and self._rush_due():
                         break
+                if ANCHOR_SINGLE and end - loop.time() > ANCHOR_WAKE and self._squad():  # picked while asleep
+                    end = loop.time() + random.uniform(0.5, 1.0) * ANCHOR_WAKE
                 if end - loop.time() > ANSWER_WAIT[1] and self._answer_due_safe():
                     end = loop.time() + random.uniform(*ANSWER_WAIT)
                     self.answering = True
@@ -6073,6 +6123,139 @@ async def anchor_pace_check(trials: tuple = (), fast_from: Optional[datetime] = 
     print("anchor pace ok")
 
 
+async def single_anchor_check() -> None:
+    """ANCHOR_SINGLE: one qualifying account writes the anchors; it gives way when suspended, capped or not started,
+    to the qualifying account with the fewest actions; others fill in only after SQUAD_GRACE, and only if they
+    qualify; the anchor account writes again after SINGLE_REST, not ANCHOR_REST."""
+    class Says:
+        name = "says"
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            return "I run a cafe and lost five months in 2021, so I'm voting yes on the mandate."
+
+    global ANCHOR_SINGLE, ANCHOR_SQUAD, ANCHOR_FALLBACK, ANCHOR_BANK, SQUAD_FALLBACK
+    saved = ANCHOR_SINGLE, ANCHOR_SQUAD, ANCHOR_FALLBACK, ANCHOR_BANK, SQUAD_FALLBACK
+    try:
+        ANCHOR_SINGLE, ANCHOR_SQUAD = True, frozenset()
+        ANCHOR_FALLBACK, ANCHOR_BANK, SQUAD_FALLBACK = timedelta(0), False, timedelta(0)
+        writers = [p for p in load_personas(status=None) if p["line"] in ANCHOR_LINES][:4]
+        heavy, used, fresh, later = (p["username"] for p in writers)
+        team = {heavy, used, fresh, later}
+        store = StateStore(":memory:")
+        now = datetime.now(timezone.utc)
+        for i in range(SQUAD_ACTION_CAP):
+            store.record(heavy, _iso(now - timedelta(days=1, seconds=i)), Action("like", post_id=10_000 + i))
+        for i in range(5):
+            store.record(used, _iso(now - timedelta(days=1, seconds=i)), Action("like", post_id=20_000 + i))
+        store.plan_start(later, _iso(now + timedelta(hours=1)))
+
+        def pick() -> Optional[str]:
+            store.anchor_pick = None
+            return anchor_account(store, team, datetime.now(timezone.utc))
+
+        assert pick() == fresh, "no anchor yet: the qualifying account with the fewest actions"
+        store.record(used, _iso(now - timedelta(minutes=40)), Action("post", content="x", topic_kind="anchor",
+                                                                      made_id=700))
+        assert pick() == used, "the last to anchor keeps it while it qualifies"
+        store.set_meta(SUSPENDED + used, _iso(now))
+        assert pick() == fresh, "suspended: the next takes over"
+        store.set_moderation(801, fresh, "hidden", "t")
+        store.set_moderation(802, fresh, "missing", "t")
+        assert pick() is None, "capped, the heavy one over the action cap, the last not started: nobody"
+        store.db.execute("DELETE FROM schedule"); store.db.commit()
+        assert pick() == later, "started: it qualifies"
+
+        bots = {p["username"]: Bot(p, FakePlatform(), Says(), load_world(), roster=Roster(own=team), store=store)
+                for p in writers}
+        store.anchor_pick = None
+        assert bots[later]._squad() and not bots[heavy]._squad() and not bots[fresh]._squad()
+        action = await bots[later].step()
+        assert action is not None and action.topic_kind == "anchor", action
+        assert await bots[heavy]._anchor() is None, "over the action cap: never fills in"
+
+        # SINGLE_REST, not ANCHOR_REST: 30 minutes after its last anchor the anchor account writes the next
+        again = StateStore(":memory:")
+        then = _iso(datetime.now(timezone.utc) - SINGLE_REST - timedelta(minutes=5))
+        last = Action("post", content="x", topic_kind="anchor", made_id=900)
+        again.record(fresh, then, last)
+        solo = Bot(writers[2], FakePlatform(), Says(), load_world(), roster=Roster(own={fresh, heavy}), store=again)
+        solo.history.append((then, last))
+        assert solo._squad() and SINGLE_REST + timedelta(minutes=5) < ANCHOR_REST
+        assert await solo._anchor() is not None, "its next anchor after SINGLE_REST"
+
+        # The anchor account silent past SQUAD_GRACE: a qualifying teammate fills in, the heavy one never does
+        quiet = StateStore(":memory:")
+        quiet.record(fresh, _iso(datetime.now(timezone.utc) - SQUAD_GRACE - timedelta(minutes=5)), last)
+        for i in range(5):
+            quiet.record(used, _iso(now - timedelta(days=1, seconds=i)), Action("like", post_id=30_000 + i))
+        for i in range(SQUAD_ACTION_CAP):
+            quiet.record(heavy, _iso(now - timedelta(days=1, seconds=i)), Action("like", post_id=40_000 + i))
+        three = {fresh, used, heavy}
+        idle = Bot(writers[0], FakePlatform(), Says(), load_world(), roster=Roster(own=three), store=quiet)
+        assert await idle._anchor() is None and not quiet.holders("anchor:"), "over the action cap: never fills in"
+        filler = Bot(writers[1], FakePlatform(), Says(), load_world(), roster=Roster(own=three), store=quiet)
+        assert not filler._squad() and await filler._anchor() is not None, "a qualifying teammate fills the gap"
+
+        # The pool is the accounts logged in (run.py's set, shared and growing), never the whole roster
+        pool = StateStore(":memory:")
+        online = set()
+        members = [Bot(p, FakePlatform(), Says(), load_world(), roster=Roster(own=team), store=pool) for p in writers]
+        for b in members:
+            b.team = online
+        for i in range(3):
+            pool.record(used, _iso(now - timedelta(days=1, seconds=i)), Action("like", post_id=50_000 + i))
+        for i in range(SQUAD_ACTION_CAP):
+            pool.record(heavy, _iso(now - timedelta(days=1, seconds=i)), Action("like", post_id=55_000 + i))
+        online.update({heavy, used})
+        assert [b.username for b in members if b._squad()] == [used], "fresh isn't logged in: not picked"
+        online.add(fresh)
+        pool.anchor_pick = None
+        assert [b.username for b in members if b._squad()] == [fresh], "logged in now, with fewer actions"
+
+        # Picked while asleep on a long pacer wait: woken within ANCHOR_WAKE, not at its next sitting
+        global ANCHOR_WAKE, RUSH_WAIT
+        saved_wake = ANCHOR_WAKE, RUSH_WAIT
+        try:
+            ANCHOR_WAKE, RUSH_WAIT = 0.2, (0.05, 0.1)
+            nap = StateStore(":memory:")
+            for i in range(2):
+                nap.record(heavy, _iso(now - timedelta(days=1, seconds=i)), Action("like", post_id=60_000 + i))
+            sleeper = Bot(writers[0], FakePlatform(), Says(), load_world(), roster=Roster(own={heavy, fresh}), store=nap)
+            steps = []
+
+            async def step() -> None:
+                steps.append(sleeper._squad())
+
+            sleeper.step = step
+
+            class Slow:
+                def next_wait(self, now) -> float:
+                    return 100.0
+
+            loop = asyncio.get_running_loop()
+            assert not sleeper._squad(), "fresh, with no actions, is picked first"
+            running = asyncio.ensure_future(sleeper.run(loop.time() + 200.0, Slow()))  # past one 100 s sitting
+            await asyncio.sleep(0.3)
+            assert not steps, "not picked: asleep till its sitting"
+            nap.set_meta(SUSPENDED + fresh, "t")
+            nap.anchor_pick = None
+            await asyncio.sleep(1.0)
+            running.cancel()
+            try:
+                await running
+            except asyncio.CancelledError:
+                pass
+            assert steps and steps[0], "woken once picked, well before its 100 s sitting"
+        finally:
+            ANCHOR_WAKE, RUSH_WAIT = saved_wake
+    finally:
+        ANCHOR_SINGLE, ANCHOR_SQUAD, ANCHOR_FALLBACK, ANCHOR_BANK, SQUAD_FALLBACK = saved
+    print("single anchor ok")
+
+
 async def squad_check() -> None:
     """A squad account only anchors (quiet or not), and stops at its caps; the rest of the team anchors only once
     the squad has gone silent for SQUAD_GRACE, and then only SQUAD_FALLBACK into the slot."""
@@ -6157,9 +6340,11 @@ if __name__ == "__main__":
     low_key_check()
     # and the plain anchors of 24 October: plain_anchor_check
     anchor_squad, ANCHOR_SQUAD = ANCHOR_SQUAD, frozenset()  # no squad in the other checks; squad_check sets one
+    anchor_single, ANCHOR_SINGLE = ANCHOR_SINGLE, False  # nor one anchor account; single_anchor_check sets it
     anchor_night, ANCHOR_NIGHT = ANCHOR_NIGHT, (0, 0)  # no night in the checks; night_anchor_check sets it
     anchor_pause, ANCHOR_PAUSE = ANCHOR_PAUSE, (datetime(2000, 1, 1, tzinfo=TIMEZONE),) * 2  # nor the pause
     asyncio.run(squad_check())
+    asyncio.run(single_anchor_check())
     asyncio.run(night_anchor_check())
     asyncio.run(anchor_pace_check(fast_trials, fast_from))
     asyncio.run(answer_check())
@@ -6211,5 +6396,6 @@ if __name__ == "__main__":
     ANCHOR_NIGHT = anchor_night
     ANCHOR_PAUSE = anchor_pause
     ANCHOR_SQUAD = anchor_squad
+    ANCHOR_SINGLE = anchor_single
     FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE = fast_from, fast_trials, hold_file
     asyncio.run(main(args.real, n_bots, args.seconds))
