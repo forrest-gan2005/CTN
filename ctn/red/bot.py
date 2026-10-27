@@ -2500,7 +2500,7 @@ class Bot:
         picked = self.store.picked_for(author, since, _iso(now - OPEN_PICK))
         if self._focused(author):
             return max(picked, self.store.replies_to(author, since)
-                       + self.store.open_picks_for(author, _iso(now - OPEN_PICK)))
+                       + self.store.open_picks_for(author, since, _iso(now - OPEN_PICK)))
         return max(self.store.replies_to(author, since), picked)
 
     def _answer_due(self, now: Optional[datetime] = None) -> bool:
