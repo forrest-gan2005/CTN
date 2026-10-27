@@ -113,7 +113,7 @@ def check_backstories(personas: list) -> list:
                 if copies(line, b["story"]):
                     problems.append(f"{user}: story tells its {field[:-1]} {line!r} in the same words")
         names = {m.lower() for m in re.findall(r"\b([A-Z][a-z]+) \(", b["people"])}
-        for name in names & accounts:
+        for name in names & accounts if by_user[user].get("status") != "banned" else ():  # a banned one no longer posts
             problems.append(f"{user}: {name.title()} in the family is also one of our accounts")
         signoffs = {s.lower() for h in b["voice"] if h.startswith("Sign-offs:") for s in re.findall(r'"([^"]+)"', h)}
         emojis = set(EMOJI_RE.findall(" ".join(b["voice"])))

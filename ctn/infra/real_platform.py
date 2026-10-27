@@ -163,6 +163,24 @@ class PriorityLock:
         self._held = False
 
 
+def report_refusal(resp: httpx.Response) -> None:
+    """Raise what a report's answer means: the team's queue full, the team's reporting suspended, or (an account of
+    ours refused as suspended, or any other refusal) the HTTP error itself, which Blue sorts out."""
+    if resp.status_code == 403 and "awaiting a moderator" in resp.text.lower():
+        raise ReportQueueFull(resp.text[:200])
+    if resp.status_code in (403, 429) and any(w in resp.text.lower() for w in ("suspend", "block", "banned")) \
+            and not account_suspended(resp.text):  # our reporting account itself: Blue's to handle
+        raise ReportingSuspended(resp.text[:200])
+    resp.raise_for_status()
+
+
+def account_suspended(text: str) -> bool:
+    """A refusal naming the acting account as suspended, not the team's reporting stand-down ("reporting is
+    suspended for your team until ...")."""
+    text = (text or "").lower()
+    return "suspend" in text and "reporting" not in text
+
+
 class RealPlatform:
     """Legit Real (2026) through its HTTP API, mirroring FakePlatform's methods.
 
@@ -353,21 +371,13 @@ class RealPlatform:
         moderator rules later, so the outcome isn't known here."""
         resp = await self._call("POST", f"/posts/{post_id}/report", username,
                                 json={"reason": reason, "detail": detail}, idempotent=False)
-        if resp.status_code == 403 and "awaiting a moderator" in resp.text.lower():
-            raise ReportQueueFull(resp.text[:200])
-        if resp.status_code in (403, 429) and any(w in resp.text.lower() for w in ("suspend", "block", "banned")):
-            raise ReportingSuspended(resp.text[:200])
-        resp.raise_for_status()
+        report_refusal(resp)
 
     async def report_account(self, username: str, account: str, detail: str, reason: str = "inauthentic") -> None:
         """Report an account (by username) as inauthentic, `detail` after the platform's opening for accounts."""
         resp = await self._call("POST", f"/accounts/{await self.account_id(account)}/report", username,
                                 json={"reason": reason, "detail": detail}, idempotent=False)
-        if resp.status_code == 403 and "awaiting a moderator" in resp.text.lower():
-            raise ReportQueueFull(resp.text[:200])
-        if resp.status_code in (403, 429) and any(w in resp.text.lower() for w in ("suspend", "block", "banned")):
-            raise ReportingSuspended(resp.text[:200])
-        resp.raise_for_status()
+        report_refusal(resp)
 
     async def verified_now(self, username: str, post_id: Optional[int] = None) -> bool:
         """Whether this account has the platform's verified badge, asked afresh (a badge can come later). An account
@@ -867,6 +877,17 @@ async def _demo() -> None:
         assert e.response.status_code == 400
     await p.report("joe_tama", 5, "I think that this content is inauthentic (bot) activity because it posts nonstop.")
     assert mock.reports == [("joe_tama", 5, "inauthentic")]
+    request = httpx.Request("POST", "https://legit.test/api/posts/5/report")
+    for body, raised in (({"error": "reporting is suspended for your team until 2026-10-27T03:30:10Z"},
+                          ReportingSuspended),
+                         ({"error": "your team already has 20 reports awaiting a moderator's ruling"}, ReportQueueFull),
+                         ({"error": "account suspended"}, httpx.HTTPStatusError)):
+        try:
+            report_refusal(httpx.Response(403, json=body, request=request))
+            raise AssertionError(f"{body} raised nothing")
+        except raised:
+            pass
+    report_refusal(httpx.Response(201, json={}, request=request))
 
     stranger_team = RealPlatform("https://legit.test/api", feed_gap=0,
                                  team_key="WRONGWRONGWRONG2", accounts=AccountStore(":memory:"),

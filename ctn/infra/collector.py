@@ -134,11 +134,16 @@ def _json_default(obj):
     return sorted(obj) if isinstance(obj, (set, frozenset)) else str(obj)
 
 
+LOCK_TIMEOUT = 60.0  # seconds a write waits for another connection's lock
+
+
 class NpcStore:
     def __init__(self, path=DEFAULT_DB, own_usernames: Iterable[str] = ()) -> None:
         if str(path) != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(str(path))
+        # A reader elsewhere (the dashboard) can hold the file for seconds; at startup that stopped live three times on
+        # 27 October with "database is locked" after sqlite's default 5 s.
+        self.db = sqlite3.connect(str(path), timeout=LOCK_TIMEOUT)
         self.db.executescript(SCHEMA)
         if "verified" not in {r[1] for r in self.db.execute("PRAGMA table_info(authors)")}:
             self.db.execute("ALTER TABLE authors ADD COLUMN verified INTEGER NOT NULL DEFAULT 0")

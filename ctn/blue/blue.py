@@ -400,6 +400,13 @@ def tell_rank(reason: str) -> int:
     return {TOO_FAST: 1, COPIED: 3, PARAPHRASED: 3}.get(rule, 0)
 
 
+def reporter_suspended(error: Exception) -> bool:
+    """A 403 refusing the reporting account itself as suspended (not a report refused, nor reporting suspended for the
+    team, which the platform raises as ReportingSuspended)."""
+    text = (getattr(getattr(error, "response", None), "text", "") or "").lower()
+    return "suspend" in text and "reporting" not in text
+
+
 class Reporter:
     """Reports what the scanner finds, and stands down for six hours if a report is ever rejected."""
 
@@ -424,6 +431,7 @@ class Reporter:
         self.blocked_until: Optional[datetime] = None
         self.rulings_at: Optional[datetime] = None  # when reported posts were last looked at
         self.locked = False  # set by the team while the platform's feed is locked
+        self.suspended = set()  # accounts of ours the platform refused as suspended: never reported from again
         self.account_at: Optional[float] = None  # clock time of the last account report sent
 
     def blocked(self) -> bool:
@@ -581,8 +589,9 @@ class Reporter:
                 continue
             # Stored first: if the process stops mid-request, the next start marks the report unknown, never resends it.
             self.state.begin_report(post_id, author, reason, _now())
+            who = self.username  # the account this request goes out as, whoever reports by the time it returns
             try:
-                upheld = await self.platform.report(self.username, post_id, report_detail(reason))
+                upheld = await self.platform.report(who, post_id, report_detail(reason))
             except asyncio.CancelledError:
                 self.state.record_report(post_id, author, reason, _now(), "unknown")
                 raise
@@ -610,6 +619,12 @@ class Reporter:
                 if code == 429:  # rate limiting, not a refusal: the target stays in the queue
                     self.blocked_until = datetime.now(timezone.utc) + RATE_LIMIT_PAUSE
                     log.warning("reporting rate-limited; standing down until %s", self.blocked_until)
+                    break
+                if code == 403 and reporter_suspended(e):  # our account, not the report: kept for its replacement
+                    self.state.end_report(post_id)
+                    self.suspended.add(who)
+                    self.locked = self.locked or who == self.username
+                    log.warning("%s is suspended; reporting waits for another account", who)
                     break
                 if code == 403 and await self._feed_locked():  # not refused: it stays a candidate for later
                     self.state.end_report(post_id)
@@ -703,8 +718,9 @@ class Reporter:
             detail = (f"{ACCOUNT_OPENING}inauthentic (bot) activity: its post #{post_id} was removed after reports, "
                       "and it posts like the other accounts of an automated team.")
             self.account_at = self.clock()
+            who = self.username
             try:
-                await self.platform.report_account(self.username, author, detail)
+                await self.platform.report_account(who, author, detail)
             except ReportQueueFull as e:
                 self.blocked_until = datetime.now(timezone.utc) + QUEUE_FULL_PAUSE
                 log.warning("reports awaiting a ruling are at the platform's limit (%s); standing down until %s", e,
@@ -728,6 +744,11 @@ class Reporter:
                 code = getattr(getattr(e, "response", None), "status_code", None)
                 if code == 429:
                     self.blocked_until = datetime.now(timezone.utc) + RATE_LIMIT_PAUSE
+                    return 0
+                if code == 403 and reporter_suspended(e):  # our account, not the report: tried again later
+                    self.suspended.add(who)
+                    self.locked = self.locked or who == self.username
+                    log.warning("%s is suspended; reporting waits for another account", who)
                     return 0
                 if code is not None and 400 <= code < 500:  # refused: not tried again
                     self.state.record_account_report(author, _now(), "failed")
@@ -904,6 +925,7 @@ async def _demo() -> None:
     blocked_for = reporter.blocked_until - datetime.now(timezone.utc)
     assert timedelta(hours=2) <= blocked_for < timedelta(hours=2, minutes=1), "the platform's own end is kept"
     _suspension_checks()
+    await _suspended_reporter_demo()
     await _self_check_demo(embedder)
     await _backfill_demo()
     await _gone_demo()
@@ -1181,6 +1203,60 @@ async def _side_budget_demo() -> None:
     assert within_budget(judge.starts), judge.starts
 
 
+async def _suspended_reporter_demo() -> None:
+    """The reporting account itself refused as suspended: the post stays a candidate (never 'failed') and Blue pauses
+    until the team gives it another account."""
+    import httpx
+
+    from ctn.infra.collector import NpcStore
+    from ctn.infra.state import StateStore
+
+    now = datetime.now(timezone.utc)
+    giveaway = "Booked my shot at the clinic, quick and easy"
+
+    class Stub:
+        def __init__(self) -> None:
+            self.sent, self.text, self.move_to = [], "account suspended", None
+
+        async def verified_now(self, username: str, post_id=None) -> bool:
+            return False
+
+        async def report(self, username: str, post_id: int, detail: str) -> None:
+            self.sent.append((username, post_id))
+            if self.move_to:  # the team moves Blue while this request is out
+                reporter.username = self.move_to
+            if self.text:
+                raise httpx.HTTPStatusError("refused", request=httpx.Request("POST", "http://x"),
+                                            response=httpx.Response(403, json={"error": self.text}))
+
+        async def feed_locked(self) -> bool:
+            return False
+
+    store = NpcStore(":memory:")
+    store.add_posts([{"id": 1, "author": "rival_1", "content": f"{giveaway} (1)", "created_at": now.isoformat()}])
+    state = StateStore(":memory:")
+    state.add_suspect("rival_1", "manual: one of a scripted team", 1, now.isoformat(timespec="seconds"))
+    scanner = BlueScanner(store, state, own=(), cutoff=now - timedelta(days=1))
+    scanner.scan()
+    stub = Stub()
+    reporter = Reporter(stub, scanner, state, username="old_reporter", min_citizens=0)
+    kept = len(scanner.candidates())
+    assert kept and await reporter.report_some() == 0 and reporter.locked and reporter.suspended == {"old_reporter"}
+    assert "failed" not in state.report_counts() and len(scanner.candidates()) == kept, state.report_counts()
+    # a refusal for an account Blue has already moved off marks that account, not the new one
+    reporter.username, reporter.locked, stub.move_to = "older_reporter", False, "new_reporter"
+    assert await reporter.report_some() == 0 and not reporter.locked
+    assert reporter.suspended == {"old_reporter", "older_reporter"} and reporter.username == "new_reporter"
+    stub.text, stub.move_to = None, None
+    assert await reporter.report_some() == 1 and stub.sent[-1] == ("new_reporter", 1)
+    assert reporter_suspended(httpx.HTTPStatusError("x", request=httpx.Request("POST", "http://x"),
+                                                    response=httpx.Response(403, json={"error": "account suspended"})))
+    assert not reporter_suspended(httpx.HTTPStatusError(
+        "x", request=httpx.Request("POST", "http://x"),
+        response=httpx.Response(403, json={"error": "reporting is suspended for your team until 10:00"})))
+    print("suspended reporter ok")
+
+
 async def _badge_and_lock_demo() -> None:
     """A badge read again on a stored post, or found by asking just before a report, keeps the account from
     ever being reported (and a check that fails reports nothing this round). A lock that comes mid-round stops
@@ -1269,6 +1345,7 @@ async def _badge_and_lock_demo() -> None:
     assert state.report_counts() == {"sent": 1}, "a refusal because of the lock counted as a failure"
     reporter.locked, stub.lock = False, False
     assert await reporter.report_some() == 1 and state.report_counts() == {"sent": 2}
+    reporter.locked, stub.lock = False, False
     store.add_posts([{"id": 3, "author": "rival_3", "content": f"{giveaway} (3)", "created_at": now.isoformat()}])
     scanner.scan()
     stub.hold_check, sent = True, len(stub.sent)  # the lock comes while the badge is being checked

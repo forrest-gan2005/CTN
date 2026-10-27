@@ -64,6 +64,14 @@ RESTORE_RETRY = 30.0  # seconds between catch-up attempts after a restore while 
 API_URL = "https://social.legitreal.com/api"  # where the 2026 web client talks to; override with $CTN_API_URL
 
 
+# Swaps without a restart (27 October): every ADOPT_EVERY seconds the team reads the personas again, brings in an
+# active one it isn't running (a reserve swapped in by tools.swap: logged in and started like any other) and stops
+# one no longer active (banned and replaced). A restart cost about ten minutes of logins, and the x4 days will need
+# swaps.
+ADOPT_EVERY = 120.0
+BLUE_MOVE_WAIT = 30.0  # seconds between looks for Blue's new account after its own was retired
+
+
 class Team:
     """Everything that runs during the competition, sharing one collector and one team memory."""
 
@@ -103,13 +111,18 @@ class Team:
         self.collector = Collector(platform, npc_store, min_interval=collector_interval)
         self.roster = Roster(own=self.own)
         world = load_world()
-        self.bots = [Bot(p, platform, llm, world, stance_llm=stance_llm, anchor_llm=anchor_writer, roster=self.roster,
-                         store=state,
-                         feed=self.feed, profile=lambda author: npc_store.recent_by(author, 5), twins=self.twins,
-                         injection=injection, depth=npc_store.depth, said=npc_store.said,
-                         citizens=lambda since: npc_store.citizen_posts_since(since, cutoff),
-                         answers=npc_store.replies_after)
-                     for p in personas]
+        self._new_bot = lambda p: Bot(
+            p, platform, llm, world, stance_llm=stance_llm, anchor_llm=anchor_writer, roster=self.roster, store=state,
+            feed=self.feed, profile=lambda author: npc_store.recent_by(author, 5), twins=self.twins,
+            injection=injection, depth=npc_store.depth, said=npc_store.said,
+            citizens=lambda since: npc_store.citizen_posts_since(since, cutoff), answers=npc_store.replies_after)
+        self.bots = [self._new_bot(p) for p in personas]
+        self.fast = fast
+        self.active_personas = load_personas  # what adopt() reads; the checks hand it their own
+        self.adopting = True  # off for a run limited to some of the personas (live --limit)
+        self.running = {}  # username -> the task running that bot (from run())
+        self.retired = set()  # usernames adopt() stopped
+        self.crashed = set()  # usernames whose run raised, for adopt() to start again
         self.gifs = GifPool() if gifs else None  # one pool, so the whole team spaces out reusing a GIF
         if self.gifs is not None:  # and across restarts, from what the team has posted or may have
             since = datetime.now(timezone.utc) - timedelta(seconds=REUSE_AFTER)
@@ -359,7 +372,13 @@ class Team:
             return True
         if username not in self._logins:
             self._logins[username] = asyncio.ensure_future(self._login_until(username, until))
-        return await asyncio.shield(self._logins[username])
+        login = self._logins[username]
+        try:
+            return await asyncio.shield(login)
+        except asyncio.CancelledError:
+            if login.cancelled() and username in self.retired:  # the account was retired, not the run cancelled
+                return False
+            raise
 
     async def _login_until(self, username: str, until: float) -> bool:
         """Retry, since a rejection can be temporary, but never past this run's deadline."""
@@ -388,6 +407,105 @@ class Team:
         except Exception as e:
             log.warning("couldn't make %s's profile private (%s)", username, str(e) or type(e).__name__)
 
+    def adopt(self, until: float) -> None:
+        """Start any active persona the team isn't running and stop any running one that is no longer active (its
+        login retries too); Blue moves to another account online if its account is the one stopped."""
+        if not self.adopting:
+            return
+        try:
+            active = {p["username"]: p for p in self.active_personas()}
+        except Exception as e:  # mid-write by tools.swap, or a hand-editing mistake: next round
+            log.warning("couldn't read the personas (%s); no swaps this round", str(e) or type(e).__name__)
+            return
+        if not active:  # taken for a bad read: all fifty accounts gone at once is not something to act on
+            return
+        running = {b.username for b in self.bots}
+        by_name = {b.username: b for b in self.bots}
+        for username, p in active.items():
+            task = self.running.get(username)
+            if username in running and username not in self.retired and (username in self.crashed or (
+                    task is not None and task.done() and not task.cancelled() and task.exception() is not None)):
+                log.warning("%s stopped; starting it again", username)
+                self.crashed.discard(username)
+                self.online.discard(username)
+                self.running[username] = asyncio.ensure_future(self._run_bot(by_name[username], until))
+                self.running[username].add_done_callback(self._report_crash)
+                continue
+            if username in running or username in self.retired:
+                continue
+            bot = self._new_bot(p)
+            self.own.add(username)
+            self.roster.own.add(username)
+            self.npc_store.own.add(username)
+            getattr(self.scanner, "own", set()).add(username)
+            self.names[username] = p["name"]
+            bot.gifs, bot.team, bot.locked = self.gifs, self.online, self.locked
+            if self.bots:  # what the last refresh handed every writer
+                model = self.bots[0]
+                bot.examples, bot.hashtags, bot.worries = model.examples, model.hashtags, model.worries
+                bot.news, bot.articles = model.news, model.articles
+            self.pacers[username] = (UniformPacer(1.0, 4.0) if self.fast
+                                     else Rhythm(username, getattr(next(iter(self.pacers.values()), None), "curve",
+                                                                   None) or npc_curve([])))
+            self.bots.append(bot)
+            self.set_quiet(self.health.quiet())
+            self.running[username] = asyncio.ensure_future(self._run_bot(bot, until))
+            self.running[username].add_done_callback(self._report_crash)
+            log.info("adopted %s: swapped in, starting without a restart", username)
+        for username in running - set(active) - self.retired:
+            self.retired.add(username)
+            task = self.running.get(username)
+            if task is not None and not task.done():
+                task.cancel()
+            self.online.discard(username)
+            login = self._logins.pop(username, None)
+            if login is not None and not login.done():
+                login.cancel()  # a suspended account's login would retry until the deadline
+            log.info("retired %s: no longer active", username)
+        if (self.reporter.username in self.retired  # again each round until an account is online to move to
+                or self.reporter.username in getattr(self.reporter, "suspended", ())):
+            self._move_blue(active)
+
+    def _move_blue(self, active: dict) -> None:
+        """Report from another account online, an amplifier if one is (it rarely posts itself)."""
+        refused = getattr(self.reporter, "suspended", set())
+        candidates = [u for u in active if u in self.online and u not in self.retired and u not in refused]
+        if not candidates:
+            self.reporter.locked = True  # no reports from a retired account meanwhile
+            log.error("no account online to report from; Blue waits for one")
+            return
+        new = next((u for u in candidates if active[u]["line"] == "amplifier"), candidates[0])
+        log.info("Blue reports from %s now (was %s)", new, self.reporter.username)
+        self.reporter.username = new
+        self.reporter.locked = self.locked
+
+    @staticmethod
+    def _report_crash(task: asyncio.Future) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            log.error("an adopted bot stopped: %r", task.exception())
+
+    async def _adopting(self, until: float, every: float = ADOPT_EVERY) -> None:
+        while True:
+            await asyncio.sleep(every)
+            try:
+                self.adopt(until)
+            except Exception:
+                log.exception("adopting swapped-in accounts failed")
+
+    async def _run_bot(self, bot: Bot, until: float) -> None:
+        """A bot's whole run; one retired by adopt() just ends, and one that crashes is started again by adopt()
+        rather than taking the team down."""
+        try:
+            await self._start(bot, until)
+        except asyncio.CancelledError:
+            if bot.username in self.retired:
+                return
+            raise
+        except Exception:
+            log.exception("%s stopped; adopt() starts it again", bot.username)
+            self.online.discard(bot.username)
+            self.crashed.add(bot.username)
+
     async def _start(self, bot: Bot, until: float) -> None:
         """Hold a bot until its start time, log it in, then let it run; all within this run's deadline."""
         if not await self._wait_until(self.start_time(bot, datetime.now(timezone.utc)), until):
@@ -403,9 +521,18 @@ class Team:
         """Report from the start, like the bots act: before it, collecting is all the team does."""
         if not await self._wait_until(self.not_before or datetime.now(timezone.utc), until):
             return
-        if not await self._login(self.reporter.username, until):
-            log.error("the reporting account never logged in; Blue is off")
-            return
+        loop = asyncio.get_running_loop()
+        while True:
+            username = self.reporter.username
+            if await self._login(username, until):
+                break
+            if username not in self.retired:  # a login that failed for good, not an account swapped out
+                log.error("the reporting account never logged in; Blue is off")
+                return
+            while self.reporter.username == username and loop.time() < until:  # adopt() moves Blue when it can
+                await asyncio.sleep(BLUE_MOVE_WAIT)
+            if loop.time() >= until:
+                return
         await self.reporter.run(until)
 
     async def check_lock(self) -> None:
@@ -422,7 +549,8 @@ class Team:
         self.locked = locked
         for bot in self.bots:
             bot.locked = locked
-        self.reporter.locked = locked
+        self.reporter.locked = (locked or self.reporter.username in self.retired
+                                or self.reporter.username in getattr(self.reporter, "suspended", ()))
 
     def brief_news(self) -> None:
         """What the papers have published lately, into every writer's context."""
@@ -470,16 +598,18 @@ class Team:
             background.append(asyncio.create_task(self._watch_lock(LOCK_EVERY)))
         if self.news is not None:
             background.append(asyncio.create_task(self._read_news(NEWS_EVERY)))
+        self.running = {bot.username: asyncio.ensure_future(self._run_bot(bot, until)) for bot in self.bots}
+        background.append(asyncio.create_task(self._adopting(until)))
         try:
             await asyncio.gather(
                 self.collector.run(until),
                 self._blue(until),
                 self.health.run(until, on_change=self.set_quiet),
                 *(w.run(until) for w in self.withdraw),
-                *(self._start(bot, until) for bot in self.bots),
+                *list(self.running.values()),
             )
         finally:
-            for task in background:
+            for task in background + list(self.running.values()):
                 task.cancel()
 
 
@@ -504,6 +634,7 @@ async def live(limit: Optional[int], stagger_hours: float, opens: datetime = GAM
                 not_before=opens, stagger=timedelta(hours=stagger_hours), backup_dir=backup.BACKUPS,
                 news=News(NewsStore()), gifs=os.environ.get("GIFS", "on").lower() not in ("0", "off", "no", "false"),
                 accounts=ACCOUNTS_SEEN, anchor_writer=anchors)
+    team.adopting = not limit  # a run limited to some personas doesn't take in the rest
     log.info("live: %d accounts, online from %s staggered over %gh, writer %s, judge %s, anchors %s", len(personas),
              f"{opens:%a %d %b %H:%M %Z}", stagger_hours, llm.name, judge.name,
              anchors.name if anchors is not None else "the writer")
@@ -585,6 +716,146 @@ def registered_check() -> None:
                     personas=load_personas()[:1])
         assert not bare.roster.npcs
     print("registered ok")
+
+
+async def adopt_check() -> None:
+    """A persona made active while the team runs is started without a restart (logged in, with the team's pacing,
+    pool and writers' context); one no longer active is stopped and leaves the online set; an unreadable personas
+    file changes nothing."""
+    a, b = load_personas()[:2]
+    team = Team(FakePlatform(), FakeLLM(0, 0), None, NpcStore(":memory:"), StateStore(":memory:"), personas=[a],
+                gifs=False, fast=True)
+    loop = asyncio.get_running_loop()
+    until = loop.time() + 30
+    team.running = {a["username"]: asyncio.ensure_future(team._run_bot(team.bots[0], until))}
+    try:
+        team.active_personas = lambda: [a, b]
+        team.adopt(until)
+        assert [x.username for x in team.bots] == [a["username"], b["username"]], [x.username for x in team.bots]
+        assert b["username"] in team.running and b["username"] in team.pacers and team.names[b["username"]]
+        new = team.bots[1]
+        assert new.team is team.online and new.locked == team.locked and b["username"] in team.roster.own
+        for _ in range(50):
+            await asyncio.sleep(0.05)
+            if b["username"] in team.online:
+                break
+        assert b["username"] in team.online, "logged in and running"
+        team.adopt(until)
+        assert len(team.bots) == 2, "nothing started twice"
+
+        def broken():
+            raise ValueError("half-written file")
+        team.active_personas = broken
+        team.adopt(until)
+        assert len(team.bots) == 2 and not team.retired
+        reporter_was = team.reporter.username
+        team.reporter.username = a["username"]  # Blue reports from the account about to be retired
+        team._logins[a["username"]] = pending = asyncio.ensure_future(asyncio.sleep(100))  # a login still retrying
+        team.active_personas = lambda: [b]
+        team.adopt(until)
+        await asyncio.sleep(0.1)
+        assert pending.cancelled() and a["username"] not in team._logins, "its login retries stop"
+        assert team.reporter.username == b["username"], "Blue moved to an account online"
+        task = team.running[a["username"]]
+        assert a["username"] in team.retired and task.done() and not task.cancelled() and task.exception() is None
+        assert a["username"] not in team.online and b["username"] in team.online
+        team.active_personas = lambda: [a, b]
+        team.adopt(until)
+        assert len(team.bots) == 2, "a retired account isn't brought back by this run"
+        # a bot whose run raises doesn't raise out of _run_bot (run()'s gather would stop the team); adopt() restarts it
+        crashing = team.bots[1]
+        real_start = team._start
+
+        async def crash(bot, until_):
+            raise RuntimeError("boom")
+        team._start = crash
+        try:
+            await team._run_bot(crashing, until)
+        finally:
+            team._start = real_start
+        assert crashing.username in team.crashed and crashing.username not in team.online
+        team.active_personas = lambda: [b]
+        team.adopt(until)
+        assert crashing.username not in team.crashed and not team.running[b["username"]].done(), "restarted"
+        # a bot whose task ended (here: crashed) is started again; one whose task finished is still retired
+        boom = asyncio.get_running_loop().create_future()
+        boom.set_exception(RuntimeError("boom"))
+        team.running[b["username"]] = boom
+        team.active_personas = lambda: [b]
+        team.adopt(until)
+        assert team.running[b["username"]] is not boom and not team.running[b["username"]].done(), "restarted"
+        team.retired.discard(a["username"])
+        done = asyncio.get_running_loop().create_future()
+        done.set_result(None)
+        team.running[a["username"]] = done
+        team.online.add(a["username"])
+        team.reporter.username = a["username"]
+        team.online.discard(b["username"])  # nobody else online yet
+        team.adopt(until)
+        assert a["username"] in team.retired and a["username"] not in team.online
+        assert team.reporter.username == a["username"] and team.reporter.locked, "nobody to move Blue to: it pauses"
+        async def open_feed():
+            return False
+        team.platform.feed_locked = open_feed
+        await team.check_lock()
+        assert team.reporter.locked and not team.locked, "and stays paused through a feed-lock check"
+        team.online.add(b["username"])
+        team.adopt(until)
+        assert team.reporter.username == b["username"] and not team.reporter.locked, "moved once one is online"
+        # refused as suspended before the swap retired it: paused through feed checks, moved off at the next round
+        team.reporter.suspended = {a["username"], b["username"]}  # A refused earlier, B now: neither picked again
+        team.reporter.locked = True
+        await team.check_lock()
+        assert team.reporter.locked, "a refused account doesn't resume on an open feed"
+        c = load_personas()[2]
+        team.active_personas = lambda: [b, c]
+        team.adopt(until)
+        for _ in range(50):
+            await asyncio.sleep(0.02)
+            if c["username"] in team.online:
+                break
+        team.adopt(until)
+        assert team.reporter.username == c["username"] and not team.reporter.locked, team.reporter.username
+        team.reporter.suspended = set()
+        # Blue itself: its account retired while its login is still retrying and nobody else online: it waits, then
+        # reports from the account it is moved to
+        global BLUE_MOVE_WAIT
+        wait_was, BLUE_MOVE_WAIT = BLUE_MOVE_WAIT, 0.01
+        try:
+            ran = []
+
+            async def run_blue(until_):
+                ran.append(team.reporter.username)
+            team.reporter.run = run_blue
+
+            async def logs_in(username, name):
+                return None
+            team.platform.ensure_account = logs_in  # logins go through _login, as on the real platform
+            team.names["blue_old"] = "Blue Old"
+            team.reporter.username = "blue_old"
+            team._logins["blue_old"] = asyncio.ensure_future(asyncio.sleep(100))
+            blue = asyncio.ensure_future(team._blue(until))
+            await asyncio.sleep(0.05)
+            team.retired.add("blue_old")
+            team._logins.pop("blue_old").cancel()
+            await asyncio.sleep(0.1)
+            assert not blue.done(), "Blue waits for a new account"
+            team.reporter.username = b["username"]
+            await asyncio.wait_for(blue, 2)
+            assert ran == [b["username"]], ran
+        finally:
+            BLUE_MOVE_WAIT = wait_was
+        team.reporter.username = reporter_was
+        team.adopting = False  # live --limit
+        team.active_personas = lambda: load_personas()[:5]
+        before = len(team.bots)
+        team.adopt(until)
+        assert len(team.bots) == before, "a limited run takes in nobody"
+    finally:
+        for task in team.running.values():
+            task.cancel()
+        await asyncio.gather(*team.running.values(), return_exceptions=True)
+    print("adopt ok")
 
 
 def gif_restart_check() -> None:
@@ -732,6 +1003,7 @@ async def _killed_child(tmp: str) -> None:
     bot_module.ACTION_WEIGHTS = {"post": 1}
     bot_module.PITCH_PROB = 0.0  # a fresh interpreter: smoke's setting doesn't reach it
     bot_module.ANCHOR_LINES = set()
+    bot_module.LINE_ACTIONS, bot_module.ANCHOR_SINGLE, bot_module.NPC_ONLY_REPLIES = {}, False, False
     p = Cut()
     p.when, p.landed = "hang", f"{tmp}/landed.json"
     persona = load_personas()[0]
@@ -1380,6 +1652,7 @@ def persona_story_check() -> None:
     stories = {p["username"]: p for p in broken if "backstory" in p}
     stories["kai_lind"]["backstory"]["story"] += " The roti stall by the city markets is undefeated, no contest."
     stories["kai_lind"]["backstory"]["people"] += ", Tevita (cousin), Rosa (aunt)"
+    stories["kai_lind"]["status"] = "active"  # a banned account's family no longer clashes with anyone
     stories["kai_lind"]["backstory"]["voice"].append('Sign-offs: "Righto."')
     stories["lena_brook"]["backstory"]["voice"].append("Emoji: 🤖")
     stories["grace_teo"]["backstory"]["story"] = "Too short."
@@ -1721,14 +1994,19 @@ if __name__ == "__main__":
         # Pitches and anchor posts have their own checks; these expect a step's action to be the kind they set.
         bot_module.PITCH_PROB, bot_module.ANCHOR_LINES = 0.0, set()
         bot_module.ANCHOR_SQUAD = frozenset()  # and the squad, whose accounts only anchor: ctn.red.bot's squad_check
+        bot_module.ANCHOR_SINGLE = False  # nor one anchor account: single_anchor_check
+        bot_module.LINE_ACTIONS = {}  # the first persona may be an amplifier now; these checks set ACTION_WEIGHTS
         # The checks below were written before these; ctn.red.bot's own checks cover them, and smoke() runs with them.
-        pinned = bot_module.CITIZEN_TARGETING, bot_module.STORY_REPLIES, bot_module.CITIZEN_DAILY_REPLIES
+        pinned = (bot_module.CITIZEN_TARGETING, bot_module.STORY_REPLIES, bot_module.CITIZEN_DAILY_REPLIES,
+                  bot_module.NPC_ONLY_REPLIES, bot_module.PERSUADE_V2)
         bot_module.CITIZEN_TARGETING, bot_module.STORY_REPLIES = False, False
+        bot_module.NPC_ONLY_REPLIES, bot_module.PERSUADE_V2 = False, False  # an empty feed still writes a post
         bot_module.CITIZEN_DAILY_REPLIES = bot_module.MAX_REPLIES_PER_AUTHOR
         log_file_check()
         schedule_check()
         registered_check()
         gif_restart_check()
+        asyncio.run(adopt_check())
         asyncio.run(unresolved_check())
         asyncio.run(interrupted_check())
         asyncio.run(restore_check())
@@ -1741,7 +2019,8 @@ if __name__ == "__main__":
         asyncio.run(lock_check())
         asyncio.run(news_check())
         asyncio.run(examples_check())
-        bot_module.CITIZEN_TARGETING, bot_module.STORY_REPLIES, bot_module.CITIZEN_DAILY_REPLIES = pinned
+        (bot_module.CITIZEN_TARGETING, bot_module.STORY_REPLIES, bot_module.CITIZEN_DAILY_REPLIES,
+         bot_module.NPC_ONLY_REPLIES, bot_module.PERSUADE_V2) = pinned
         asyncio.run(smoke())
     else:
         asyncio.run(rehearse(args.seconds, args.real))

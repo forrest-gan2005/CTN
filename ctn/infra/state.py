@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS history (
     model TEXT            -- which LLM wrote the content
 );
 CREATE INDEX IF NOT EXISTS history_user ON history(username);
+CREATE INDEX IF NOT EXISTS history_made ON history(made_id);
 CREATE INDEX IF NOT EXISTS history_target ON history(target_author, ts);
 CREATE TABLE IF NOT EXISTS claims (
     key TEXT PRIMARY KEY,   -- post:<id> or follow:<username>; one of our accounts per target
