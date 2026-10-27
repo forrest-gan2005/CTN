@@ -35,11 +35,12 @@ HEALTH_BATCH = 150
 # leaves later reports nothing to land on. Points already scored stay. Two hours from 25 October (Forrest): an anchor
 # squad account was suspended for three hidden anchors, three of its six in a day hidden before the 3-hour delete.
 WITHDRAW = True
-# New anchor deletes off from 27 October evening (Forrest: the later likes are worth having; watch whether suspensions
-# jump): rival anchors stay up and stay in Trending 7+ hours, 12% of the citizen likes on them came 2-4 hours after
-# posting, and their anchor accounts post about hourly without being suspended. The loops still settle deletes
-# already sent (status deleting) and take lift replies down under anchors deleted before.
-WITHDRAW_ANCHORS = False
+# Off 27 October 21:17 to 28 October 01:5x (Forrest: the later likes are worth having; watch whether suspensions jump):
+# 12% of citizen likes on rival anchors came 2-4 hours after posting. On again: the anchor account was suspended at
+# 01:05 for its third hidden post, one an anchor kept up past two hours; at two anchors an hour an anchor account
+# would last about five hours, for some 30 points an anchor. Off, the loops only settle deletes already sent and take
+# lift replies down under anchors deleted before.
+WITHDRAW_ANCHORS = True
 WITHDRAW_AFTER = timedelta(hours=2)
 WITHDRAW_EVERY = 300.0
 REPLIES_KEY = "withdraw_replies"  # meta: whether our replies survive a deleted post ("survive" | "vanish")
