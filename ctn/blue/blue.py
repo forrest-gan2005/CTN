@@ -115,13 +115,13 @@ REPORT_OPENING = "I think that this content is inauthentic (bot) activity becaus
 # have been suspending ours. One goes, at most every ACCOUNT_REPORT_GAP, to an account whose post we reported is still
 # hidden past the ruling time (not a temporary hide or a fresh delete), that the collector saw post at least
 # ACCOUNT_MIN_POSTS times (likes don't show, so this undercounts its actions) and post within ACCOUNT_RECENT (not
-# suspended already); only while fewer than PENDING_CAP of our reports may await a ruling (the platform holds 20 a
-# team), and within the team's daily allowance, which account reports share with post reports.
+# suspended already); only while fewer than PENDING_CAP of our reports may await a ruling (the platform holds 30 a
+# team since 22 October), and within the team's daily allowance, which account reports share with post reports.
 ACCOUNT_REPORTING = True
 ACCOUNT_REPORT_GAP = 1800.0
 ACCOUNT_MIN_POSTS = 30
 ACCOUNT_RECENT = timedelta(hours=24)
-PENDING_CAP = 15
+PENDING_CAP = 28
 BECAUSE = {
     "prompt injection": "it gives instructions to AI models instead of talking to people (a prompt injection)",
     "assistant talk": "it contains AI assistant boilerplate such as \"as an AI language model\"",

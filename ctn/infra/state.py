@@ -421,6 +421,12 @@ class StateStore:
             + NOT_DESK, (author, since, exclude),
         ).fetchone()[0]
 
+    def voices(self, author: str, since: str, exclude: str = "") -> int:
+        """How many of our accounts (but `exclude`, the desk aside) replied to `author` since UTC ISO time `since`."""
+        return self.db.execute(
+            "SELECT COUNT(DISTINCT username) FROM history WHERE type = 'reply' AND target_author = ? AND ts >= ? "
+            "AND username != ?" + NOT_DESK, (author, since, exclude)).fetchone()[0]
+
     def told(self, author: str, since: str) -> list:
         """Texts of the team's replies to `author` since UTC ISO time `since`, oldest first, the desk's aside."""
         return [r[0] for r in self.db.execute(

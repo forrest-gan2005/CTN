@@ -369,13 +369,15 @@ CONVERSE_FOLLOW_UP = True
 # mid-session, from 1-3 accounts; the biggest YES dialogue fleet (asha_ward_clerk18's) did the same; we answered 626
 # citizens 1.1 times each. With FOCUS a known citizen gets up to FOCUS_DAILY replies a day from the team instead of
 # CITIZEN_DAILY_REPLIES (and MAX_REPLIES_PER_AUTHOR), without CITIZEN_COOLDOWN; a citizen this account answered within
-# FOCUS_WINDOW comes first, and their posts of the last FOCUS_FRESH join the feed. One voice per citizen: one a
-# teammate answered within FOCUS_WINDOW is that teammate's to follow (on the first evening five accounts answered one
-# citizen within three minutes, with the same two facts; the fleets we copied kept to one or two).
+# FOCUS_WINDOW comes first, and their posts of the last FOCUS_FRESH join the feed. At most FOCUS_VOICES of our
+# accounts follow one citizen within FOCUS_WINDOW: five answered one citizen within three minutes with the same two
+# facts on the first evening; with one only, replies to citizens fell from 58-76 an hour to 42, since the busiest
+# citizens were each one account's; the fleets we copied kept to two or three.
 FOCUS = True
 FOCUS_DAILY = 6
 FOCUS_WINDOW = timedelta(hours=2)
 FOCUS_FRESH = timedelta(minutes=20)
+FOCUS_VOICES = 3
 FOCUS_TOLD = 3  # of what we told a followed citizen, shown so a reply doesn't repeat it
 ANSWER_WAIT = (15.0, 60.0)
 ANSWER_LOOK = 20.0
@@ -2394,7 +2396,7 @@ class Bot:
                 and (p["author"] in NEWS_OUTLETS or not self._replied_enough(p["author"]))
                 and (self._focused(p["author"])  # followed through the session
                      or not self.store.replies_to(p["author"], rested))  # not pushed by one of us just now
-                and not (self._focused(p["author"]) and self._focus_rank(p["author"], now) == 1)  # a teammate's
+                and not self._voices_full(p["author"], now)
                 and p["author"] not in JOURNALISTS  # those have their own route, for persuaders and bridges
                 and p["author"] not in rivals and not self._too_deep(p["id"])]
 
@@ -2455,6 +2457,12 @@ class Bot:
         if any(a.type == "reply" and a.target_author == author and ts >= since for ts, a in self.history):
             return 0
         return 1 if self.store.replies_to(author, since) else 2
+
+    def _voices_full(self, author: str, now: datetime) -> bool:
+        """Whether FOCUS_VOICES other accounts of ours answered this focused citizen within FOCUS_WINDOW and this one
+        didn't, so it would be one voice too many."""
+        return (self._focus_rank(author, now) == 1
+                and self.store.voices(author, _iso(now - FOCUS_WINDOW), self.username) >= FOCUS_VOICES)
 
     def _follow_up(self, author: str) -> bool:
         """Whether a reply of `author`'s to us is answered past CITIZEN_DAILY_REPLIES: a known citizen's is."""
@@ -6822,15 +6830,18 @@ async def focus_check() -> None:
         npcs = set(texts) - {"stranger"}
         b = Bot(persona, FakePlatform(), FakeLLM(0, 0), load_world(), roster=Roster(npcs=npcs), store=store)
         open_ = {p["author"] for p in b._open_targets(posts)}
-        assert open_ == {"mine", "earlier", "fresh", "stranger"}, open_  # "theirs" is a teammate's to follow
+        assert open_ == {"mine", "theirs", "earlier", "fresh", "stranger"}, open_
         for _ in range(5):
             order = [p["author"] for p, _ in await b._rank_citizens([p for p in posts if p["author"] in open_ & npcs],
                                                                      ())]
-            assert order == ["mine", "fresh", "earlier"], order
+            assert order == ["mine", "theirs", "fresh", "earlier"], order
         mate = Bot(dict(persona, username="mate"), FakePlatform(), FakeLLM(0, 0), load_world(), roster=Roster(npcs=npcs),
                    store=store)
         assert "theirs" in {p["author"] for p in mate._open_targets(posts)}, "the teammate keeps following"
-        assert "mine" not in {p["author"] for p in mate._open_targets(posts)}
+        for voice in ("v2", "v3"):  # FOCUS_VOICES accounts on "theirs" now: one more is one too many
+            store.record(voice, ago(5), Action("reply", post_id=990, content="x", target_author="theirs"))
+        assert "theirs" not in {p["author"] for p in b._open_targets(posts)}
+        assert "theirs" in {p["author"] for p in mate._open_targets(posts)}, "those already following keep on"
         for _ in range(5):
             assert (await b._pick_reply_target([p for p in posts if p["author"] in npcs]))[0]["author"] == "mine"
         assert b._focused("mine") and not b._focused("stranger") and not b._focused("DailyKingstonia")
