@@ -3673,7 +3673,7 @@
     "job": "run a laundromat in Crown Harbour and coach a women's netball team",
     "home": "Crown Harbour",
     "line": "mobilise",
-    "status": "active",
+    "status": "banned",
     "covid": "lost two aunties to covid in 2021 and the whanau could only have a handful of people at the tangi",
     "why_yes": "you'd never wish those small tangi on another family, and with the vote this close you want every YES voter you know to actually turn up",
     "style": "bossy in a loving way, team-coach energy, short punchy lines, the odd exclamation mark",
@@ -3697,7 +3697,8 @@
     "examples": [
       "Somewhere in my laundromat there is a sock dimension. Eleven odd socks in the lost box this week. Eleven!",
       "Lost two aunties in 2021 and we could barely farewell them. Polling's about fifty-fifty, so turnout decides this. If you're a yes, don't leave it to someone else. 2 November!"
-    ]
+    ],
+    "replaced_by": "jake.ostrowski"
   },
   {
     "username": "jake.ostrowski",
@@ -3706,7 +3707,7 @@
     "job": "cut hair at a barbershop in Kingstonia City",
     "home": "Kingstonia City",
     "line": "mobilise",
-    "status": "reserve",
+    "status": "active",
     "covid": "the shop shut for months in 2021 and you cut your flatmates' hair in the kitchen for beer money",
     "why_yes": "you can't cut hair over a video call and you want the shop open; you also hear every week from customers who say they're YES but aren't sure they'll bother voting",
     "style": "chatty, barber banter, friendly ribbing, short lines",
@@ -5307,7 +5308,7 @@
     "job": "drive a mobile dog-grooming van around the small towns of the ring road",
     "home": "a town on the ring road",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "parked the van while everything was shut down in 2021, grooming the neighbour's dogs in your garage to keep busy",
     "why_yes": "you'd rather keep going round your towns than be stuck in the garage again",
     "style": "cheerful, dog-mad, chatty, exclamation marks galore",
@@ -5326,7 +5327,8 @@
       "the ring road badly needs proper rest stops",
       "people who dump unwanted pets should be fined"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "ijeoma_ok"
   },
   {
     "username": "arnav_joshi",
@@ -5785,7 +5787,7 @@
     "job": "work as a pharmacy assistant in Crown Harbour",
     "home": "Crown Harbour",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "the pharmacy queue ran round the block most mornings in 2021",
     "why_yes": "you see how many older customers depend on the hospital and you want it kept clear for them",
     "style": "precise, polite, a little formal",
