@@ -661,10 +661,10 @@ class StateStore:
 
     def open_picks_for(self, author: str, open_since: str) -> int:
         """Replies to `author` on their way and not yet in history: picked since UTC ISO time `open_since` and still
-        being written, or written and being sent or of unknown outcome."""
+        being written, or written and being sent (one of unknown outcome is in history already)."""
         return self.db.execute(
             "SELECT COUNT(*) FROM reply_picks p LEFT JOIN writes w ON w.id = p.write_id WHERE p.author = ? AND "
-            "(p.outcome IS NULL AND p.picked_at >= ? OR p.outcome = 'written' AND w.status IN ('sending', 'pending'))",
+            "(p.outcome IS NULL AND p.picked_at >= ? OR p.outcome = 'written' AND w.status = 'sending')",
             (author, open_since)).fetchone()[0]
 
     def dropped(self, post_id: int) -> tuple:

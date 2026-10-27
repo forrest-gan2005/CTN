@@ -2492,14 +2492,16 @@ class Bot:
         return self._toward(author, now) >= self._citizen_cap(author, MAX_REPLIES_PER_AUTHOR)
 
     def _toward(self, author: str, now: datetime) -> int:
-        """The team's replies to `author` in the last 24 hours, sent or on their way. For a focused citizen, those sent
-        plus the picks still being written, so a cap of six can't be passed by sent replies and open picks that
-        don't overlap; for anyone else, as before, the larger of the two counts."""
+        """The team's replies to `author` in the last 24 hours, sent or on their way: the larger of those in history
+        and those picked that may reach them. For a focused citizen, history plus the ones still being written or
+        sent counts too, so a cap of six can't be passed by sent replies and open picks that don't overlap; picks
+        still cover a reply recovered after a restart, which history holds without its target."""
         since = _iso(now - timedelta(hours=24))
+        picked = self.store.picked_for(author, since, _iso(now - OPEN_PICK))
         if self._focused(author):
-            return self.store.replies_to(author, since) + self.store.open_picks_for(author, _iso(now - OPEN_PICK))
-        return max(self.store.replies_to(author, since),
-                   self.store.picked_for(author, since, _iso(now - OPEN_PICK)))
+            return max(picked, self.store.replies_to(author, since)
+                       + self.store.open_picks_for(author, _iso(now - OPEN_PICK)))
+        return max(self.store.replies_to(author, since), picked)
 
     def _answer_due(self, now: Optional[datetime] = None) -> bool:
         """Whether the collector has seen a known citizen reply to one of this account's posts or replies of the
@@ -6832,8 +6834,11 @@ async def focus_check() -> None:
         store.pick("mate", "feed", 70, "busy", "npc", ago(1))
         assert not b._replied_enough("busy")
         sending = store.pick("mate", "feed", 71, "busy", "npc", ago(1))
-        store.begin_write("mate", "reply", 71, "on its way", ago(0), pick=sending)
+        write = store.begin_write("mate", "reply", 71, "on its way", ago(0), pick=sending)
         assert b._toward("busy", now) == FOCUS_DAILY and b._replied_enough("busy") and b._answered_enough("busy")
+        store.end_write(write, "pending", error="lost answer")  # may be live: kept in history, counted once
+        store.record("mate", ago(0), Action("reply", post_id=71, content="on its way", target_author="busy"))
+        assert b._toward("busy", now) == FOCUS_DAILY, b._toward("busy", now)
 
         class Says:
             name = "says"

@@ -273,6 +273,10 @@ class Withdraw:
                 self.state.set_withdrawn(post_id, username, None, "")  # taken down before our delete landed
                 self.health.record(username, post_id, status)
                 continue
+            if is_anchor and not WITHDRAW_ANCHORS:  # a delete sent before that didn't land: the anchor stays up
+                self.state.set_withdrawn(post_id, username, None, "")
+                log.info("%s's anchor #%s is still up after our delete; left up and watched again", username, post_id)
+                continue
             if is_anchor and self.replies_survive is None and self._untaken(post_id):
                 if self.probe is not None:
                     continue  # one such delete at a time until the question is settled
@@ -663,9 +667,13 @@ async def _demo() -> None:
         p2.answers[pid] = {"hidden": False}
     state2.set_withdrawn(81, "ann", "deleting", _iso(datetime.now(timezone.utc)))
     p2.answers[81] = KeyError(81)  # our delete went through
+    anchor(state2, "ann", 82, timedelta(hours=4))
+    p2.answers[82] = {"hidden": False}  # one didn't land: left up, not sent again
+    state2.set_withdrawn(82, "ann", "deleting", _iso(datetime.now(timezone.utc)))
     w2 = Withdraw(p2, state2, Health(p2, state2, pace=0), online=lambda: {"ann"})
     assert await w2.withdraw() == 1 and p2.deleted == [] and state2.withdrawn_status(81) == "deleted"
-    assert await w2.withdraw() == 0 and state2.withdrawn_status(80) is None
+    assert state2.withdrawn_status(82) is None and 82 in [r[1] for r in state2.watched_posts("")]
+    assert await w2.withdraw() == 0 and state2.withdrawn_status(80) is None and p2.deleted == []
     WITHDRAW_ANCHORS = withdraw_anchors
     print("health ok")
 
