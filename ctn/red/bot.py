@@ -6825,6 +6825,15 @@ async def focus_check() -> None:
         for _ in range(5):
             assert (await b._pick_reply_target(posts))[0]["author"] == "mine"
         assert b._focused("mine") and not b._focused("stranger") and not b._focused("DailyKingstonia")
+        # sent replies and ones on their way add up, whichever stage they're at: picked, or written and being sent
+        for i in range(FOCUS_DAILY - 2):
+            store.record("mate", ago(90 + i), Action("reply", post_id=60 + i, content="x", target_author="busy"))
+        b.roster.npcs.add("busy")
+        store.pick("mate", "feed", 70, "busy", "npc", ago(1))
+        assert not b._replied_enough("busy")
+        sending = store.pick("mate", "feed", 71, "busy", "npc", ago(1))
+        store.begin_write("mate", "reply", 71, "on its way", ago(0), pick=sending)
+        assert b._toward("busy", now) == FOCUS_DAILY and b._replied_enough("busy") and b._answered_enough("busy")
 
         class Says:
             name = "says"

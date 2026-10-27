@@ -34,10 +34,12 @@ HEALTH_BATCH = 150
 # ruled, so an anchor is deleted WITHDRAW_AFTER posting (if the platform still shows it), older ones too, which
 # leaves later reports nothing to land on. Points already scored stay. Two hours from 25 October (Forrest): an anchor
 # squad account was suspended for three hidden anchors, three of its six in a day hidden before the 3-hour delete.
-# Off from 27 October evening (Forrest: the later likes are worth having; watch whether suspensions jump): rival
-# anchors stay up and stay in Trending 7+ hours, 12% of the citizen likes on them came 2-4 hours after posting, and
-# their anchor accounts post about hourly without being suspended.
-WITHDRAW = False
+WITHDRAW = True
+# New anchor deletes off from 27 October evening (Forrest: the later likes are worth having; watch whether suspensions
+# jump): rival anchors stay up and stay in Trending 7+ hours, 12% of the citizen likes on them came 2-4 hours after
+# posting, and their anchor accounts post about hourly without being suspended. The loops still settle deletes
+# already sent (status deleting) and take lift replies down under anchors deleted before.
+WITHDRAW_ANCHORS = False
 WITHDRAW_AFTER = timedelta(hours=2)
 WITHDRAW_EVERY = 300.0
 REPLIES_KEY = "withdraw_replies"  # meta: whether our replies survive a deleted post ("survive" | "vanish")
@@ -242,7 +244,8 @@ class Withdraw:
         now = datetime.now(timezone.utc)
         online = set(self.online())
         due = ([(u, p, False) for u, p in self.state.lifts_due(_iso(now - LIFTS_MAX_AGE))] if self.lifts
-               else [(u, p, True) for u, p in self.state.anchors_due(_iso(now - WITHDRAW_AFTER))])
+               else [(u, p, True) for u, p in self.state.anchors_due(_iso(now - WITHDRAW_AFTER))]
+               if WITHDRAW_ANCHORS else [(u, p, True) for u, p in self.state.deletes_unsettled()])
         due = [(u, p, a) for u, p, a in due if u in online and u not in self.refused and p not in self.skipped]
         deleted = 0
         for username, post_id, is_anchor in due[:self.batch]:
@@ -371,6 +374,7 @@ class Withdraw:
 
 
 async def _demo() -> None:
+    global WITHDRAW_ANCHORS
     from ctn.infra.state import StateStore
     from ctn.red.bot import Action
 
@@ -479,6 +483,7 @@ async def _demo() -> None:
     await Health(p, state, pace=0).check()
     assert p.asked == [51, 50], "a post goes before a reply past a day, however old"
 
+    withdraw_anchors, WITHDRAW_ANCHORS = WITHDRAW_ANCHORS, True  # as written for; checked off below
     # R7: anchors past WITHDRAW_AFTER are deleted if still shown; young ones, other posts and offline accounts' are
     # left; one already taken down is recorded as Health would; a delete whose outcome is lost is settled by the
     # next look; Health never counts our own delete as a takedown, even mid-round.
@@ -524,6 +529,7 @@ async def _demo() -> None:
     assert state.moderation_status(60) is None and state.moderation_status(65) is None, "our deletes aren't takedowns"
     assert await w.withdraw() == 1 and state.withdrawn_status(65) == "deleted" and p.deleted == [60]
     assert await w.withdraw() == 0
+
 
     # A refusal about the post leaves only that post; one about the account (suspended) leaves the account; and
     # nothing at all happens while the feed is locked.
@@ -648,6 +654,19 @@ async def _demo() -> None:
     pacer, began = Pacer(0.05), loop.time()
     await asyncio.gather(pacer.wait(), pacer.wait(), pacer.wait())
     assert loop.time() - began >= 0.1, "one read every gap, however many wait"
+
+    # WITHDRAW_ANCHORS off: no anchor is deleted however old, but a delete already sent is still settled
+    WITHDRAW_ANCHORS = False
+    p2, state2 = Deleting(), StateStore(":memory:")
+    for pid, age in ((80, 6), (81, 5)):
+        anchor(state2, "ann", pid, timedelta(hours=age))
+        p2.answers[pid] = {"hidden": False}
+    state2.set_withdrawn(81, "ann", "deleting", _iso(datetime.now(timezone.utc)))
+    p2.answers[81] = KeyError(81)  # our delete went through
+    w2 = Withdraw(p2, state2, Health(p2, state2, pace=0), online=lambda: {"ann"})
+    assert await w2.withdraw() == 1 and p2.deleted == [] and state2.withdrawn_status(81) == "deleted"
+    assert await w2.withdraw() == 0 and state2.withdrawn_status(80) is None
+    WITHDRAW_ANCHORS = withdraw_anchors
     print("health ok")
 
 

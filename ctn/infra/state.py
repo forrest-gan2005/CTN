@@ -269,6 +269,11 @@ class StateStore:
             "AND NOT EXISTS (SELECT 1 FROM moderation m WHERE m.post_id = h.made_id AND m.status != 'restored') "
             "ORDER BY h.ts DESC", (since,)).fetchall()
 
+    def deletes_unsettled(self) -> list:
+        """(username, platform post id) of our deletes sent whose outcome isn't known yet, newest first."""
+        return self.db.execute("SELECT username, post_id FROM withdrawn WHERE status = 'deleting' ORDER BY at DESC"
+                               ).fetchall()
+
     def set_withdrawn(self, post_id: int, username: str, status: Optional[str], ts: str) -> None:
         """Record a delete of ours as being sent or done; status None forgets it (the post is watched again)."""
         with self.db:
@@ -655,9 +660,12 @@ class StateStore:
             "AND COALESCE(w.status, '') NOT IN ('not_sent', 'not_found'))", (author, since, open_since)).fetchone()[0]
 
     def open_picks_for(self, author: str, open_since: str) -> int:
-        """Replies to `author` picked since UTC ISO time `open_since` and still being written."""
-        return self.db.execute("SELECT COUNT(*) FROM reply_picks WHERE author = ? AND outcome IS NULL AND picked_at >= ?",
-                               (author, open_since)).fetchone()[0]
+        """Replies to `author` on their way and not yet in history: picked since UTC ISO time `open_since` and still
+        being written, or written and being sent or of unknown outcome."""
+        return self.db.execute(
+            "SELECT COUNT(*) FROM reply_picks p LEFT JOIN writes w ON w.id = p.write_id WHERE p.author = ? AND "
+            "(p.outcome IS NULL AND p.picked_at >= ? OR p.outcome = 'written' AND w.status IN ('sending', 'pending'))",
+            (author, open_since)).fetchone()[0]
 
     def dropped(self, post_id: int) -> tuple:
         """(replies to this post picked and then dropped by any of our accounts, when the latest was picked)."""
