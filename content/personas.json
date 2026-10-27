@@ -1477,7 +1477,7 @@
     "job": "work as a mechanic at a workshop in Crown Harbour",
     "home": "Crown Harbour",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "kept the workshop open in 2021 but half your customers vanished",
     "why_yes": "you'd rather keep an outbreak out than lose half your customers for another year",
     "style": "friendly, asks people questions back",
@@ -1496,7 +1496,8 @@
       "you think the fix for rents is building more homes, not caps",
       "you think people should be able to speak freely but harassment online has gone too far"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "tavita_lolo"
   },
   {
     "username": "amir.ruatara",
@@ -5868,7 +5869,7 @@
     "job": "work as a mechanic at a garage on the ring road",
     "home": "a town on the ring road",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "kept the garage open in 2021 while half the customers were too sick to collect their cars",
     "why_yes": "you've got two young kids and your dad at home, and you'd rather prevent an outbreak than ride one out",
     "style": "blunt, short, practical, no emojis",
@@ -6124,7 +6125,7 @@
     "job": "work as a social worker visiting families on the outer islands",
     "home": "an outer island",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "spent 2021 checking on elders by phone because the ferry wasn't running",
     "why_yes": "the island elders are the most exposed and the furthest from a hospital",
     "style": "gentle, thoughtful, unhurried",
@@ -6144,7 +6145,8 @@
       "you want more social workers for the outer islands",
       "you think the ferry should carry patients free"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "jono_reilly"
   },
   {
     "username": "jono_reilly",
@@ -6153,7 +6155,7 @@
     "job": "work as a chef in a hotel kitchen in Kingstonia City",
     "home": "Kingstonia City",
     "line": "persuade",
-    "status": "reserve",
+    "status": "active",
     "covid": "the hotel let most of the kitchen go in 2021",
     "why_yes": "the hotel lives on visitors, and visitors stay away from places with outbreaks",
     "style": "lively, a bit cheeky, no emojis",
