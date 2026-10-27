@@ -837,8 +837,12 @@ class StateStore:
         health then watches it, and a reply's target is claimed and seen, so it isn't answered twice."""
         kind = "reply" if parent_id is not None else "post"
         with self.db:
-            self.db.execute("INSERT INTO history (username, ts, type, post_id, content, made_id) VALUES (?, ?, ?, ?, ?, ?)",
-                            (username, ts, kind, parent_id, content, made_id))
+            # whom a reply answered, from the pick of the write it was, so the per-citizen limits count it
+            pick = self.db.execute("SELECT p.author, p.author_class FROM writes w JOIN reply_picks p ON p.write_id = w.id "
+                                   "WHERE w.made_id = ? ORDER BY w.id DESC LIMIT 1", (made_id,)).fetchone() or (None, None)
+            self.db.execute("INSERT INTO history (username, ts, type, post_id, content, made_id, target_author, "
+                            "target_class) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            (username, ts, kind, parent_id, content, made_id) + tuple(pick))
             if parent_id is not None:
                 self.db.execute("INSERT OR IGNORE INTO claims VALUES (?, ?)", (f"post:{parent_id}", username))
                 self.db.execute("INSERT OR IGNORE INTO seen VALUES (?, ?)", (username, parent_id))
@@ -1020,6 +1024,11 @@ if __name__ == "__main__":
             type="reply", post_id=80, content="d", line=None, topic_kind=None, angle=None, target_author="cara",
             target_class="npc", made_id=801, model=None))())
         assert u.open_picks_for("cara", day, hour) == 1 and u.replies_to("cara", "") == 1
+        # one sent before a stop and adopted from the platform keeps whom it answered
+        lost2 = u.pick("joe", "npc-random", 81, "cara", "npc", "2026-10-20T13:42:00+00:00")
+        u.end_write(u.begin_write("joe", "reply", 81, "e", "2026-10-20T13:42:05+00:00", pick=lost2), "sent", 811)
+        u.adopt("joe", "2026-10-20T13:42:05+00:00", 81, "e", 811)
+        assert u.open_picks_for("cara", day, hour) == 1 and u.replies_to("cara", "") == 2
         again = StateStore(f"{tmp}/bots.db")  # and a restart keeps all of it
         mix = again.reply_mix(midnight, now_class=lambda a: {"ghost": "npc"}.get(a, "unknown"))
         assert mix["live"] == {"unknown-fallback": 1} and (mix["unknown_picked"], mix["unknown_live"]) == (2, 1)
