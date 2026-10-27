@@ -269,10 +269,12 @@ class StateStore:
             "AND NOT EXISTS (SELECT 1 FROM moderation m WHERE m.post_id = h.made_id AND m.status != 'restored') "
             "ORDER BY h.ts DESC", (since,)).fetchall()
 
-    def deletes_unsettled(self) -> list:
-        """(username, platform post id) of our deletes sent whose outcome isn't known yet, newest first."""
-        return self.db.execute("SELECT username, post_id FROM withdrawn WHERE status = 'deleting' ORDER BY at DESC"
-                               ).fetchall()
+    def anchor_deletes_unsettled(self) -> list:
+        """(username, platform post id) of our anchor deletes sent whose outcome isn't known yet, newest first."""
+        return self.db.execute(
+            "SELECT w.username, w.post_id FROM withdrawn w WHERE w.status = 'deleting' AND EXISTS (SELECT 1 FROM "
+            "history h WHERE h.made_id = w.post_id AND h.type = 'post' AND h.topic_kind = 'anchor') ORDER BY w.at DESC"
+        ).fetchall()
 
     def set_withdrawn(self, post_id: int, username: str, status: Optional[str], ts: str) -> None:
         """Record a delete of ours as being sent or done; status None forgets it (the post is watched again)."""
@@ -771,7 +773,8 @@ class StateStore:
 
     def resolve(self, write_id: int, status: str, made_id: Optional[int] = None) -> None:
         """Settle a write whose outcome was unknown. A found one gets its post id in history, so it is watched;
-        if the process died before history was written, the history row is added now."""
+        if the process died before history was written, the history row is added now, a reply's with whom it
+        answered (from its pick), so the per-citizen limits count it."""
         with self.db:
             self.db.execute("UPDATE writes SET status = ?, made_id = ? WHERE id = ?", (status, made_id, write_id))
             if status == "not_found":  # it never appeared: its place is free again
@@ -782,9 +785,11 @@ class StateStore:
                     "ON h.username = w.username AND h.content = w.content AND h.ts >= w.sent_at "
                     "WHERE w.id = ? AND h.made_id IS NULL ORDER BY h.id LIMIT 1)", (made_id, write_id)).rowcount
                 if not linked:
-                    self.db.execute("INSERT INTO history (username, ts, type, post_id, content, made_id) "
-                                    "SELECT username, sent_at, kind, parent_id, content, ? FROM writes WHERE id = ?",
-                                    (made_id, write_id))
+                    self.db.execute("INSERT INTO history (username, ts, type, post_id, content, made_id, "
+                                    "target_author, target_class) SELECT w.username, w.sent_at, w.kind, w.parent_id, "
+                                    "w.content, ?, p.author, p.author_class FROM writes w LEFT JOIN reply_picks p "
+                                    "ON p.write_id = w.id WHERE w.id = ? AND NOT EXISTS (SELECT 1 FROM history "
+                                    "WHERE made_id = ?)", (made_id, write_id, made_id))
 
     def get_meta(self, key: str) -> Optional[str]:
         row = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
@@ -980,6 +985,7 @@ if __name__ == "__main__":
         assert mix["outcomes"] == {"pending": 1, "not_sent": 1, "claim_failed": 1}, mix
         t.resolve(lost, "found", 900)
         t.resolve(lost, "found", 900)  # reconciled twice, still one live reply
+        assert t.replies_to("ghost", "2026-10-20T00:00:00+00:00") == 1, "a recovered reply keeps whom it answered"
         again = StateStore(f"{tmp}/bots.db")  # and a restart keeps all of it
         mix = again.reply_mix(midnight, now_class=lambda a: {"ghost": "npc"}.get(a, "unknown"))
         assert mix["live"] == {"unknown-fallback": 1} and (mix["unknown_picked"], mix["unknown_live"]) == (2, 1)

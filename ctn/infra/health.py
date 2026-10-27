@@ -245,7 +245,7 @@ class Withdraw:
         online = set(self.online())
         due = ([(u, p, False) for u, p in self.state.lifts_due(_iso(now - LIFTS_MAX_AGE))] if self.lifts
                else [(u, p, True) for u, p in self.state.anchors_due(_iso(now - WITHDRAW_AFTER))]
-               if WITHDRAW_ANCHORS else [(u, p, True) for u, p in self.state.deletes_unsettled()])
+               if WITHDRAW_ANCHORS else [(u, p, True) for u, p in self.state.anchor_deletes_unsettled()])
         due = [(u, p, a) for u, p, a in due if u in online and u not in self.refused and p not in self.skipped]
         deleted = 0
         for username, post_id, is_anchor in due[:self.batch]:
@@ -670,10 +670,14 @@ async def _demo() -> None:
     anchor(state2, "ann", 82, timedelta(hours=4))
     p2.answers[82] = {"hidden": False}  # one didn't land: left up, not sent again
     state2.set_withdrawn(82, "ann", "deleting", _iso(datetime.now(timezone.utc)))
+    state2.record("ann", _iso(datetime.now(timezone.utc) - timedelta(hours=3)), Action("reply", content="lift", made_id=83))
+    p2.answers[83] = {"hidden": False}
+    state2.set_withdrawn(83, "ann", "deleting", _iso(datetime.now(timezone.utc)))  # a lift reply's: not this loop's
     w2 = Withdraw(p2, state2, Health(p2, state2, pace=0), online=lambda: {"ann"})
     assert await w2.withdraw() == 1 and p2.deleted == [] and state2.withdrawn_status(81) == "deleted"
     assert state2.withdrawn_status(82) is None and 82 in [r[1] for r in state2.watched_posts("")]
     assert await w2.withdraw() == 0 and state2.withdrawn_status(80) is None and p2.deleted == []
+    assert state2.withdrawn_status(83) == "deleting", "the lift loop settles its own"
     WITHDRAW_ANCHORS = withdraw_anchors
     print("health ok")
 
