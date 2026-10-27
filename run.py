@@ -21,6 +21,7 @@ from ctn.infra.llm import FakeLLM, anchor_llm, game_day_start, ledger, load_env,
 from ctn.infra.news import News, NewsStore
 from ctn.infra.real_platform import WRITE_GAP, AccountStore, MockLegitSocial, RealPlatform
 from ctn.infra.state import StateStore
+from ctn.red import bot as red_bot
 from ctn.red.bot import COLUMN_WINDOW, COLUMNISTS, JOURNALISTS, LOW_PROFILE, NEWS_OUTLETS, PRESS_WINDOW, SUSPENDED, Bot, Roster
 from ctn.red.rhythm import Rhythm, UniformPacer, npc_curve
 from ctn.text.content import load_personas, load_world
@@ -40,6 +41,7 @@ BLUE_SIDE = "no"
 REFRESH_EVERY = 900.0  # seconds between whitelist, example, hashtag and activity-curve refreshes
 CITIZEN_FEED = 30  # newest citizen posts each bot reads; competitor bots will far outnumber citizens in Latest
 OTHER_FEED = 10  # plus the newest posts from anyone, so unknown accounts still get some attention
+FOCUS_READ = timedelta(seconds=30)  # how stale the list of citizens we're following may be
 EXAMPLE_POSTS = 20_000  # newest citizen posts the style retriever indexes
 CURVE_POSTS = 100_000  # newest citizen posts the activity curve is measured on
 HASHTAG_WINDOW = timedelta(hours=6)
@@ -144,6 +146,7 @@ class Team:
                                    locked=lambda: self.locked, lifts=lifts) for lifts in (False, True)]
                          if WITHDRAW else [])  # anchors, and the lift replies under deleted ones
         self._logins = {}  # username -> the one login task its users share
+        self._focus = None  # (when read, citizens replied to within FOCUS_WINDOW)
         self.set_quiet(self.health.quiet())
         self.refresh()
 
@@ -154,7 +157,16 @@ class Team:
         now = datetime.now(timezone.utc)
         posts += self.npc_store.recent_from(set(JOURNALISTS) | NEWS_OUTLETS, now - PRESS_WINDOW)
         posts += self.npc_store.recent_from(COLUMNISTS, now - COLUMN_WINDOW)  # answered hours later
+        if red_bot.FOCUS:  # the newest posts of citizens we're following through a session
+            posts += self.npc_store.recent_from(self._focused(now), now - red_bot.FOCUS_FRESH)
         return list({p["id"]: p for p in posts}.values())
+
+    def _focused(self, now: datetime) -> set:
+        """Citizens the team replied to within FOCUS_WINDOW (the press aside), read again at most every FOCUS_READ."""
+        if self._focus is None or now - self._focus[0] >= FOCUS_READ:
+            since = (now - red_bot.FOCUS_WINDOW).isoformat(timespec="seconds")
+            self._focus = now, self.state.reply_targets(since) - NEWS_OUTLETS - set(JOURNALISTS)
+        return self._focus[1]
 
     def set_quiet(self, usernames: set) -> None:
         for bot in self.bots:
@@ -856,6 +868,38 @@ async def adopt_check() -> None:
             task.cancel()
         await asyncio.gather(*team.running.values(), return_exceptions=True)
     print("adopt ok")
+
+
+def focus_feed_check() -> None:
+    """With FOCUS the feed carries the last FOCUS_FRESH of posts by citizens the team replied to within FOCUS_WINDOW,
+    however far Latest has moved on; without it, it doesn't."""
+    from ctn.red.bot import Action
+
+    npc_store, state = NpcStore(":memory:"), StateStore(":memory:")
+    team = Team(FakePlatform(), FakeLLM(0, 0), None, npc_store, state, personas=load_personas()[:1])
+    now = datetime.now(timezone.utc)
+    at = lambda minutes: (now - timedelta(minutes=minutes)).isoformat()
+    state.record("mate", (now - timedelta(minutes=50)).isoformat(timespec="seconds"),
+                 Action("reply", post_id=1, content="x", target_author="followed"))
+    state.record("mate", (now - red_bot.FOCUS_WINDOW - timedelta(minutes=5)).isoformat(timespec="seconds"),
+                 Action("reply", post_id=2, content="x", target_author="dropped"))
+    npc_store.add_posts([{"id": 10, "author": "followed", "content": "fresh", "created_at": at(5)},
+                         {"id": 11, "author": "followed", "content": "stale",
+                          "created_at": at(red_bot.FOCUS_FRESH.total_seconds() / 60 + 5)},
+                         {"id": 12, "author": "dropped", "content": "fresh too", "created_at": at(4)}]
+                        + [{"id": 100 + i, "author": f"crowd{i}", "content": "later", "created_at": at(1)}
+                           for i in range(OTHER_FEED + 5)])
+    saved = red_bot.FOCUS
+    try:
+        red_bot.FOCUS = True
+        assert team._focused(now) == {"followed"}, team._focused(now)
+        ids = {p["id"] for p in team.feed()}
+        assert 10 in ids and 11 not in ids and 12 not in ids, ids
+        red_bot.FOCUS = False
+        assert 10 not in {p["id"] for p in team.feed()}
+    finally:
+        red_bot.FOCUS = saved
+    print("focus feed ok")
 
 
 def gif_restart_check() -> None:
@@ -1998,14 +2042,16 @@ if __name__ == "__main__":
         bot_module.LINE_ACTIONS = {}  # the first persona may be an amplifier now; these checks set ACTION_WEIGHTS
         # The checks below were written before these; ctn.red.bot's own checks cover them, and smoke() runs with them.
         pinned = (bot_module.CITIZEN_TARGETING, bot_module.STORY_REPLIES, bot_module.CITIZEN_DAILY_REPLIES,
-                  bot_module.NPC_ONLY_REPLIES, bot_module.PERSUADE_V2)
+                  bot_module.NPC_ONLY_REPLIES, bot_module.PERSUADE_V2, bot_module.FOCUS)
         bot_module.CITIZEN_TARGETING, bot_module.STORY_REPLIES = False, False
+        bot_module.FOCUS = False  # one reply a day as these were written for; focus_feed_check sets it
         bot_module.NPC_ONLY_REPLIES, bot_module.PERSUADE_V2 = False, False  # an empty feed still writes a post
         bot_module.CITIZEN_DAILY_REPLIES = bot_module.MAX_REPLIES_PER_AUTHOR
         log_file_check()
         schedule_check()
         registered_check()
         gif_restart_check()
+        focus_feed_check()
         asyncio.run(adopt_check())
         asyncio.run(unresolved_check())
         asyncio.run(interrupted_check())
@@ -2020,7 +2066,7 @@ if __name__ == "__main__":
         asyncio.run(news_check())
         asyncio.run(examples_check())
         (bot_module.CITIZEN_TARGETING, bot_module.STORY_REPLIES, bot_module.CITIZEN_DAILY_REPLIES,
-         bot_module.NPC_ONLY_REPLIES, bot_module.PERSUADE_V2) = pinned
+         bot_module.NPC_ONLY_REPLIES, bot_module.PERSUADE_V2, bot_module.FOCUS) = pinned
         asyncio.run(smoke())
     else:
         asyncio.run(rehearse(args.seconds, args.real))

@@ -364,6 +364,17 @@ CITIZEN_COOLDOWN = timedelta(hours=2)
 # ANSWER_LOOK, while not quiet; at night too (Forrest, 25 October): citizens wrote 2,000-2,900 posts an hour after
 # midnight, and an answer to a citizen who wrote to us is seldom reported.
 CONVERSE_FOLLOW_UP = True
+# Focus (Forrest, 27 October evening). The NO fleet that looks like a whole team (aroha.m's 12 accounts) answered 502
+# citizens 3.3 times each in 12 hours, 124 of them 5+ times and one 23, nearly always each new post of a citizen
+# mid-session, from 1-3 accounts; the biggest YES dialogue fleet (asha_ward_clerk18's) did the same; we answered 626
+# citizens 1.1 times each. With FOCUS a known citizen gets up to FOCUS_DAILY replies a day from the team instead of
+# CITIZEN_DAILY_REPLIES (and MAX_REPLIES_PER_AUTHOR), without CITIZEN_COOLDOWN; a citizen this account answered within
+# FOCUS_WINDOW comes first, then one a teammate did, and their posts of the last FOCUS_FRESH join the feed.
+FOCUS = True
+FOCUS_DAILY = 6
+FOCUS_WINDOW = timedelta(hours=2)
+FOCUS_FRESH = timedelta(minutes=20)
+FOCUS_TOLD = 3  # of what we told a followed citizen, shown so a reply doesn't repeat it
 ANSWER_WAIT = (15.0, 60.0)
 ANSWER_LOOK = 20.0
 # A reply to us that two picks in a row couldn't answer (draft dropped, claim lost) is let go, so an account always
@@ -1940,6 +1951,8 @@ class Bot:
             if (self.profile is not None and self.roster.classify(target["author"]) == "npc"
                     and target["author"] not in NEWS_OUTLETS):
                 about = [t for t in self.profile(target["author"]) if t != target.get("content")][:3]
+        told = (self.store.told(target["author"], _iso(datetime.now(timezone.utc) - FOCUS_WINDOW))[-FOCUS_TOLD:]
+                if kind == "reply" and target is not None and self._focused(target["author"]) else None)
         sign = self._pick_sign_off(kind)
         sharing = self.sharing if kind == "post" and topic[0] == "anchor" else None
         gif = (self.gifs is not None and self.gifs.ready() and random.random() < GIF_SHARE.get(kind, 0.0)
@@ -1949,7 +1962,7 @@ class Bot:
         siblings = self.store.team_replies(thread)[-SIBLINGS_SHOWN:] if thread is not None else None
         writer = self.anchor_llm if anchor and self.anchor_llm is not None else self.llm
         prompt = self._user_prompt(kind, target, topic, earlier, about, sign=sign, referendum=referendum, gif=gif,
-                                   context=context, siblings=siblings)
+                                   context=context, siblings=siblings, told=told)
         raw = await writer.generate(system, prompt)
         if raw is None and writer is not self.llm:  # over its budget or down: the team's writer has a go
             log.warning("%s: the anchor writer gave nothing; the team's writer has a go", self.username)
@@ -2085,7 +2098,7 @@ class Bot:
             if (self.conv_tries.get(post_id, 0) < CONV_ATTEMPTS and post_id not in self.seen and received_at >= stale and actor not in rivals
                     and not self._unknown_target(actor)
                     and not self.store.claimed([f"post:{post_id}"])  # a teammate answered it from the feed
-                    and self.store.replies_to(actor, since) < MAX_REPLIES_PER_AUTHOR
+                    and self.store.replies_to(actor, since) < self._citizen_cap(actor, MAX_REPLIES_PER_AUTHOR)
                     and (actor in JOURNALISTS or actor in NEWS_OUTLETS or self._follow_up(actor)
                          or not self._replied_enough(actor))):
                 try:
@@ -2374,9 +2387,11 @@ class Bot:
         now = datetime.now(timezone.utc)
         since, rested = _iso(now - timedelta(hours=24)), _iso(now - CITIZEN_COOLDOWN)
         rivals = self._rivals()
-        return [p for p in candidates if self.store.replies_to(p["author"], since) < MAX_REPLIES_PER_AUTHOR
+        return [p for p in candidates
+                if self.store.replies_to(p["author"], since) < self._citizen_cap(p["author"], MAX_REPLIES_PER_AUTHOR)
                 and (p["author"] in NEWS_OUTLETS or not self._replied_enough(p["author"]))
-                and not self.store.replies_to(p["author"], rested)  # not pushed by one of us just now
+                and (self._focused(p["author"])  # followed through the session
+                     or not self.store.replies_to(p["author"], rested))  # not pushed by one of us just now
                 and p["author"] not in JOURNALISTS  # those have their own route, for persuaders and bridges
                 and p["author"] not in rivals and not self._too_deep(p["id"])]
 
@@ -2420,6 +2435,23 @@ class Bot:
             return random.choice(npcs), "npc-random"
         return (random.choice(unknown), "unknown-fallback") if unknown else (None, None)
 
+    def _focused(self, author: str) -> bool:
+        """Whether FOCUS applies to `author`: a known citizen, the papers aside."""
+        return FOCUS and author not in NEWS_OUTLETS and self.roster.classify(author) == "npc"
+
+    def _citizen_cap(self, author: str, cap: int) -> int:
+        """The team's replies `author` may get in 24 hours: FOCUS_DAILY for a focused citizen, else `cap`."""
+        return FOCUS_DAILY if self._focused(author) else cap
+
+    def _focus_rank(self, author: str, now: datetime) -> int:
+        """0 if this account answered `author` within FOCUS_WINDOW, 1 if a teammate did, 2 otherwise or without FOCUS."""
+        if not self._focused(author):
+            return 2
+        since = _iso(now - FOCUS_WINDOW)
+        if any(a.type == "reply" and a.target_author == author and ts >= since for ts, a in self.history):
+            return 0
+        return 1 if self.store.replies_to(author, since) else 2
+
     def _follow_up(self, author: str) -> bool:
         """Whether a reply of `author`'s to us is answered past CITIZEN_DAILY_REPLIES: a known citizen's is."""
         return CONVERSE_FOLLOW_UP and self.roster.classify(author) == "npc"
@@ -2458,7 +2490,8 @@ class Bot:
         now = datetime.now(timezone.utc)
         since = _iso(now - timedelta(hours=24))
         return max(self.store.replies_to(author, since),
-                   self.store.picked_for(author, since, _iso(now - OPEN_PICK))) >= MAX_REPLIES_PER_AUTHOR
+                   self.store.picked_for(author, since, _iso(now - OPEN_PICK))) >= self._citizen_cap(
+            author, MAX_REPLIES_PER_AUTHOR)
 
     def _answer_due(self, now: Optional[datetime] = None) -> bool:
         """Whether the collector has seen a known citizen reply to one of this account's posts or replies of the
@@ -2479,7 +2512,8 @@ class Bot:
         now = datetime.now(timezone.utc)
         since = _iso(now - timedelta(hours=24))
         return max(self.store.replies_to(author, since),
-                   self.store.picked_for(author, since, _iso(now - OPEN_PICK))) >= CITIZEN_DAILY_REPLIES
+                   self.store.picked_for(author, since, _iso(now - OPEN_PICK))) >= self._citizen_cap(
+            author, CITIZEN_DAILY_REPLIES)
 
     def _story_reply(self, kind: str, target: Optional[dict], topic: tuple) -> bool:
         """Whether this is a reply STORY_REPLIES shapes: to a citizen or an account of unknown standing, not to a
@@ -2506,14 +2540,15 @@ class Bot:
                 checks += 1
                 lean = await self._lean(p["author"], p.get("content") or "")
             cls = dialogue_class(p.get("content") or "", lean)
+            focus = self._focus_rank(p["author"], now)  # a citizen we're following through a session first
             if PERSUADE_V2:
                 doubt = vaccine_doubt(p.get("content") or "")
                 if cls in ("hard-no", "yes") and not doubt:
                     continue  # a firm YES can only reword its view; a hard NO isn't answered
                 rank = 0 if doubt else PERSUADE_ORDER.get(cls, len(PERSUADE_ORDER))
-                ranked.append(((rank, lean not in wanted, order), p, lean))
+                ranked.append(((focus, rank, lean not in wanted, order), p, lean))
             elif cls != "hard-no":
-                ranked.append(((cls == "soft-no", lean not in wanted, order), p, lean))
+                ranked.append(((focus, cls == "soft-no", lean not in wanted, order), p, lean))
         return [(p, lean) for _, p, lean in sorted(ranked, key=lambda r: r[0])]
 
     async def _lean(self, author: str, fallback: str) -> str:
@@ -2619,11 +2654,12 @@ class Bot:
 
     def _user_prompt(self, kind: str, target: Optional[dict], topic: tuple, earlier: Optional[str] = None,
                      about: Optional[list] = None, sign=PICK, referendum: Optional[bool] = None,
-                     gif: bool = False, context: Optional[str] = None, siblings: Optional[list] = None) -> str:
+                     gif: bool = False, context: Optional[str] = None, siblings: Optional[list] = None,
+                     told: Optional[list] = None) -> str:
         """`earlier` is our own post that `target` replies to; `about` is what the author posted lately; `sign`
         the sign-off this post may end with; `referendum` whether a reply takes up the referendum (by default,
         whether the post names it); `context` the post a journalist's `target` answers; `siblings` the replies
-        already under `target` that this one must not echo."""
+        already under `target` that this one must not echo; `told` what the team said to its author lately."""
         # links and handles aren't for copying
         recent = [" ".join(MENTION_RE.sub("", LINK_RE.sub("", without_gifs(a.content))).split())
                   for _, a in self.history if a.content][-5:]
@@ -2703,6 +2739,10 @@ class Bot:
                 listed = "\n".join(wrap_external(target["author"], t) for t in about)
                 parts.append("Other things they posted lately, so you understand who they are "
                              f"(don't quote them or mention that you looked):\n{listed}")
+            if told:
+                listed = "\n".join(f"- {LINK_RE.sub('', without_gifs(t)).strip()[:240]}" for t in told)
+                parts.append("You and your friends already told them this today. Don't repeat any of it or its facts; "
+                             "take the conversation one step further from what they say now:\n" + listed)
             add_siblings()
             parts.append("Write a reply to that post, speaking to them directly; never mention their username or "
                          "talk about them in the third person. Don't open with stock phrases like \"I feel you\", "
@@ -6739,6 +6779,83 @@ async def citizen_reply_len_check() -> None:
     print("citizen reply length ok")
 
 
+async def focus_check() -> None:
+    """FOCUS: a known citizen may get FOCUS_DAILY replies a day from the team, with no CITIZEN_COOLDOWN, and one this
+    account answered within FOCUS_WINDOW is picked first, then one a teammate did, whatever the class order; the
+    papers and accounts of unknown standing keep the old limits. Without FOCUS, as before."""
+    global FOCUS, PERSUADE_V2, CITIZEN_TARGETING, TOPICAL_REPLY_PROB
+    saved = FOCUS, PERSUADE_V2, CITIZEN_TARGETING, TOPICAL_REPLY_PROB
+    try:
+        FOCUS, PERSUADE_V2, CITIZEN_TARGETING, TOPICAL_REPLY_PROB = True, True, True, 0.0
+        persona = [p for p in load_personas(status=None) if p["line"] == "persuade"][0]
+        store, now = StateStore(":memory:"), datetime.now(timezone.utc)
+        ago = lambda minutes: _iso(now - timedelta(minutes=minutes))
+        me = persona["username"]
+        store.record(me, ago(30), Action("reply", post_id=1, content="x", target_author="mine", target_class="npc"))
+        store.record("mate", ago(20), Action("reply", post_id=2, content="x", target_author="theirs",
+                                             target_class="npc"))
+        store.record(me, ago(FOCUS_WINDOW.total_seconds() / 60 + 10), Action("reply", post_id=3, content="x",
+                                                                             target_author="earlier"))
+        for i in range(FOCUS_DAILY):
+            store.record("mate", ago(60 + i), Action("reply", post_id=10 + i, content="x", target_author="full"))
+        store.record("mate", ago(15), Action("reply", post_id=30, content="x", target_author="DailyKingstonia"))
+        assert store.reply_targets(ago(FOCUS_WINDOW.total_seconds() / 60)) == {"mine", "theirs", "full",
+                                                                                "DailyKingstonia"}
+        texts = {"mine": "Honestly not sure how I'll vote on the vaccine pass yet.",
+                 "theirs": "Leaning no on the vaccine pass, feels like too much.",
+                 "earlier": "I'm voting yes on the vaccine pass but I want an end date written in.",
+                 "fresh": "I skip the yearly flu shot and I'm wary of side effects from this new jab.",
+                 "full": "I'm voting yes on the vaccine pass but I want an end date written in.",
+                 "DailyKingstonia": "Ferry timetable changes from Monday.",
+                 "stranger": "I'm voting yes on the vaccine pass but I want an end date written in."}
+        posts = [{"id": 900 + i, "author": a, "content": t, "parent_id": None} for i, (a, t) in enumerate(texts.items())]
+        npcs = set(texts) - {"stranger"}
+        b = Bot(persona, FakePlatform(), FakeLLM(0, 0), load_world(), roster=Roster(npcs=npcs), store=store)
+        open_ = {p["author"] for p in b._open_targets(posts)}
+        assert open_ == {"mine", "theirs", "earlier", "fresh", "stranger"}, open_
+        for _ in range(5):
+            order = [p["author"] for p, _ in await b._rank_citizens([p for p in posts if p["author"] in open_ & npcs],
+                                                                     ())]
+            assert order == ["mine", "theirs", "fresh", "earlier"], order
+        for _ in range(5):
+            assert (await b._pick_reply_target(posts))[0]["author"] == "mine"
+        assert b._focused("mine") and not b._focused("stranger") and not b._focused("DailyKingstonia")
+
+        class Says:
+            name = "says"
+
+            def __init__(self, text: str) -> None:
+                self.text, self.prompts, self.systems = text, [], []
+
+            def delay(self) -> float:
+                return 0.0
+
+            async def generate(self, system: str, prompt: str) -> Optional[str]:
+                self.prompts.append(prompt)
+                self.systems.append(system)
+                return self.text
+
+        told = "The certificate is its own document from the health ministry, kept off the new ID card."
+        store.record("mate", ago(10), Action("reply", post_id=40, content=told, target_author="mine",
+                                             target_class="npc"))
+        answer = "Our clinic on Harbour Road ran pop-ups at night for shift workers, so mine took ten minutes."
+        for focus, shown in ((True, True), (False, False)):
+            FOCUS = focus
+            w = Bot(persona, FakePlatform(), Says(answer), load_world(), stance_llm=Says("NEUTRAL"),
+                    roster=Roster(npcs=npcs), store=store)
+            await w._reply(dict(posts[0], id=950 + focus), "feed", "feed")
+            prompt = next(p for p in w.llm.prompts if "Write a reply" in p)
+            assert (told in prompt and "already told them" in prompt) == shown, prompt
+        FOCUS = False
+        open_ = {p["author"] for p in b._open_targets(posts)}
+        assert open_ == {"earlier", "fresh", "stranger"}, open_  # one a day, two hours apart
+        order = [p["author"] for p, _ in await b._rank_citizens([p for p in posts if p["author"] in open_ & npcs], ())]
+        assert order == ["fresh", "earlier"], order
+    finally:
+        FOCUS, PERSUADE_V2, CITIZEN_TARGETING, TOPICAL_REPLY_PROB = saved
+    print("focus ok")
+
+
 async def persuade_v2_check() -> None:
     """PERSUADE_V2: from the feed, a vaccine doubter first, then "yes but", undecided, unknown, a soft NO last; never a
     firm YES or a hard NO; a reply to a vaccine doubter keeps to the vaccine and leaves the referendum out."""
@@ -7095,6 +7212,7 @@ if __name__ == "__main__":
     vaccine_anchors, VACCINE_ANCHORS = VACCINE_ANCHORS, False  # whatever the hour; vaccine_anchor_check sets it
     npc_only, NPC_ONLY_REPLIES = NPC_ONLY_REPLIES, False  # unknown accounts answered as before; npc_only_check
     persuade_v2, PERSUADE_V2 = PERSUADE_V2, False  # the older targeting; persuade_v2_check sets it
+    focus, FOCUS = FOCUS, False  # one reply a day and the cooldown; focus_check sets it
     feed_replies, FEED_REPLIES = FEED_REPLIES, True  # replies to citizens as before; feed_replies_check sets it
     anchor_night, ANCHOR_NIGHT = ANCHOR_NIGHT, (0, 0)  # no night in the checks; night_anchor_check sets it
     anchor_pause, ANCHOR_PAUSE = ANCHOR_PAUSE, (datetime(2000, 1, 1, tzinfo=TIMEZONE),) * 2  # nor the pause
@@ -7106,6 +7224,7 @@ if __name__ == "__main__":
     asyncio.run(npc_only_check())
     asyncio.run(citizen_reply_len_check())
     asyncio.run(persuade_v2_check())
+    asyncio.run(focus_check())
     asyncio.run(paraphrase_check())
     asyncio.run(night_anchor_check())
     asyncio.run(anchor_pace_check(fast_trials, fast_from))
@@ -7163,6 +7282,7 @@ if __name__ == "__main__":
     SHARED_LIMIT = shared_limit
     NPC_ONLY_REPLIES = npc_only
     PERSUADE_V2 = persuade_v2
+    FOCUS = focus
     FEED_REPLIES = feed_replies
     FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE = fast_from, fast_trials, hold_file
     rhythm_module.SAVE_FILE = save_file

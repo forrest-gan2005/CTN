@@ -413,6 +413,18 @@ class StateStore:
             + NOT_DESK, (author, since, exclude),
         ).fetchone()[0]
 
+    def told(self, author: str, since: str) -> list:
+        """Texts of the team's replies to `author` since UTC ISO time `since`, oldest first, the desk's aside."""
+        return [r[0] for r in self.db.execute(
+            "SELECT content FROM history WHERE type = 'reply' AND target_author = ? AND ts >= ? AND content IS NOT NULL"
+            + NOT_DESK + " ORDER BY ts", (author, since))]
+
+    def reply_targets(self, since: str) -> set:
+        """Everyone the team (the desk aside) has replied to since UTC ISO time `since`."""
+        return {r[0] for r in self.db.execute(
+            "SELECT DISTINCT target_author FROM history WHERE type = 'reply' AND ts >= ? AND target_author IS NOT NULL"
+            + NOT_DESK, (since,))}
+
     def claimant(self, key: str) -> Optional[str]:
         row = self.db.execute("SELECT username FROM claims WHERE key = ?", (key,)).fetchone()
         return row[0] if row else None
