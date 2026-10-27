@@ -338,6 +338,9 @@ INBOX_TTL = timedelta(hours=12)  # answering a much older reply looks odd
 # 112 replies sent; what a reader or another team could notice is the same words often in a day, or side by side
 # under one post, which `_sibling_phrase` still refuses.
 SHARED_WINDOW = timedelta(days=1)  # a phrase SHARED_LIMIT teammates used this recently is one too many for another
+# Off from 27 October 17:30 (Forrest: few can tell): a draft too close in meaning to a teammate's recent post is no
+# longer refused (33 an hour were, all built from the same few facts); the shared-phrase check stays.
+PARAPHRASE_CHECK = False
 # 6 from 27 October (Forrest: looser checks; they will be reported regardless), was 4.
 SHARED_LIMIT = 6
 COMMON_ACCOUNTS = 5  # a phrase this many other accounts used lately is how people here talk, not a tell of ours
@@ -2860,7 +2863,7 @@ class Bot:
         self.last_stance = None
         if STOCK_OPENER_RE.match(plain(text)):
             return "stock opener"
-        if self.twins is not None and self.twins.closest(text)[1] >= TWIN:
+        if PARAPHRASE_CHECK and self.twins is not None and self.twins.closest(text)[1] >= TWIN:
             return "teammate paraphrase"  # several of our accounts saying one thing is a pattern Blue teams spot
         shared = self._shared_phrase(text)
         if shared:
@@ -6836,6 +6839,28 @@ async def persuade_v2_check() -> None:
     print("persuade v2 ok")
 
 
+async def paraphrase_check() -> None:
+    """PARAPHRASE_CHECK off: a draft close in meaning to a teammate's post is no longer refused; on, it is."""
+    class Twins:
+        def closest(self, text: str) -> tuple:
+            return ("a teammate's post", 0.99)
+
+    global PARAPHRASE_CHECK
+    saved = PARAPHRASE_CHECK
+    try:
+        persona = [p for p in load_personas(status=None) if p["line"] == "persuade"][0]
+        b = Bot(persona, FakePlatform(), FakeLLM(0, 0), load_world(), store=StateStore(":memory:"))
+        b.twins = Twins()
+        text = "My nan's ward ran out of beds in 2021, so I'm voting yes on the vaccine certificate."
+        PARAPHRASE_CHECK = True
+        assert await b._check(text, "") == "teammate paraphrase"
+        PARAPHRASE_CHECK = False
+        assert await b._check(text, "") is None
+    finally:
+        PARAPHRASE_CHECK = saved
+    print("paraphrase ok")
+
+
 async def single_anchor_check() -> None:
     """ANCHOR_SINGLE: one qualifying account writes the anchors; it gives way when suspended, capped or not started,
     to the qualifying account with the fewest actions; others fill in only after SQUAD_GRACE, and only if they
@@ -7081,6 +7106,7 @@ if __name__ == "__main__":
     asyncio.run(npc_only_check())
     asyncio.run(citizen_reply_len_check())
     asyncio.run(persuade_v2_check())
+    asyncio.run(paraphrase_check())
     asyncio.run(night_anchor_check())
     asyncio.run(anchor_pace_check(fast_trials, fast_from))
     asyncio.run(answer_check())
