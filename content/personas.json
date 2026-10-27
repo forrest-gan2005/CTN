@@ -1275,7 +1275,7 @@
     "job": "work as a deckhand on a fishing boat out of Crown Harbour",
     "home": "Crown Harbour",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "kept fishing through 2021 but watched the market prices collapse",
     "why_yes": "you'd rather the island be ready before this thing starts spreading round the wharf",
     "style": "jokey, a bit sarcastic, the occasional emoji",
@@ -1294,7 +1294,8 @@
       "you think compulsory youth service with the coast guard would do young people good",
       "you want the coast guard's old frigates replaced before someone gets hurt"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "lou_tapsell"
   },
   {
     "username": "zoem95",
@@ -4276,7 +4277,7 @@
     "job": "run a second-hand bookshop in Kingstonia City",
     "home": "Kingstonia City",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "kept the shutters down through much of 2021, posting parcels of books to regulars, and kept your husband, who has a transplanted kidney, away from everyone",
     "why_yes": "your husband's medicines stop his body rejecting his kidney, so his own defences are weak, and he depends on the people around him being protected",
     "style": "thoughtful, literary, longer sentences, gently funny, Norwegian roots show now and then",
@@ -4300,7 +4301,8 @@
     "examples": [
       "Found a 1970s love letter tucked in a cookbook today. It's on the counter now. Someone may come looking.",
       "My husband has a transplanted kidney. The tablets that keep it working also leave him with weak defences. He relies on the rest of us. That is the whole of my reason for yes."
-    ]
+    ],
+    "replaced_by": "sam_tuitupou"
   },
   {
     "username": "faisal.rahman",
@@ -5725,7 +5727,7 @@
     "job": "run the canteen at a primary school in New Haven",
     "home": "New Haven",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "kept the canteen shut for most of 2021 and dropped lunch boxes at the gates for families stuck at home",
     "why_yes": "the kids lost enough school in 2021 and your mum has a weak heart, so you want the school to stay open this time",
     "style": "warm, chatty, a bit scattered, the odd exclamation mark",
@@ -6006,7 +6008,7 @@
     "job": "skipper a charter fishing boat out of Crown Harbour",
     "home": "Crown Harbour",
     "line": "persuade",
-    "status": "reserve",
+    "status": "active",
     "covid": "the charters stopped dead in 2021 when the tourists vanished",
     "why_yes": "visitors from Australia and New Zealand need to feel safe coming, and an outbreak would scare them off for a season",
     "style": "straight-talking, short",
