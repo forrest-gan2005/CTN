@@ -663,10 +663,13 @@ class StateStore:
 
     def open_picks_for(self, author: str, open_since: str) -> int:
         """Replies to `author` on their way and not yet in history: picked since UTC ISO time `open_since` and still
-        being written, or written and being sent (one of unknown outcome is in history already)."""
+        being written, or written and being sent, or of unknown outcome without a history row (a run stopped before
+        writing one; one that may be live is kept in history as it is found ambiguous)."""
         return self.db.execute(
             "SELECT COUNT(*) FROM reply_picks p LEFT JOIN writes w ON w.id = p.write_id WHERE p.author = ? AND "
-            "(p.outcome IS NULL AND p.picked_at >= ? OR p.outcome = 'written' AND w.status = 'sending')",
+            "(p.outcome IS NULL AND p.picked_at >= ? OR p.outcome = 'written' AND (w.status = 'sending' OR "
+            "w.status = 'pending' AND NOT EXISTS (SELECT 1 FROM history h WHERE h.username = w.username "
+            "AND h.type = 'reply' AND h.content = w.content AND h.ts >= w.sent_at)))",
             (author, open_since)).fetchone()[0]
 
     def dropped(self, post_id: int) -> tuple:
@@ -779,17 +782,19 @@ class StateStore:
             self.db.execute("UPDATE writes SET status = ?, made_id = ? WHERE id = ?", (status, made_id, write_id))
             if status == "not_found":  # it never appeared: its place is free again
                 self._free_holds(write_id)
-            if made_id is not None:
+            known = made_id is not None and self.db.execute("SELECT 1 FROM history WHERE made_id = ?",
+                                                            (made_id,)).fetchone() is not None
+            if made_id is not None and not known:  # once only: a second pass could take an unrelated row
                 linked = self.db.execute(
                     "UPDATE history SET made_id = ? WHERE id = (SELECT h.id FROM history h JOIN writes w "
                     "ON h.username = w.username AND h.content = w.content AND h.ts >= w.sent_at "
+                    "AND h.type = w.kind AND h.post_id IS w.parent_id "
                     "WHERE w.id = ? AND h.made_id IS NULL ORDER BY h.id LIMIT 1)", (made_id, write_id)).rowcount
                 if not linked:
                     self.db.execute("INSERT INTO history (username, ts, type, post_id, content, made_id, "
                                     "target_author, target_class) SELECT w.username, w.sent_at, w.kind, w.parent_id, "
                                     "w.content, ?, p.author, p.author_class FROM writes w LEFT JOIN reply_picks p "
-                                    "ON p.write_id = w.id WHERE w.id = ? AND NOT EXISTS (SELECT 1 FROM history "
-                                    "WHERE made_id = ?)", (made_id, write_id, made_id))
+                                    "ON p.write_id = w.id WHERE w.id = ?", (made_id, write_id))
 
     def get_meta(self, key: str) -> Optional[str]:
         row = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
@@ -986,6 +991,18 @@ if __name__ == "__main__":
         t.resolve(lost, "found", 900)
         t.resolve(lost, "found", 900)  # reconciled twice, still one live reply
         assert t.replies_to("ghost", "2026-10-20T00:00:00+00:00") == 1, "a recovered reply keeps whom it answered"
+        assert t.open_picks_for("ghost", "2026-10-20T00:00:00+00:00") == 0
+        # resolved twice, a later reply with the same words to someone else keeps its own id
+        t.record("joe", "2026-10-20T13:30:00+00:00", type("A", (), dict(
+            type="reply", post_id=77, content="a", line=None, topic_kind=None, angle=None, target_author="bob",
+            target_class="npc", made_id=None, model=None))())
+        t.resolve(lost, "found", 900)
+        assert t.db.execute("SELECT made_id FROM history WHERE target_author = 'bob'").fetchone() == (None,)
+        # interrupted before history was written: counted as on its way until found
+        u = StateStore(":memory:")
+        cut = u.pick("joe", "npc-random", 78, "cara", "npc", "2026-10-20T13:40:00+00:00")
+        u.end_write(u.begin_write("joe", "reply", 78, "c", "2026-10-20T13:40:05+00:00", pick=cut), "pending")
+        assert u.open_picks_for("cara", "2026-10-20T13:39:00+00:00") == 1 and u.replies_to("cara", "") == 0
         again = StateStore(f"{tmp}/bots.db")  # and a restart keeps all of it
         mix = again.reply_mix(midnight, now_class=lambda a: {"ghost": "npc"}.get(a, "unknown"))
         assert mix["live"] == {"unknown-fallback": 1} and (mix["unknown_picked"], mix["unknown_live"]) == (2, 1)
