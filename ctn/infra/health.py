@@ -34,7 +34,10 @@ HEALTH_BATCH = 150
 # ruled, so an anchor is deleted WITHDRAW_AFTER posting (if the platform still shows it), older ones too, which
 # leaves later reports nothing to land on. Points already scored stay. Two hours from 25 October (Forrest): an anchor
 # squad account was suspended for three hidden anchors, three of its six in a day hidden before the 3-hour delete.
-WITHDRAW = True
+# Off from 27 October evening (Forrest: the later likes are worth having; watch whether suspensions jump): rival
+# anchors stay up and stay in Trending 7+ hours, 12% of the citizen likes on them came 2-4 hours after posting, and
+# their anchor accounts post about hourly without being suspended.
+WITHDRAW = False
 WITHDRAW_AFTER = timedelta(hours=2)
 WITHDRAW_EVERY = 300.0
 REPLIES_KEY = "withdraw_replies"  # meta: whether our replies survive a deleted post ("survive" | "vanish")

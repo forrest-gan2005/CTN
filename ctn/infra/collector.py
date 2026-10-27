@@ -448,6 +448,15 @@ class NpcStore:
                                authors + [_iso(since)])
         return [json.loads(r[0]) for r in rows]
 
+    def recent_among(self, authors: set, since: datetime) -> list:
+        """These accounts' posts created since `since`, newest first: read through the time index, so a short window
+        stays cheap however many authors there are or however much each has written."""
+        if not authors:
+            return []
+        rows = self.db.execute("SELECT author, raw FROM posts INDEXED BY posts_created WHERE created_at >= ? "
+                               "ORDER BY id DESC", (_iso(since),))
+        return [json.loads(raw) for author, raw in rows if author in authors]
+
     def depth(self, post_id: int, limit: int = 10) -> int:
         """How many messages deep a post sits in its thread (a post 1, a reply to it 2, ...), as far as the stored
         posts show, counting no further than `limit`."""

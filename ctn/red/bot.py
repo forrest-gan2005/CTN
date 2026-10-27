@@ -2436,8 +2436,9 @@ class Bot:
         return (random.choice(unknown), "unknown-fallback") if unknown else (None, None)
 
     def _focused(self, author: str) -> bool:
-        """Whether FOCUS applies to `author`: a known citizen, the papers aside."""
-        return FOCUS and author not in NEWS_OUTLETS and self.roster.classify(author) == "npc"
+        """Whether FOCUS applies to `author`: a known citizen, the papers, journalists and columnists aside."""
+        return (FOCUS and author not in NEWS_OUTLETS and author not in JOURNALISTS and author not in COLUMNISTS
+                and self.roster.classify(author) == "npc")
 
     def _citizen_cap(self, author: str, cap: int) -> int:
         """The team's replies `author` may get in 24 hours: FOCUS_DAILY for a focused citizen, else `cap`."""
@@ -2488,10 +2489,17 @@ class Bot:
         """Whether the team has MAX_REPLIES_PER_AUTHOR replies to `author` in the last 24 hours, sent or on their
         way."""
         now = datetime.now(timezone.utc)
+        return self._toward(author, now) >= self._citizen_cap(author, MAX_REPLIES_PER_AUTHOR)
+
+    def _toward(self, author: str, now: datetime) -> int:
+        """The team's replies to `author` in the last 24 hours, sent or on their way. For a focused citizen, those sent
+        plus the picks still being written, so a cap of six can't be passed by sent replies and open picks that
+        don't overlap; for anyone else, as before, the larger of the two counts."""
         since = _iso(now - timedelta(hours=24))
+        if self._focused(author):
+            return self.store.replies_to(author, since) + self.store.open_picks_for(author, _iso(now - OPEN_PICK))
         return max(self.store.replies_to(author, since),
-                   self.store.picked_for(author, since, _iso(now - OPEN_PICK))) >= self._citizen_cap(
-            author, MAX_REPLIES_PER_AUTHOR)
+                   self.store.picked_for(author, since, _iso(now - OPEN_PICK)))
 
     def _answer_due(self, now: Optional[datetime] = None) -> bool:
         """Whether the collector has seen a known citizen reply to one of this account's posts or replies of the
@@ -2510,10 +2518,7 @@ class Bot:
     def _replied_enough(self, author: str) -> bool:
         """Whether the team has CITIZEN_DAILY_REPLIES replies to `author` in the last 24 hours, sent or on their way."""
         now = datetime.now(timezone.utc)
-        since = _iso(now - timedelta(hours=24))
-        return max(self.store.replies_to(author, since),
-                   self.store.picked_for(author, since, _iso(now - OPEN_PICK))) >= self._citizen_cap(
-            author, CITIZEN_DAILY_REPLIES)
+        return self._toward(author, now) >= self._citizen_cap(author, CITIZEN_DAILY_REPLIES)
 
     def _story_reply(self, kind: str, target: Optional[dict], topic: tuple) -> bool:
         """Whether this is a reply STORY_REPLIES shapes: to a citizen or an account of unknown standing, not to a
@@ -6783,10 +6788,10 @@ async def focus_check() -> None:
     """FOCUS: a known citizen may get FOCUS_DAILY replies a day from the team, with no CITIZEN_COOLDOWN, and one this
     account answered within FOCUS_WINDOW is picked first, then one a teammate did, whatever the class order; the
     papers and accounts of unknown standing keep the old limits. Without FOCUS, as before."""
-    global FOCUS, PERSUADE_V2, CITIZEN_TARGETING, TOPICAL_REPLY_PROB
-    saved = FOCUS, PERSUADE_V2, CITIZEN_TARGETING, TOPICAL_REPLY_PROB
+    global FOCUS, PERSUADE_V2, CITIZEN_TARGETING, TOPICAL_REPLY_PROB, CITIZEN_DAILY_REPLIES
+    saved = FOCUS, PERSUADE_V2, CITIZEN_TARGETING, TOPICAL_REPLY_PROB, CITIZEN_DAILY_REPLIES
     try:
-        FOCUS, PERSUADE_V2, CITIZEN_TARGETING, TOPICAL_REPLY_PROB = True, True, True, 0.0
+        FOCUS, PERSUADE_V2, CITIZEN_TARGETING, TOPICAL_REPLY_PROB, CITIZEN_DAILY_REPLIES = True, True, True, 0.0, 1
         persona = [p for p in load_personas(status=None) if p["line"] == "persuade"][0]
         store, now = StateStore(":memory:"), datetime.now(timezone.utc)
         ago = lambda minutes: _iso(now - timedelta(minutes=minutes))
@@ -6844,15 +6849,17 @@ async def focus_check() -> None:
             w = Bot(persona, FakePlatform(), Says(answer), load_world(), stance_llm=Says("NEUTRAL"),
                     roster=Roster(npcs=npcs), store=store)
             await w._reply(dict(posts[0], id=950 + focus), "feed", "feed")
-            prompt = next(p for p in w.llm.prompts if "Write a reply" in p)
-            assert (told in prompt and "already told them" in prompt) == shown, prompt
+            prompts = [p for p in w.llm.prompts if "Write a reply" in p]
+            assert prompts or not shown, "with FOCUS the reply is written"  # without, one a day may stop it first
+            assert all((told in p and "already told them" in p) == shown for p in prompts), prompts
         FOCUS = False
         open_ = {p["author"] for p in b._open_targets(posts)}
-        assert open_ == {"earlier", "fresh", "stranger"}, open_  # one a day, two hours apart
-        order = [p["author"] for p, _ in await b._rank_citizens([p for p in posts if p["author"] in open_ & npcs], ())]
-        assert order == ["fresh", "earlier"], order
+        assert open_ == {"fresh", "stranger"}, open_  # one a day: "earlier" had theirs
+        order = [p["author"] for p, _ in await b._rank_citizens([p for p in posts if p["author"] in npcs - {"full", "DailyKingstonia"}],
+                                                               ())]
+        assert order == ["fresh", "earlier", "mine", "theirs"], order  # no focus first: the class order alone
     finally:
-        FOCUS, PERSUADE_V2, CITIZEN_TARGETING, TOPICAL_REPLY_PROB = saved
+        FOCUS, PERSUADE_V2, CITIZEN_TARGETING, TOPICAL_REPLY_PROB, CITIZEN_DAILY_REPLIES = saved
     print("focus ok")
 
 

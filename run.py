@@ -146,7 +146,7 @@ class Team:
                                    locked=lambda: self.locked, lifts=lifts) for lifts in (False, True)]
                          if WITHDRAW else [])  # anchors, and the lift replies under deleted ones
         self._logins = {}  # username -> the one login task its users share
-        self._focus = None  # (when read, citizens replied to within FOCUS_WINDOW)
+        self._focus = None  # (when read, the posts of citizens we're following)
         self.set_quiet(self.health.quiet())
         self.refresh()
 
@@ -158,14 +158,18 @@ class Team:
         posts += self.npc_store.recent_from(set(JOURNALISTS) | NEWS_OUTLETS, now - PRESS_WINDOW)
         posts += self.npc_store.recent_from(COLUMNISTS, now - COLUMN_WINDOW)  # answered hours later
         if red_bot.FOCUS:  # the newest posts of citizens we're following through a session
-            posts += self.npc_store.recent_from(self._focused(now), now - red_bot.FOCUS_FRESH)
+            posts += self._focus_posts(now)
         return list({p["id"]: p for p in posts}.values())
 
     def _focused(self, now: datetime) -> set:
-        """Citizens the team replied to within FOCUS_WINDOW (the press aside), read again at most every FOCUS_READ."""
+        """Citizens the team replied to within FOCUS_WINDOW (the press aside)."""
+        since = (now - red_bot.FOCUS_WINDOW).isoformat(timespec="seconds")
+        return self.state.reply_targets(since) - NEWS_OUTLETS - set(JOURNALISTS) - set(COLUMNISTS)
+
+    def _focus_posts(self, now: datetime) -> list:
+        """Their posts of the last FOCUS_FRESH, read again at most every FOCUS_READ: every bot reads the feed."""
         if self._focus is None or now - self._focus[0] >= FOCUS_READ:
-            since = (now - red_bot.FOCUS_WINDOW).isoformat(timespec="seconds")
-            self._focus = now, self.state.reply_targets(since) - NEWS_OUTLETS - set(JOURNALISTS)
+            self._focus = now, self.npc_store.recent_among(self._focused(now), now - red_bot.FOCUS_FRESH)
         return self._focus[1]
 
     def set_quiet(self, usernames: set) -> None:
@@ -894,9 +898,11 @@ def focus_feed_check() -> None:
         red_bot.FOCUS = True
         assert team._focused(now) == {"followed"}, team._focused(now)
         ids = {p["id"] for p in team.feed()}
+        assert team._focus_posts(now + FOCUS_READ / 2) is team._focus[1], "read again only after FOCUS_READ"
         assert 10 in ids and 11 not in ids and 12 not in ids, ids
         red_bot.FOCUS = False
         assert 10 not in {p["id"] for p in team.feed()}
+        assert not npc_store.recent_among(set(), now - timedelta(days=1))
     finally:
         red_bot.FOCUS = saved
     print("focus feed ok")

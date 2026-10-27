@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS history (
 );
 CREATE INDEX IF NOT EXISTS history_user ON history(username);
 CREATE INDEX IF NOT EXISTS history_made ON history(made_id);
+CREATE INDEX IF NOT EXISTS history_ts ON history(ts);
 CREATE INDEX IF NOT EXISTS history_target ON history(target_author, ts);
 CREATE TABLE IF NOT EXISTS claims (
     key TEXT PRIMARY KEY,   -- post:<id> or follow:<username>; one of our accounts per target
@@ -652,6 +653,11 @@ class StateStore:
             "SELECT COUNT(*) FROM reply_picks p LEFT JOIN writes w ON w.id = p.write_id WHERE p.author = ? "
             "AND p.picked_at >= ? AND (p.outcome IS NULL AND p.picked_at >= ? OR p.outcome = 'written' "
             "AND COALESCE(w.status, '') NOT IN ('not_sent', 'not_found'))", (author, since, open_since)).fetchone()[0]
+
+    def open_picks_for(self, author: str, open_since: str) -> int:
+        """Replies to `author` picked since UTC ISO time `open_since` and still being written."""
+        return self.db.execute("SELECT COUNT(*) FROM reply_picks WHERE author = ? AND outcome IS NULL AND picked_at >= ?",
+                               (author, open_since)).fetchone()[0]
 
     def dropped(self, post_id: int) -> tuple:
         """(replies to this post picked and then dropped by any of our accounts, when the latest was picked)."""
