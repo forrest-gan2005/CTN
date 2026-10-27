@@ -780,6 +780,11 @@ BOOST_DELAY = timedelta(minutes=1)
 # too, and two accounts past 100 actions were suspended within the hour on the next account report; likes and
 # reposts can't be reported. Reposts also lift a post more (4.4 against 2.8 a log unit in the Trending fit).
 BOOST_LIMITS = {"like": 50, "repost": 45, "reply": 15}
+# More lift replies in these windows (Forrest, night of 28 October): the anchors ahead of ours on Trending had 30-45
+# replies against our 15-20, with reposts at 45 on both sides; at night the write lane is half idle. Two anchors an
+# hour with 30 replies each take about 150 of its 175 writes.
+NIGHT_LIFT_REPLIES = 30
+NIGHT_LIFT_WINDOWS = ((datetime(2026, 10, 28, 0, 45, tzinfo=TIMEZONE), datetime(2026, 10, 28, 8, 0, tzinfo=TIMEZONE)),)
 BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post still has places
 # Popular tags were all campaign accounts' on the opening night, a NO team's #keepkingstoniaopen first; the papers'
 # reporters write up what is popular here. The team carries the YES campaign's own words: on every anchor post, and
@@ -1147,9 +1152,11 @@ def rush_wait() -> tuple:
     return LOW_KEY_RUSH_WAIT if low_key() else RUSH_WAIT
 
 
-def lift_replies() -> int:
+def lift_replies(now: Optional[datetime] = None) -> int:
     """An anchor's reply places for the team."""
-    places = LOW_KEY_LIFT_REPLIES if low_key() else BOOST_LIMITS["reply"]
+    now = now or datetime.now(timezone.utc)
+    places = (LOW_KEY_LIFT_REPLIES if low_key(now) else NIGHT_LIFT_REPLIES
+              if any(start <= now < end for start, end in NIGHT_LIFT_WINDOWS) else BOOST_LIMITS["reply"])
     return round(places * DIALOGUE_LIFT_SHARE) if DIALOGUE_MODE else places
 
 
@@ -6802,6 +6809,22 @@ async def citizen_reply_len_check() -> None:
     print("citizen reply length ok")
 
 
+def night_lift_check(windows: tuple) -> None:
+    """NIGHT_LIFT_REPLIES lift replies an anchor inside a NIGHT_LIFT_WINDOWS window, BOOST_LIMITS' outside; checked
+    on the production windows at their edges."""
+    global NIGHT_LIFT_WINDOWS
+    saved = NIGHT_LIFT_WINDOWS
+    try:
+        NIGHT_LIFT_WINDOWS = windows
+        for start, end in windows:
+            assert lift_replies(start - timedelta(seconds=1)) == BOOST_LIMITS["reply"]
+            assert lift_replies(start) == lift_replies(end - timedelta(seconds=1)) == NIGHT_LIFT_REPLIES
+            assert lift_replies(end) == BOOST_LIMITS["reply"]
+    finally:
+        NIGHT_LIFT_WINDOWS = saved
+    print("night lifts ok")
+
+
 async def focus_check() -> None:
     """FOCUS: a known citizen may get FOCUS_DAILY replies a day from the team, with no CITIZEN_COOLDOWN, and one this
     account answered within FOCUS_WINDOW is picked first, then one a teammate did, whatever the class order; the
@@ -7257,6 +7280,7 @@ if __name__ == "__main__":
     npc_only, NPC_ONLY_REPLIES = NPC_ONLY_REPLIES, False  # unknown accounts answered as before; npc_only_check
     persuade_v2, PERSUADE_V2 = PERSUADE_V2, False  # the older targeting; persuade_v2_check sets it
     focus, FOCUS = FOCUS, False  # one reply a day and the cooldown; focus_check sets it
+    night_lifts, NIGHT_LIFT_WINDOWS = NIGHT_LIFT_WINDOWS, ()  # BOOST_LIMITS' replies whatever the hour
     feed_replies, FEED_REPLIES = FEED_REPLIES, True  # replies to citizens as before; feed_replies_check sets it
     anchor_night, ANCHOR_NIGHT = ANCHOR_NIGHT, (0, 0)  # no night in the checks; night_anchor_check sets it
     anchor_pause, ANCHOR_PAUSE = ANCHOR_PAUSE, (datetime(2000, 1, 1, tzinfo=TIMEZONE),) * 2  # nor the pause
@@ -7269,6 +7293,7 @@ if __name__ == "__main__":
     asyncio.run(citizen_reply_len_check())
     asyncio.run(persuade_v2_check())
     asyncio.run(focus_check())
+    night_lift_check(night_lifts)
     asyncio.run(paraphrase_check())
     asyncio.run(night_anchor_check())
     asyncio.run(anchor_pace_check(fast_trials, fast_from))
@@ -7327,6 +7352,7 @@ if __name__ == "__main__":
     NPC_ONLY_REPLIES = npc_only
     PERSUADE_V2 = persuade_v2
     FOCUS = focus
+    NIGHT_LIFT_WINDOWS = night_lifts
     FEED_REPLIES = feed_replies
     FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE = fast_from, fast_trials, hold_file
     rhythm_module.SAVE_FILE = save_file
