@@ -165,10 +165,12 @@ STORY_LEAD = {
     "yes": "They lean YES already; add no 'but' and no condition.",
     "yes-but": "They lean YES with a condition; don't take the condition up or add one of your own.",
 }
-STORY_GUIDE = ("Answer in one or two sentences about one concrete person or livelihood: your own if your life has "
-               "one, otherwise people like them. End with a plain statement, in your own words, that "
-               "you're voting yes. If one fact given above settles their worry outright (the certificate is separate "
-               "from the ID card, under-12s aren't covered, medical exemptions), you may give it instead. Don't end "
+STORY_GUIDE = ("Answer the reason they gave, in one or two short sentences: if a fact given above settles it (the "
+               "certificate is separate from the ID card, under-12s aren't covered, medical exemptions, the staged "
+               "start once everyone has had a fair chance, how few intensive-care beds there are), give it plainly and "
+               "confidently; otherwise one concrete person or livelihood, your own if your life has one. End with a "
+               "plain statement, in your own words, that you're voting yes. Say proof or a certificate, not a "
+               "mandate. Don't end "
                "with a question. Don't grant a condition or say you'd want one (an end date, a review, a list of "
                "places), and never claim the proposal has one. Leave out what a NO vote would allow and who gets to "
                "decide. Leave the choice with them.")
@@ -185,6 +187,9 @@ STORY_AVOID_RE = re.compile(r"\b(not|isn'?t|aren'?t) on the ballot|\brules? out 
 # worry (a conversation reply, as ever). Each such reply's angle ends " elicit:1", the others it could have been
 # " elicit:0", to compare answers and agreement.
 ELICIT_SHARE = 1.0  # 0.5 to 25 October noon: asking first was answered 14 of 58 times, the other 1 of 36
+# Off from 27 October (PERSUADE_V2): answers to our questions agreed 8% of the time against 16% and named a condition
+# 54% against 44%; citizens who moved to YES had read confident, fact-led replies, not questions.
+ELICIT_SHARE = 0.0
 ELICIT_LEANS = {"undecided", "no"}
 ELICIT_GUIDE = ("In one or two sentences, say in your own words that you're voting yes and give one concrete reason "
                 "from your own life or work. Then end with one short, open question, in your own words, from the "
@@ -286,6 +291,48 @@ NPC_REPLY_PREF = 0.8  # how strongly reply targeting prefers citizens over unkno
 # accounts of unknown standing (mostly other teams' bots) and 28 to citizens. With NPC_ONLY_REPLIES on, no reply goes
 # to such an account, from the feed or in answer to one that replied to us; the papers and journalists are as before.
 NPC_ONLY_REPLIES = True
+# Persuasion v2 (27 October, from our data and the literature): a firm YES citizen picked from the feed is left be (32%
+# of our replies went to them; agreement only rewords a view, and they turned NO a little more often after our
+# replies); "yes but" citizens first (the commonest move to NO starts there), then the undecided, then unknown, a soft
+# NO last. A citizen doubting the vaccine itself (boosters, yearly shots, side effects) comes first whatever their
+# referendum lean, answered about the vaccine alone (VACCINE_REPLY_GUIDE): vaccination in general and yearly
+# vaccination are two of the three views that score 160, and 206 citizens had voiced such doubts.
+PERSUADE_V2 = True
+PERSUADE_ORDER = {"yes-but": 1, "undecided": 2, "unknown": 3, "soft-no": 4}
+# A doubt about the vaccine itself: a doubt word within a few words of a vaccine word ("strongly skeptical of routine
+# vaccination", "don't know how long this vaccine protects"), or a question about boosters or the jab ("idk about the
+# booster thing", "will we need boosters every year?"); not a post that sets the vaccine aside ("the shift worry, not
+# the vaccine") or trusts it ("I trust well-tested vaccines ... get boosters every year").
+VACCINE_WORD = (r"(?:vaccines?|vaccinations?|vax|jabs?|shots?|boosters?|mrna)"
+                r"(?!\W+(?:proof|certificates?|pass\w*|requirements?|checks?|status|mandates?|rules?|cards?))")
+DOUBT_WORD = (r"(?:skip\w*|avoid\w*|declin\w*|refus\w*|skeptic\w*|sceptic\w*|distrust\w*|mistrust\w*|wary|scared|"
+              r"afraid|nervous|hesitan\w*|side[- ]effects?|rushed|reactions?|long[- ]term (?:effects?|data|safety)|"
+              r"wears? off|how long (?:\w+ ){0,3}(?:protect\w*|lasts?|works?)|(?:don'?t|never|can'?t) trust|not sure about|"
+              r"unsure about|idk about)")
+VACCINE_DOUBT_RE = re.compile(rf"\b{DOUBT_WORD}[^\w.!?]+(?:\w+[^\w.!?]+){{0,5}}?{VACCINE_WORD}\b|"
+                              rf"\b{VACCINE_WORD}[^\w.!?]+(?:\w+[^\w.!?]+){{0,5}}?{DOUBT_WORD}\b|"
+                              rf"\bhow long (?:\w+ ){{0,2}}{VACCINE_WORD}", re.IGNORECASE)
+# A question about boosters is a doubt too ("will we need boosters every year?"), unless it is about the rule.
+BOOSTER_QUESTION_RE = re.compile(r"[^.!?]*\bboosters?\b[^.!?]*\?", re.IGNORECASE)
+POLICY_RE = re.compile(r"\b(?:proof|certificates?|pass\w*|requir\w*|mandat\w*|rules?)\b", re.IGNORECASE)
+VACCINE_TRUST_RE = re.compile(r"\bnot (?:about )?the (?:vaccine|jab|shot)\b|"
+                              r"(?<!n't )(?<!nt )(?<!not )(?<!never )(?<!no )\btrust (?:the |well[- ]tested |established |our )?"
+                              r"(?:vacc|jab|shot|medical)",
+                              re.IGNORECASE)
+
+
+def vaccine_doubt(text: str) -> bool:
+    """A post doubting the vaccine itself (boosters, yearly shots, side effects, how long it protects)."""
+    text = plain(text or "")
+    if VACCINE_TRUST_RE.search(text):
+        return False
+    # Not a match about the rule: none in the words matched or the three after them ("how long will boosters be
+    # required?"), nor a booster question that names it.
+    for m in VACCINE_DOUBT_RE.finditer(text):
+        after = " ".join(re.findall(r"\w+", text[m.end():])[:3])
+        if not POLICY_RE.search(m.group(0)) and not POLICY_RE.search(after):
+            return True
+    return any(not POLICY_RE.search(q) for q in BOOSTER_QUESTION_RE.findall(text))
 INBOX_TTL = timedelta(hours=12)  # answering a much older reply looks odd
 # A four-word run two teammates had used in a week sank 294 drafts in the three hours to 23:00 on 20 October, against
 # 112 replies sent; what a reader or another team could notice is the same words often in a day, or side by side
@@ -1731,8 +1778,12 @@ class Bot:
             self.candor = (self._candor_for(target, source)
                            if STORY_REPLIES and self._story_reply("reply", target, (source, lean))
                            and self.roster.classify(target["author"]) == "npc" else None)
-            self.vaccine_thread = self._in_vaccine_thread(target)
-            if self.vaccine_thread:
+            doubter = (PERSUADE_V2 and route != "team" and self._citizen_reply("reply", target)
+                       and vaccine_doubt(target.get("content") or ""))
+            self.vaccine_thread = doubter or self._in_vaccine_thread(target)
+            if doubter:
+                referendum = False  # about the vaccine alone, even if they mention the vote too
+            elif self.vaccine_thread:
                 referendum = route != "team" and bool(VOTE_RE.search(target.get("content") or ""))
             action = await self._compose("reply", target=target, topic=(source, lean), context=context,
                                          referendum=referendum)
@@ -2332,7 +2383,8 @@ class Bot:
         open_ = self._open_targets(candidates)
         if NPC_ONLY_REPLIES:  # before the topical pick, so an unknown account's post can't crowd a citizen's out
             open_ = [p for p in open_ if self.roster.classify(p["author"]) == "npc"]
-        topical = [p for p in open_ if about_referendum(p.get("content") or "")]
+        topical = [p for p in open_ if about_referendum(p.get("content") or "")
+                   or PERSUADE_V2 and vaccine_doubt(p.get("content") or "")]
         if topical and self.line != "amplifier" and random.random() < TOPICAL_REPLY_PROB:
             open_ = topical
         npcs = [p for p in open_ if self.roster.classify(p["author"]) == "npc"]
@@ -2383,7 +2435,7 @@ class Bot:
         """The candour arm for a reply: a follow-up keeps that of our post it answers, when it had one; anything else
         takes the current block's (None before CANDOR_START); none after CANDOR_END, follow-ups included."""
         if datetime.now(timezone.utc) >= CANDOR_END:
-            return False
+            return candor_arm()  # False, or None before CANDOR_START
         if source == "conversation" and target.get("parent_id") is not None:
             row = self.store.db.execute("SELECT angle FROM history WHERE made_id = ?",
                                         (target["parent_id"],)).fetchone()
@@ -2451,7 +2503,13 @@ class Bot:
                 checks += 1
                 lean = await self._lean(p["author"], p.get("content") or "")
             cls = dialogue_class(p.get("content") or "", lean)
-            if cls != "hard-no":
+            if PERSUADE_V2:
+                doubt = vaccine_doubt(p.get("content") or "")
+                if cls in ("hard-no", "yes") and not doubt:
+                    continue  # a firm YES can only reword its view; a hard NO isn't answered
+                rank = 0 if doubt else PERSUADE_ORDER.get(cls, len(PERSUADE_ORDER))
+                ranked.append(((rank, lean not in wanted, order), p, lean))
+            elif cls != "hard-no":
                 ranked.append(((cls == "soft-no", lean not in wanted, order), p, lean))
         return [(p, lean) for _, p, lean in sorted(ranked, key=lambda r: r[0])]
 
@@ -2532,6 +2590,7 @@ class Bot:
         length = (f"Two or three sentences, under {under} characters." if under is not None
                   else "Two or three sentences, under 50 words." if short
                   else "Three or four sentences, under 75 words." if case
+                  else "Keep it to 1-3 short sentences, under 40 words." if citizen_reply and PERSUADE_V2
                   else "Keep it to 1-3 short sentences, under 55 words." if citizen_reply
                   else "Keep it to 1-3 short sentences, under 40 words.")
         world = (self.reply_world if story_reply else self.world) if arguments else self.plain_world
@@ -6677,6 +6736,106 @@ async def citizen_reply_len_check() -> None:
     print("citizen reply length ok")
 
 
+async def persuade_v2_check() -> None:
+    """PERSUADE_V2: from the feed, a vaccine doubter first, then "yes but", undecided, unknown, a soft NO last; never a
+    firm YES or a hard NO; a reply to a vaccine doubter keeps to the vaccine and leaves the referendum out."""
+    class Says:
+        name = "says"
+
+        def __init__(self, text: str) -> None:
+            self.text, self.prompts, self.systems = text, [], []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            self.systems.append(system)
+            return self.text
+
+    global PERSUADE_V2
+    saved = PERSUADE_V2
+    try:
+        PERSUADE_V2 = True
+        persona = [p for p in load_personas(status=None) if p["line"] == "persuade"][0]
+        texts = {
+            "firm_yes": "Voting yes on the vaccine pass, easy call for me.",
+            "yes_but": "I'm voting yes on the vaccine pass but I want an end date written in.",
+            "undecided": "Honestly not sure how I'll vote on the vaccine pass yet.",
+            "soft_no": "Leaning no on the vaccine pass, feels like too much.",
+            "hard_no": "I'm voting no on the mandate. No chance.",
+            "doubter": "I skip the yearly flu shot and I'm wary of side effects from this new jab.",
+        }
+        posts = [{"id": 700 + i, "author": a, "content": t, "parent_id": None} for i, (a, t) in enumerate(texts.items())]
+        b = Bot(persona, FakePlatform(), Says("x"), load_world(), roster=Roster(npcs=set(texts)),
+                store=StateStore(":memory:"))
+        for _ in range(5):
+            order = [p["author"] for p, _ in await b._rank_citizens(posts, ())]
+            assert order == ["doubter", "yes_but", "undecided", "soft_no"], order
+        assert vaccine_doubt(texts["doubter"]) and not vaccine_doubt(texts["yes_but"])
+        assert not vaccine_doubt("Regatta every year is the best") and not vaccine_doubt("I rushed to the ferry")
+        assert not vaccine_doubt("I keep up with the flu shot and boosters every winter. Vote YES.")
+        assert vaccine_doubt("I don't trust vaccines.") and vaccine_doubt("I never trust a jab this new, honestly.")
+        assert not vaccine_doubt("Will booster certificates be required?")
+        assert not vaccine_doubt("Does the mandate include boosters?")
+        assert not vaccine_doubt("Will a certificate be needed for boosters?")
+        assert not vaccine_doubt("How long will boosters be required?")
+        assert not vaccine_doubt("I trust the vaccines, so I won't skip my booster."), "trust cancels a doubt match"
+        real = {  # citizens' own posts, 26-27 October
+            False: ("Even the venue list won't be settled before the vote, so schools and shop counters would be "
+                    "checking doors under rules written later. That's the shift worry, not the vaccine.",
+                    "I trust well-tested vaccines to prevent serious illness and get boosters every year. Vote YES.",
+                    "Routine vaccination is preventive care; I trust established medical guidance. I keep up with the "
+                    "flu shot and boosters for my kids."),
+            True: ("i am strongly skeptical of routine vaccination and would normally decline a recommended shot",
+                   "we still don't know how long this vaccine protects or exactly what the rules would be",
+                   "@alofa_sapolu yeah idk about the booster thing yet but if it stays free its a win i think"),
+        }
+        for want, cases in real.items():
+            for text in cases:
+                assert vaccine_doubt(text) == want, (want, text)
+        assert vaccine_doubt("I distrust routine vaccines, always have.")
+        assert vaccine_doubt("Nobody can say how long the protection lasts from this jab.")
+        assert vaccine_doubt("Will we need boosters every year?")
+        # a doubter beside a referendum post survives the topical preference
+        global TOPICAL_REPLY_PROB, CITIZEN_TARGETING
+        kept = TOPICAL_REPLY_PROB, CITIZEN_TARGETING
+        try:
+            TOPICAL_REPLY_PROB, CITIZEN_TARGETING = 1.0, True
+            booster = {"id": 790, "author": "doubter", "content": "Will we need boosters every year?", "parent_id": None}
+            for _ in range(5):
+                found = await b._pick_reply_target([posts[0], booster])
+                assert found[0] is not None and found[0]["author"] == "doubter", found
+        finally:
+            TOPICAL_REPLY_PROB, CITIZEN_TARGETING = kept
+        reply = ("The jab's free at your own GP, and the trials showed far less serious illness. Mine was a sore arm "
+                 "for a day; worth it for my nan.")
+        c = Bot(persona, FakePlatform(), Says(reply), load_world(), stance_llm=Says("NEUTRAL"),
+                roster=Roster(npcs=set(texts)), store=StateStore(":memory:"))
+        action = await c._reply(posts[-1], "feed", "feed")
+        assert action is not None, c.rejected
+        prompt = next(p for p in c.llm.prompts if "Write a reply" in p)
+        assert VACCINE_REPLY_GUIDE in prompt and STORY_GUIDE not in prompt, prompt
+        # a doubter who mentions the vote too is still answered about the vaccine alone, and vote talk sinks the draft
+        voter = dict(posts[-1], id=791, content=posts[-1]["content"] + " Still voting yes though.")
+        e = Bot(persona, FakePlatform(), Says(reply + " Voting yes too."), load_world(), stance_llm=Says("NEUTRAL"),
+                roster=Roster(npcs=set(texts)), store=StateStore(":memory:"))
+        assert await e._reply(voter, "feed", "feed") is None and e.rejected.get("vote in vaccine post"), e.rejected
+        assert VACCINE_REPLY_GUIDE in next(p for p in e.llm.prompts if "Write a reply" in p)
+        d = Bot(persona, FakePlatform(), Says(reply), load_world(), stance_llm=Says("SUPPORT"),
+                roster=Roster(npcs=set(texts)), store=StateStore(":memory:"))
+        await d._reply(posts[1], "feed", "feed")
+        prompt = next(p for p in d.llm.prompts if "Write a reply" in p)
+        assert VACCINE_REPLY_GUIDE not in prompt and ELICIT_GUIDE not in prompt, "a yes-but reply argues the referendum"
+        assert "under 40 words" in d.llm.systems[-1], "a citizen reply is asked to be short"
+        PERSUADE_V2 = False
+        order = [p["author"] for p, _ in await b._rank_citizens(posts, ())]
+        assert "firm_yes" in order and "hard_no" not in order
+    finally:
+        PERSUADE_V2 = saved
+    print("persuade v2 ok")
+
+
 async def single_anchor_check() -> None:
     """ANCHOR_SINGLE: one qualifying account writes the anchors; it gives way when suspended, capped or not started,
     to the qualifying account with the fewest actions; others fill in only after SQUAD_GRACE, and only if they
@@ -6910,6 +7069,7 @@ if __name__ == "__main__":
     anchor_single, ANCHOR_SINGLE = ANCHOR_SINGLE, False  # nor one anchor account; single_anchor_check sets it
     vaccine_anchors, VACCINE_ANCHORS = VACCINE_ANCHORS, False  # whatever the hour; vaccine_anchor_check sets it
     npc_only, NPC_ONLY_REPLIES = NPC_ONLY_REPLIES, False  # unknown accounts answered as before; npc_only_check
+    persuade_v2, PERSUADE_V2 = PERSUADE_V2, False  # the older targeting; persuade_v2_check sets it
     feed_replies, FEED_REPLIES = FEED_REPLIES, True  # replies to citizens as before; feed_replies_check sets it
     anchor_night, ANCHOR_NIGHT = ANCHOR_NIGHT, (0, 0)  # no night in the checks; night_anchor_check sets it
     anchor_pause, ANCHOR_PAUSE = ANCHOR_PAUSE, (datetime(2000, 1, 1, tzinfo=TIMEZONE),) * 2  # nor the pause
@@ -6920,6 +7080,7 @@ if __name__ == "__main__":
     asyncio.run(save_mode_check())
     asyncio.run(npc_only_check())
     asyncio.run(citizen_reply_len_check())
+    asyncio.run(persuade_v2_check())
     asyncio.run(night_anchor_check())
     asyncio.run(anchor_pace_check(fast_trials, fast_from))
     asyncio.run(answer_check())
@@ -6975,6 +7136,7 @@ if __name__ == "__main__":
     VACCINE_ANCHORS = vaccine_anchors
     SHARED_LIMIT = shared_limit
     NPC_ONLY_REPLIES = npc_only
+    PERSUADE_V2 = persuade_v2
     FEED_REPLIES = feed_replies
     FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE = fast_from, fast_trials, hold_file
     rhythm_module.SAVE_FILE = save_file
