@@ -226,6 +226,10 @@ def elicit_angle() -> str:
 # and the rest as before), the order in each pair of blocks drawn from a seed; a follow-up keeps the arm of the reply
 # it answers. Each reply's angle ends " candor:1" or " candor:0".
 CANDOR_START = datetime(2026, 10, 25, 18, 0, tzinfo=TIMEZONE)
+# Ended 27 October noon (Forrest): with replies to citizens back at 50-75 an hour, the candour arm had every account
+# saying "no end date and no venue list" and "the staged start and medical exemptions" (63-75 drafts an hour dropped
+# for a shared phrase), and an hour of it brought 17 changes towards neither side against 1 towards YES.
+CANDOR_END = datetime(2026, 10, 27, 12, 0, tzinfo=TIMEZONE)
 CANDOR_BLOCK = timedelta(hours=2)
 CANDOR_LEAD = {"no": "They seem to lean NO.", "undecided": "They seem undecided.", "yes": "They lean YES already.",
                "yes-but": "They lean YES with a condition."}
@@ -256,6 +260,8 @@ def candor_arm(now: Optional[datetime] = None) -> Optional[bool]:
     now = now or datetime.now(timezone.utc)
     if now < CANDOR_START:
         return None
+    if now >= CANDOR_END:
+        return False
     block = int((now - CANDOR_START) / CANDOR_BLOCK)
     first = random.Random(f"candor:{block // 2}").random() < 0.5
     return first if block % 2 == 0 else not first
@@ -285,7 +291,8 @@ INBOX_TTL = timedelta(hours=12)  # answering a much older reply looks odd
 # 112 replies sent; what a reader or another team could notice is the same words often in a day, or side by side
 # under one post, which `_sibling_phrase` still refuses.
 SHARED_WINDOW = timedelta(days=1)  # a phrase SHARED_LIMIT teammates used this recently is one too many for another
-SHARED_LIMIT = 4
+# 6 from 27 October (Forrest: looser checks; they will be reported regardless), was 4.
+SHARED_LIMIT = 6
 COMMON_ACCOUNTS = 5  # a phrase this many other accounts used lately is how people here talk, not a tell of ours
 MAX_REPLIES_PER_AUTHOR = 4  # team-wide per 24h: no ping-pong with competitor bots, no crowding one citizen
 # Our first reply to a citizen drew agreement 29% of the time, later ones 12% (19-22 October), and citizens log in
@@ -2374,7 +2381,9 @@ class Bot:
 
     def _candor_for(self, target: dict, source: str) -> Optional[bool]:
         """The candour arm for a reply: a follow-up keeps that of our post it answers, when it had one; anything else
-        takes the current block's (None before CANDOR_START)."""
+        takes the current block's (None before CANDOR_START); none after CANDOR_END, follow-ups included."""
+        if datetime.now(timezone.utc) >= CANDOR_END:
+            return False
         if source == "conversation" and target.get("parent_id") is not None:
             row = self.store.db.execute("SELECT angle FROM history WHERE made_id = ?",
                                         (target["parent_id"],)).fetchone()
@@ -5685,7 +5694,7 @@ async def citizen_targeting_check() -> None:
 async def candor_check() -> None:
     """The candour arm by two-hour blocks: CANDOR_FIRST and the bare facts in the prompt, no story-phrase screen and
     the closing question kept, the arm in the angle; a follow-up keeps the arm of the post it answers."""
-    global CANDOR_START, STORY_REPLIES, ELICIT_SHARE
+    global CANDOR_START, STORY_REPLIES, ELICIT_SHARE, CANDOR_END
 
     class Says:
         name = "says"
@@ -5702,8 +5711,11 @@ async def candor_check() -> None:
             return self.texts.pop(0) if len(self.texts) > 1 else self.texts[0]
 
     now = datetime.now(timezone.utc)
-    saved = CANDOR_START, STORY_REPLIES, ELICIT_SHARE
+    saved = CANDOR_START, STORY_REPLIES, ELICIT_SHARE, CANDOR_END
     try:
+        CANDOR_START, CANDOR_END = now - timedelta(days=1), now - timedelta(minutes=1)
+        assert candor_arm(now - timedelta(days=30)) is None and candor_arm(now) is False, "ended: the plain arm"
+        CANDOR_END = now + timedelta(days=1)
         CANDOR_START = now + timedelta(hours=1)
         assert candor_arm(now) is None, "nothing before the start"
         CANDOR_START = now - timedelta(minutes=1)
@@ -5752,8 +5764,16 @@ async def candor_check() -> None:
         action = await b2._reply(follow2, "conversation", "conversation")
         assert action is not None and action.angle.endswith("candor:1"), (action, b2.rejected)
         assert CANDOR_FOLLOW_UP in b2.llm.prompts[0], "the candour follow-up, not 'leave the referendum out'"
+        # once the arm has ended, a follow-up to a candour reply isn't one either, from the exact moment
+        CANDOR_END = datetime.now(timezone.utc)
+        assert b2._candor_for(follow2, "conversation") is False and b2._candor_for(follow2, "feed") is False
+        b2.llm.prompts.clear()
+        follow3 = dict(follow2, id=10)
+        action = await b2._reply(follow3, "conversation", "conversation")
+        assert action is None or action.angle.endswith("candor:0"), action
+        assert not b2.llm.prompts or CANDOR_FOLLOW_UP not in b2.llm.prompts[0]
     finally:
-        CANDOR_START, STORY_REPLIES, ELICIT_SHARE = saved
+        CANDOR_START, STORY_REPLIES, ELICIT_SHARE, CANDOR_END = saved
     print("candor ok")
 
 
@@ -6870,6 +6890,7 @@ if __name__ == "__main__":
     arm_check()
     ARM_FIXED = "granted"  # the checks below were written for the granted arm's shapes and guides
     dialogue, DIALOGUE_MODE = DIALOGUE_MODE, False  # and before dialogue mode, which dialogue_check sets itself
+    shared_limit, SHARED_LIMIT = SHARED_LIMIT, 4  # the fixtures give a phrase to four teammates
     rush_first, RUSH_FIRST = RUSH_FIRST, False  # and RUSH_FIRST, which rush_first_check sets itself
     targeting, CITIZEN_TARGETING = CITIZEN_TARGETING, False  # and CITIZEN_TARGETING: citizen_targeting_check
     story, STORY_REPLIES = STORY_REPLIES, False  # and STORY_REPLIES: story_reply_check
@@ -6952,6 +6973,7 @@ if __name__ == "__main__":
     ANCHOR_SQUAD = anchor_squad
     ANCHOR_SINGLE = anchor_single
     VACCINE_ANCHORS = vaccine_anchors
+    SHARED_LIMIT = shared_limit
     NPC_ONLY_REPLIES = npc_only
     FEED_REPLIES = feed_replies
     FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE = fast_from, fast_trials, hold_file
