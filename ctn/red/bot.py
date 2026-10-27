@@ -570,7 +570,10 @@ FAST_ANCHOR_GAP = timedelta(minutes=30)
 # again only from the x4 days.
 FAST_ANCHORS_FROM = datetime(2026, 11, 1, 0, 0, tzinfo=TIMEZONE)
 # All of 26 October (Forrest, 10:50 that morning): we were the slowest of the top seven at x2, 7,411 ahead of 4th.
-FAST_ANCHOR_TRIALS = ((datetime(2026, 10, 26, 0, 0, tzinfo=TIMEZONE), datetime(2026, 10, 27, 0, 0, tzinfo=TIMEZONE)),)
+# The night of 28 October 00:45-08:00 (Forrest): citizens post a third as much at night, so replies leave the write
+# lane half idle, while rival anchors keep Trending busy all night.
+FAST_ANCHOR_TRIALS = ((datetime(2026, 10, 26, 0, 0, tzinfo=TIMEZONE), datetime(2026, 10, 27, 0, 0, tzinfo=TIMEZONE)),
+                      (datetime(2026, 10, 28, 0, 45, tzinfo=TIMEZONE), datetime(2026, 10, 28, 8, 0, tzinfo=TIMEZONE)))
 # A day's stop: no anchor on a Sydney date written in this file (one or more, whitespace apart). The patrol writes
 # the date once that day's suspensions reach its budget (6 a day to 27 October, 9 to 31 October, none for 1-2
 # November; 69 of 200 registrations were left on 25 October). The bot can't count suspensions itself: the squad
@@ -6363,6 +6366,8 @@ async def anchor_pace_check(trials: tuple = (), fast_from: Optional[datetime] = 
             for when, gap in (((10, 25, 23, 59), ANCHOR_GAP), ((10, 26, 0, 0), FAST_ANCHOR_GAP),
                               ((10, 26, 23, 59), FAST_ANCHOR_GAP), ((10, 27, 0, 0), ANCHOR_GAP),
                               ((10, 27, 12, 0), ANCHOR_GAP), ((10, 28, 0, 0), ANCHOR_GAP),
+                              ((10, 28, 0, 45), FAST_ANCHOR_GAP), ((10, 28, 7, 59), FAST_ANCHOR_GAP),
+                              ((10, 28, 8, 0), ANCHOR_GAP),
                               ((10, 31, 23, 59), ANCHOR_GAP), ((11, 1, 0, 0), FAST_ANCHOR_GAP)):
                 assert anchor_gap(at(*when)) == gap, (when, anchor_gap(at(*when)))
         FAST_ANCHORS_FROM = datetime(2026, 10, 28, 0, 0, tzinfo=TIMEZONE)
