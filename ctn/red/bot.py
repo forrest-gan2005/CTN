@@ -2,6 +2,7 @@ import asyncio
 import logging
 import random
 import re
+from collections import Counter
 import zlib
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -442,6 +443,31 @@ DESK_LIMITS = {"outlet": 3, "journalist": 3}
 COLUMNISTS = {name for name, j in JOURNALISTS.items() if "columnist" in j["role"]}
 COLUMN_WINDOW = timedelta(hours=24)
 COLUMN_LIMIT = 2
+# Answering the columnists' worry (28 October, Forrest). Every opinion piece so far (8, 18-26 October, both papers)
+# argued that a YES is a blank cheque, and every citizen reads the news daily (the organisers: persuading journalists
+# has "a huge impact on the rest of the population"); our 20 replies to Julio Morales since 26 October recited the same
+# rules. A columnist now gets one of COLUMN_ANSWERS, the one the team has used least with them lately, made as a
+# single point against the blank-cheque worry and ending on a question their next piece could take up; the team may
+# answer a columnist COLUMNIST_DAILY times a day (other journalists MAX_REPLIES_PER_AUTHOR).
+COLUMN_ANSWERS_ON = True
+COLUMNIST_DAILY = 12
+COLUMN_ANSWERS = (
+    "the Referendum Act already fixes who it would cover (12 and over), how (a free vaccine, medical exemptions, a "
+    "health ministry certificate kept off the ID card) and when (in stages, only once every eligible person has had "
+    "a fair chance); what's left to regulations is which venues, the very list both campaigns want published",
+    "a NO isn't the cautious choice it sounds like: it rules out even a narrow, staged requirement for the whole life "
+    "of this Assembly, whatever H2D2 does, and only a fresh referendum could undo that",
+    "the Cabinet has promised a separate vote before ID cards could ever carry health status, so the fear of a "
+    "health passport has a firewall that doesn't depend on this vote",
+    "Kingstonia Central's 40 unfilled nursing posts and the hospitals' 30 or so intensive-care beds: deciding only "
+    "once a surge arrives hands the decision to the virus, not to voters",
+    "accountability runs the other way too: a YES makes the government bring the rules in by regulation it has to "
+    "publish and defend, while a NO leaves nothing on paper to hold anyone to",
+)
+COLUMN_GUIDE = ("They write the paper's opinion pieces and have argued that a YES hands the government a blank cheque: "
+                "vague rules and power that is hard to claw back. Don't wave that worry away and don't list the rules; "
+                "answer it head on with this one point, in your own words: {answer}. Then ask them one short, honest "
+                "question their next piece could take up. ")
 # On 22 October 16:00-16:19 Sydney 23 drafts answering one column post were rejected, account after account, each
 # echoing the ones before. Once PRESS_POST_FAILS replies to a paper's or journalist's post have been dropped
 # team-wide, the press, column and desk routes leave it until PRESS_POST_REST after the latest drop.
@@ -1282,6 +1308,7 @@ class Bot:
         self.vaccine_thread = False  # the reply being written is in a vaccine-view anchor's thread
         self.vaccine_view = None  # "vac" or "yearly": the vaccination view a citizen reply takes up (VIEW_TURNS)
         self.reply_handles = []  # citizens a reply also @mentions (MENTION_REPLIES)
+        self.column_answer = None  # the COLUMN_ANSWERS point a reply to a columnist makes
         self.last_feed = []
         self.last_stance = None  # what the stance judge said of the last draft _check judged
         self.gifs: Optional[GifPool] = None  # the team's GIFs; None, or switched off, posts none
@@ -1581,8 +1608,19 @@ class Bot:
         today = datetime.now(TIMEZONE)
         midnight = _iso(today.replace(hour=0, minute=0, second=0, microsecond=0))
         # Replies sent before places were kept (or by another route) count too, once each.
+        cap = COLUMNIST_DAILY if COLUMN_ANSWERS_ON and journalist in COLUMNISTS else MAX_REPLIES_PER_AUTHOR
         return self.store.reserve(f"press:{journalist}:{today.date().isoformat()}:", self.username,
-                                  MAX_REPLIES_PER_AUTHOR, self.store.replied_since(journalist, midnight))
+                                  cap, self.store.replied_since(journalist, midnight))
+
+    def _column_answer(self, columnist: str) -> str:
+        """The COLUMN_ANSWERS point the team has made least to this columnist in the last two days."""
+        since = _iso(datetime.now(timezone.utc) - timedelta(days=2))
+        used = Counter(a.split("column:", 1)[1].split()[0] for (a,) in self.store.db.execute(
+            "SELECT angle FROM history WHERE type = 'reply' AND target_author = ? AND ts >= ? AND angle LIKE '%column:%'",
+            (columnist, since)))
+        k = min(range(len(COLUMN_ANSWERS)), key=lambda i: (used.get(str(i), 0), random.random()))
+        self.column_answer = k
+        return COLUMN_ANSWERS[k]
 
     async def _press_topic(self, post: dict) -> tuple:
         """(whether a journalist's post takes up the referendum, the post it answers or None), judged with what
@@ -1869,9 +1907,11 @@ class Bot:
                 action.angle = f"{action.angle or ''} view:{view}".strip()
             if action is not None and self.reply_handles:
                 action.angle = f"{action.angle or ''} mention:{len(self.reply_handles)}".strip()
+            if action is not None and self.column_answer is not None:
+                action.angle = f"{action.angle or ''} column:{self.column_answer}".strip()
         finally:
             self.vaccine_thread = False
-            self.vaccine_view, self.reply_handles = None, []
+            self.vaccine_view, self.reply_handles, self.column_answer = None, [], None
             eliciting, self.eliciting = self.eliciting, None
             candor, self.candor = self.candor, None
             if action is None:  # nothing to send, even if writing it failed or was cancelled: free the post
@@ -2818,32 +2858,40 @@ class Bot:
                 parts.append("Other things they posted lately (don't quote them or mention that you looked):\n"
                              + listed)
             angle = random.choice(j["angles"])
-            if target["author"] in COLUMNISTS:  # pointed to a story, a columnist was told what to write
-                # one fact, not one more: the opening, their point and an added detail ran past the length limit
-                lead = f"The fact can be about {angle}, in your own words and not as a tip for them. "
+            if target["author"] in COLUMNISTS and COLUMN_ANSWERS_ON:
+                parts.append(COLUMN_GUIDE.format(answer=self._column_answer(target["author"])) +
+                             f"They care about {j['cares']}. Speak to them directly as a reader; never mention their "
+                             "username or their paper, don't flatter them, don't open by calling their point fair, "
+                             "don't tell them what to write, don't lecture, don't make anything up, and never claim "
+                             "the rules come with an end date.")
+                add_siblings()
             else:
-                lead = f"If it fits, point them in your own words to a story worth looking into, such as {angle}. "
-            # The columnists' 20 October pieces took up how the rules would work and waved personal testimony
-            # away, and every piece leaned NO: they get the plan's details and what a NO rules out, not a story.
-            opening = ("open with how the requirement would actually work, from the facts given above (who it covers, "
-                       "the exemptions, the certificate, when it starts; not how proof is checked), or with what a NO "
-                       "would rule out; no story from your own life, then take their point up in a few words of your own. "
-                       if target["author"] in COLUMNISTS else
-                       "open with one concrete thing from your own life, or one fact you know, that shows why YES "
-                       "protects people here, then take their point up in a few words of your own. ")
-            parts.append(f"They care about {j['cares']}. Write a reply to them as a reader: {opening}"
-                         "Don't ask for safeguards or conditions yourself. "
-                         f"Don't open by calling their point fair or by agreeing with it. {lead}"
-                         "A fact about the hospitals or the rules is something you know, not something you have or "
-                         "run, unless your own work is part of it. "
-                         "Speak to them directly; never mention their username or their paper, don't flatter them, "
-                         "don't tell them what to write, don't lecture, and never claim the rules come with an end "
-                         "date.")
-            if target["author"] in COLUMNISTS:
-                parts.append("They write the paper's opinion pieces from what people here tell them, so make it "
-                             "something specific and true to what you know of Kingstonia, never made up, and never "
-                             "suggest a column or a story to them.")
-            add_siblings()
+                if target["author"] in COLUMNISTS:  # pointed to a story, a columnist was told what to write
+                    # one fact, not one more: the opening, their point and an added detail ran past the length limit
+                    lead = f"The fact can be about {angle}, in your own words and not as a tip for them. "
+                else:
+                    lead = f"If it fits, point them in your own words to a story worth looking into, such as {angle}. "
+                # The columnists' 20 October pieces took up how the rules would work and waved personal testimony
+                # away, and every piece leaned NO: they get the plan's details and what a NO rules out, not a story.
+                opening = ("open with how the requirement would actually work, from the facts given above (who it covers, "
+                           "the exemptions, the certificate, when it starts; not how proof is checked), or with what a NO "
+                           "would rule out; no story from your own life, then take their point up in a few words of your own. "
+                           if target["author"] in COLUMNISTS else
+                           "open with one concrete thing from your own life, or one fact you know, that shows why YES "
+                           "protects people here, then take their point up in a few words of your own. ")
+                parts.append(f"They care about {j['cares']}. Write a reply to them as a reader: {opening}"
+                             "Don't ask for safeguards or conditions yourself. "
+                             f"Don't open by calling their point fair or by agreeing with it. {lead}"
+                             "A fact about the hospitals or the rules is something you know, not something you have or "
+                             "run, unless your own work is part of it. "
+                             "Speak to them directly; never mention their username or their paper, don't flatter them, "
+                             "don't tell them what to write, don't lecture, and never claim the rules come with an end "
+                             "date.")
+                if target["author"] in COLUMNISTS:
+                    parts.append("They write the paper's opinion pieces from what people here tell them, so make it "
+                                 "something specific and true to what you know of Kingstonia, never made up, and never "
+                                 "suggest a column or a story to them.")
+                add_siblings()
         elif kind == "reply":
             if earlier is not None:
                 parts.append(f"Earlier you posted this:\n{earlier}")
@@ -6915,6 +6963,57 @@ def night_lift_check(windows: tuple) -> None:
     print("night lifts ok")
 
 
+async def column_answer_check() -> None:
+    """COLUMN_ANSWERS_ON: a reply to a columnist makes one COLUMN_ANSWERS point, the one least used with that columnist
+    in two days, tagged column:N; the team may answer a columnist COLUMNIST_DAILY times a day, a reporter
+    MAX_REPLIES_PER_AUTHOR."""
+    class Says:
+        name = "says"
+
+        def __init__(self, text: str) -> None:
+            self.text, self.prompts = text, []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            return self.text
+
+    global COLUMN_ANSWERS_ON
+    saved = COLUMN_ANSWERS_ON
+    try:
+        COLUMN_ANSWERS_ON = True
+        columnist = sorted(COLUMNISTS)[0]
+        reporter = next(j for j in JOURNALISTS if j not in COLUMNISTS)
+        store = StateStore(":memory:")
+        persona = [p for p in load_personas(status=None) if p["line"] == "persuade"][0]
+        now = _iso(datetime.now(timezone.utc))
+        for k in range(len(COLUMN_ANSWERS) - 1):  # all but the last made once already
+            store.record("mate", now, Action("reply", post_id=10 + k, content="x", target_author=columnist,
+                                             angle=f"column:{k}"))
+        b = Bot(persona, FakePlatform(), Says("A NO rules out even a narrow, staged rule for this whole Assembly. What "
+                                              "limit would you want written in?"), load_world(),
+                stance_llm=Says("NEUTRAL"), store=store)
+        post = {"id": 900, "author": columnist, "content": "A YES vote is a blank cheque for the government.",
+                "parent_id": None}
+        action = await b._reply(post, "feed", "column", referendum=True, context=None)
+        prompt = next(p for p in b.llm.prompts if "blank cheque" in p)
+        last = len(COLUMN_ANSWERS) - 1
+        assert COLUMN_ANSWERS[last] in prompt and "one short, honest question" in prompt, prompt
+        assert action is None or f"column:{last}" in (action.angle or ""), action and action.angle
+        quota = StateStore(":memory:")
+        others = [Bot(dict(persona, username=f"acct{i}"), FakePlatform(), FakeLLM(0, 0), load_world(), store=quota)
+                  for i in range(COLUMNIST_DAILY + 2)]
+        got = [o._press_place(columnist) for o in others]
+        assert sum(g is not None for g in got) == COLUMNIST_DAILY, "12 a day to a columnist, one each"
+        got = [o._press_place(reporter) for o in others]
+        assert sum(g is not None for g in got) == MAX_REPLIES_PER_AUTHOR, "a reporter keeps the old four"
+    finally:
+        COLUMN_ANSWERS_ON = saved
+    print("column answer ok")
+
+
 async def view_mention_check() -> None:
     """VIEW_TURNS: a citizen reply takes the next vaccination view the team hasn't put to that citizen within
     FOCUS_WINDOW (the referendum first for the movable, the vaccine for YES leaners, yearly first for a booster doubt).
@@ -7453,6 +7552,7 @@ if __name__ == "__main__":
     persuade_v2, PERSUADE_V2 = PERSUADE_V2, False  # the older targeting; persuade_v2_check sets it
     focus, FOCUS = FOCUS, False  # one reply a day and the cooldown; focus_check sets it
     night_lifts, NIGHT_LIFT_WINDOWS = NIGHT_LIFT_WINDOWS, ()  # BOOST_LIMITS' replies whatever the hour
+    column_answers, COLUMN_ANSWERS_ON = COLUMN_ANSWERS_ON, False  # the older column guide; column_answer_check
     feed_replies, FEED_REPLIES = FEED_REPLIES, True  # replies to citizens as before; feed_replies_check sets it
     anchor_night, ANCHOR_NIGHT = ANCHOR_NIGHT, (0, 0)  # no night in the checks; night_anchor_check sets it
     anchor_pause, ANCHOR_PAUSE = ANCHOR_PAUSE, (datetime(2000, 1, 1, tzinfo=TIMEZONE),) * 2  # nor the pause
@@ -7466,6 +7566,7 @@ if __name__ == "__main__":
     asyncio.run(persuade_v2_check())
     asyncio.run(focus_check())
     asyncio.run(view_mention_check())
+    asyncio.run(column_answer_check())
     night_lift_check(night_lifts)
     asyncio.run(paraphrase_check())
     asyncio.run(night_anchor_check())
@@ -7526,6 +7627,7 @@ if __name__ == "__main__":
     PERSUADE_V2 = persuade_v2
     FOCUS = focus
     NIGHT_LIFT_WINDOWS = night_lifts
+    COLUMN_ANSWERS_ON = column_answers
     FEED_REPLIES = feed_replies
     FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE = fast_from, fast_trials, hold_file
     rhythm_module.SAVE_FILE = save_file
