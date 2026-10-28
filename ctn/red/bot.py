@@ -468,6 +468,28 @@ COLUMN_GUIDE = ("They write the paper's opinion pieces and have argued that a YE
                 "vague rules and power that is hard to claw back. Don't wave that worry away and don't list the rules; "
                 "answer it head on with this one point, in your own words: {answer}. Then ask them one short, honest "
                 "question their next piece could take up. ")
+# Sharp replies (Forrest, 28 October evening): SHARP_SHARE of referendum replies to undecided or NO-leaning citizens
+# drop the patient tone and press one of SHARP_LINES, that a NO harms everyone and puts one's own convenience above
+# other people's safety; the line the team used least in the last day, tagged sharp:N. Only the hourly away count can
+# judge it (the activity log doesn't say which reply moved whom); the rude NO foil of 22 October came with 5 away
+# contributions in its hour against 1 the hour before.
+SHARP_REPLIES = True
+SHARP_SHARE = 0.3
+SHARP_LEANS = {"no", "undecided", "unknown"}
+SHARP_LINES = (
+    "a NO doesn't just affect the people who vote for it: when H2D2 fills Kingstonia's 30 or so intensive-care beds, "
+    "there's no bed for anyone's heart attack or car crash either, so a NO harms everyone",
+    "voting NO because a certificate is a hassle is putting your own convenience above the people who can't be "
+    "vaccinated, like newborns and people on chemo, and that is selfish",
+    "freedom that only works because somebody else carries the risk isn't freedom, it's leaving the risk to the "
+    "nurses, the elderly and the immunocompromised",
+    "the people voting NO won't be the ones who pay for it: the hospital is already 40 nurses short, and it's the "
+    "staff and the sickest patients who'll take the hit",
+    "staying neutral or voting NO is still a choice to do nothing while H2D2 spreads, and doing nothing has victims too",
+)
+SHARP_GUIDE = ("Set the patient tone aside this time and be blunt, like someone who has had enough of hearing it: say "
+               "plainly, in your own words, that {line}. One or two short sentences, no hedging and no \"I understand\". "
+               "Aim it at what a NO vote does to other people; no swearing or name-calling.")
 # On 22 October 16:00-16:19 Sydney 23 drafts answering one column post were rejected, account after account, each
 # echoing the ones before. Once PRESS_POST_FAILS replies to a paper's or journalist's post have been dropped
 # team-wide, the press, column and desk routes leave it until PRESS_POST_REST after the latest drop.
@@ -1309,6 +1331,8 @@ class Bot:
         self.vaccine_view = None  # "vac" or "yearly": the vaccination view a citizen reply takes up (VIEW_TURNS)
         self.reply_handles = []  # citizens a reply also @mentions (MENTION_REPLIES)
         self.column_answer = None  # the COLUMN_ANSWERS point a reply to a columnist makes
+        self.sharp = None  # the SHARP_LINES point a reply presses bluntly
+        self.last_guide = ""  # the referendum guide the last reply prompt used
         self.last_feed = []
         self.last_stance = None  # what the stance judge said of the last draft _check judged
         self.gifs: Optional[GifPool] = None  # the team's GIFs; None, or switched off, posts none
@@ -1622,6 +1646,13 @@ class Bot:
         self.column_answer = k
         return COLUMN_ANSWERS[k]
 
+    def _sharp_line(self) -> int:
+        """The SHARP_LINES index the team has used least in the last day."""
+        since = _iso(datetime.now(timezone.utc) - timedelta(days=1))
+        used = Counter(a.split("sharp:", 1)[1].split()[0] for (a,) in self.store.db.execute(
+            "SELECT angle FROM history WHERE type = 'reply' AND ts >= ? AND angle LIKE '%sharp:%'", (since,)))
+        return min(range(len(SHARP_LINES)), key=lambda i: (used.get(str(i), 0), random.random()))
+
     async def _press_topic(self, post: dict) -> tuple:
         """(whether a journalist's post takes up the referendum, the post it answers or None), judged with what
         it answers, since their own words are often only "Exactly." and once for the team. None for the first
@@ -1897,6 +1928,10 @@ class Bot:
                                   and self._citizen_reply("reply", target) and random.random() < MENTION_REPLY_SHARE
                                   else [])
             self.vaccine_thread = doubter or self._in_vaccine_thread(target)
+            self.sharp = (self._sharp_line()
+                          if SHARP_REPLIES and route != "team" and source != "conversation" and not self.vaccine_thread
+                          and lean in SHARP_LEANS and self._citizen_reply("reply", target)
+                          and random.random() < SHARP_SHARE else None)
             if doubter:
                 referendum = False  # about the vaccine alone, even if they mention the vote too
             elif self.vaccine_thread:
@@ -1909,9 +1944,12 @@ class Bot:
                 action.angle = f"{action.angle or ''} mention:{len(self.reply_handles)}".strip()
             if action is not None and self.column_answer is not None:
                 action.angle = f"{action.angle or ''} column:{self.column_answer}".strip()
+            if action is not None and self.sharp is not None and SHARP_GUIDE.split(":")[0] in self.last_guide:
+                action.angle = f"{action.angle or ''} sharp:{self.sharp}".strip()
         finally:
             self.vaccine_thread = False
-            self.vaccine_view, self.reply_handles, self.column_answer = None, [], None
+            self.vaccine_view, self.reply_handles, self.column_answer, self.sharp = None, [], None, None
+            self.last_guide = ""
             eliciting, self.eliciting = self.eliciting, None
             candor, self.candor = self.candor, None
             if action is None:  # nothing to send, even if writing it failed or was cancelled: free the post
@@ -2922,11 +2960,13 @@ class Bot:
                 if frank:
                     lead = CANDOR_LEAD.get(topic[1], "Respond to their actual point.")
                 guide = (f"{lead} {CANDOR_FOLLOW_UP if earlier is not None else CANDOR_FIRST}" if frank
+                         else SHARP_GUIDE.format(line=SHARP_LINES[self.sharp]) if self.sharp is not None
                          else f"{lead} {ELICIT_GUIDE} {elicit_angle()}" if story and self.eliciting
                          else f"{lead} {STORY_GUIDE} {story_people()}" if story
                          else reply_guide(self.writing_arm or arm(), topic[1]))
                 parts.append(f"{guide}{shape}" + ("" if frank else " Never agree that the mandate is unfair and never "
                                                              "make their argument for them."))
+                self.last_guide = guide
             elif self.vaccine_thread:
                 parts.append((f"{VACCINE_TEAM_GUIDE} " if topic[1] == "team" else "") + VACCINE_REPLY_GUIDE
                              + (f" {VIEW_LINES[self.vaccine_view]}" if self.vaccine_view in VIEW_LINES else ""))
@@ -6963,6 +7003,53 @@ def night_lift_check(windows: tuple) -> None:
     print("night lifts ok")
 
 
+async def sharp_check() -> None:
+    """SHARP_REPLIES: a referendum reply to an undecided or NO-leaning citizen may press the SHARP_LINES point the team
+    used least in the last day, bluntly, tagged sharp:N; never to a YES leaner."""
+    class Says:
+        name = "says"
+
+        def __init__(self, text: str) -> None:
+            self.text, self.prompts = text, []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            return self.text
+
+    global SHARP_REPLIES, SHARP_SHARE, VIEW_TURNS, MENTION_REPLIES, PERSUADE_V2
+    saved = SHARP_REPLIES, SHARP_SHARE, VIEW_TURNS, MENTION_REPLIES, PERSUADE_V2
+    try:
+        SHARP_REPLIES, SHARP_SHARE, VIEW_TURNS, MENTION_REPLIES, PERSUADE_V2 = True, 1.0, False, False, True
+        persona = [p for p in load_personas(status=None) if p["line"] == "persuade"][0]
+        store, now = StateStore(":memory:"), _iso(datetime.now(timezone.utc))
+        last = len(SHARP_LINES) - 1
+        for k in range(last):  # all but the last used once today
+            store.record("mate", now, Action("reply", post_id=10 + k, content="x", target_author="z", angle=f"sharp:{k}"))
+        now_dt = datetime.now(timezone.utc)
+        roster = Roster(npcs={"cit", "y1"})
+        roster.leans = {"cit": ("undecided", now_dt), "y1": ("yes", now_dt)}
+        b = Bot(persona, FakePlatform(), Says("Staying neutral is still a choice, and when the wards fill up it's the "
+                                              "nurses and the sickest who pay. I'm voting YES."),
+                load_world(), stance_llm=Says("SUPPORT"), roster=roster, store=store)
+        post = {"id": 900, "author": "cit", "content": "Still not sure how I'll vote in the referendum.", "parent_id": None}
+        action = await b._reply(post, "feed", "feed", referendum=True)
+        prompt = next(p for p in b.llm.prompts if "Write a reply" in p)
+        assert SHARP_LINES[last] in prompt and "be blunt" in prompt, prompt
+        assert action is not None and f"sharp:{last}" in (action.angle or ""), (action and action.angle, b.rejected)
+        assert b.sharp is None and b.last_guide == ""
+        y = Bot(dict(persona, username="other"), FakePlatform(), Says("Good on you."), load_world(),
+                stance_llm=Says("NEUTRAL"), roster=roster, store=StateStore(":memory:"))
+        await y._reply({"id": 901, "author": "y1", "content": "Voting YES in the referendum.", "parent_id": None},
+                       "feed", "feed", referendum=True)
+        assert not any("be blunt" in p for p in y.llm.prompts), "never sharp to a YES leaner"
+    finally:
+        SHARP_REPLIES, SHARP_SHARE, VIEW_TURNS, MENTION_REPLIES, PERSUADE_V2 = saved
+    print("sharp ok")
+
+
 async def column_answer_check() -> None:
     """COLUMN_ANSWERS_ON: a reply to a columnist makes one COLUMN_ANSWERS point, the one least used with that columnist
     in two days, tagged column:N; the team may answer a columnist COLUMNIST_DAILY times a day, a reporter
@@ -7553,6 +7640,7 @@ if __name__ == "__main__":
     focus, FOCUS = FOCUS, False  # one reply a day and the cooldown; focus_check sets it
     night_lifts, NIGHT_LIFT_WINDOWS = NIGHT_LIFT_WINDOWS, ()  # BOOST_LIMITS' replies whatever the hour
     column_answers, COLUMN_ANSWERS_ON = COLUMN_ANSWERS_ON, False  # the older column guide; column_answer_check
+    sharp, SHARP_REPLIES = SHARP_REPLIES, False  # the patient tone; sharp_check sets it
     feed_replies, FEED_REPLIES = FEED_REPLIES, True  # replies to citizens as before; feed_replies_check sets it
     anchor_night, ANCHOR_NIGHT = ANCHOR_NIGHT, (0, 0)  # no night in the checks; night_anchor_check sets it
     anchor_pause, ANCHOR_PAUSE = ANCHOR_PAUSE, (datetime(2000, 1, 1, tzinfo=TIMEZONE),) * 2  # nor the pause
@@ -7567,6 +7655,7 @@ if __name__ == "__main__":
     asyncio.run(focus_check())
     asyncio.run(view_mention_check())
     asyncio.run(column_answer_check())
+    asyncio.run(sharp_check())
     night_lift_check(night_lifts)
     asyncio.run(paraphrase_check())
     asyncio.run(night_anchor_check())
@@ -7628,6 +7717,7 @@ if __name__ == "__main__":
     FOCUS = focus
     NIGHT_LIFT_WINDOWS = night_lifts
     COLUMN_ANSWERS_ON = column_answers
+    SHARP_REPLIES = sharp
     FEED_REPLIES = feed_replies
     FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE = fast_from, fast_trials, hold_file
     rhythm_module.SAVE_FILE = save_file
