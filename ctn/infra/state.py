@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 from collections import Counter
 from datetime import date, datetime, time, timezone
@@ -363,6 +364,15 @@ class StateStore:
             "SELECT username, content FROM history WHERE type IN ('post', 'reply') AND ts >= ? AND username != ? "
             "AND content IS NOT NULL UNION ALL SELECT username, content FROM writes WHERE sent_at >= ? "
             "AND username != ? AND status IN ('sending', 'pending')", (since, exclude, since, exclude)).fetchall()
+
+    def views_put(self, author: str, since: str) -> set:
+        """The vaccination views ("ref", "vac", "yearly") the team's replies put to `author` since UTC ISO `since`, by
+        the replies' view: tags."""
+        out = set()
+        for (angle,) in self.db.execute("SELECT angle FROM history WHERE type = 'reply' AND target_author = ? AND ts >= ? "
+                                        "AND angle LIKE '%view:%'", (author, since)):
+            out.update(m.group(1) for m in re.finditer(r"\bview:(\w+)", angle or ""))
+        return out
 
     def mention_texts(self, since: str) -> list:
         """Texts of the team's posts and replies with an @ in them since UTC ISO time `since`, counting ones still

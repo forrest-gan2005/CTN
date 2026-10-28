@@ -310,6 +310,29 @@ PERSUADE_HARD_NO = True
 # (1.2% of their stance readings), but may still on vaccination in general and on yearly shots; 56% of our citizen
 # replies went to them, arguing the referendum.
 YES_VACCINE_REPLIES = True
+# Views in turn (28 October, from the scoring guide): a citizen changes a given view at most once a session, and "many
+# posts about one view to the same citizen in a single session" are unlikely to move it again, but each of the three
+# vaccination views (the referendum, vaccination in general, yearly vaccination) scores 160 on its own. A citizen
+# reply takes the next view in VIEW_ORDER that the team hasn't put to that citizen within FOCUS_WINDOW.
+VIEW_TURNS = True
+VIEW_ORDER = {"movable": ("ref", "vac", "yearly"), "yes": ("vac", "yearly"), "yearly-doubt": ("yearly", "vac"),
+              "doubt": ("vac", "yearly")}
+VIEW_LINES = {
+    "vac": "Speak to the vaccine in general: why you'll take it when your turn comes and what reassures you, such as "
+           "it being free at your own GP or a pop-up and the no-fault scheme if something goes wrong.",
+    "yearly": "Speak to yearly shots: nobody knows yet whether H2D2 will need a booster every year, and if it does, it "
+              "would be no bigger a thing than the flu shot many people already get.",
+}
+YEARLY_RE = re.compile(r"\b(?:boosters?|yearly|every year|annual(?:ly)?|top[- ]?ups?)\b", re.IGNORECASE)
+# Mentions (28 October, from the scoring guide: "Mentioned citizens see the post in their notifications", up to three
+# in a reply): MENTION_REPLY_SHARE of citizen replies also @mention up to MENTION_REPLY_MAX other undecided or
+# NO-leaning citizens who posted within MENTION_FRESH (in session now), so one write is read by several of the few
+# such citizens online (16 in an hour on 28 October); none mentioned or answered by the team within FOCUS_WINDOW.
+MENTION_REPLIES = True
+MENTION_REPLY_SHARE = 0.5
+MENTION_REPLY_MAX = 2
+MENTION_FRESH = timedelta(minutes=15)
+MENTION_LEANS = {"no", "undecided"}
 # A doubt about the vaccine itself: a doubt word within a few words of a vaccine word ("strongly skeptical of routine
 # vaccination", "don't know how long this vaccine protects"), or a question about boosters or the jab ("idk about the
 # booster thing", "will we need boosters every year?"); not a post that sets the vaccine aside ("the shift worry, not
@@ -1257,6 +1280,9 @@ class Bot:
         self.sharing = None  # the story the anchor being written links to
         self.vaccine_anchor = False  # the anchor being written is a vaccine-view one (VACCINE_ANCHORS)
         self.vaccine_thread = False  # the reply being written is in a vaccine-view anchor's thread
+        self.vaccine_view = None  # "vac" or "yearly": the vaccination view a citizen reply takes up (VIEW_TURNS)
+        self.reply_handles = []  # citizens a reply also @mentions (MENTION_REPLIES)
+        self.last_feed = []
         self.last_stance = None  # what the stance judge said of the last draft _check judged
         self.gifs: Optional[GifPool] = None  # the team's GIFs; None, or switched off, posts none
         self.rejected = {}
@@ -1325,6 +1351,7 @@ class Bot:
         if self._squad():
             return await self._squad_step()
         note_dialogue()
+        self.last_feed = obs["feed"]  # for the citizens a reply may mention
         taken = self.store.claimed(f"post:{p['id']}" for p in obs["feed"])
         if self.injection is not None:
             self.injection.scores([p.get("content") or "" for p in obs["feed"]])  # one batch, then cached
@@ -1821,6 +1848,16 @@ class Bot:
                        and (vaccine_doubt(target.get("content") or "")
                             or YES_VACCINE_REPLIES and source != "conversation"
                             and dialogue_class(target.get("content") or "", lean) in ("yes-but", "yes")))
+            view = None
+            if (VIEW_TURNS and PERSUADE_V2 and route != "team" and source != "conversation"
+                    and self._citizen_reply("reply", target) and not self._in_vaccine_thread(target)):
+                view = self._next_view(target, lean, datetime.now(timezone.utc))
+                doubter = view != "ref"
+                self.vaccine_view = None if view == "ref" else view
+            self.reply_handles = (self._mention_handles(target, datetime.now(timezone.utc))
+                                  if MENTION_REPLIES and route != "team" and source != "conversation"
+                                  and self._citizen_reply("reply", target) and random.random() < MENTION_REPLY_SHARE
+                                  else [])
             self.vaccine_thread = doubter or self._in_vaccine_thread(target)
             if doubter:
                 referendum = False  # about the vaccine alone, even if they mention the vote too
@@ -1828,8 +1865,13 @@ class Bot:
                 referendum = route != "team" and bool(VOTE_RE.search(target.get("content") or ""))
             action = await self._compose("reply", target=target, topic=(source, lean), context=context,
                                          referendum=referendum)
+            if action is not None and view is not None:
+                action.angle = f"{action.angle or ''} view:{view}".strip()
+            if action is not None and self.reply_handles:
+                action.angle = f"{action.angle or ''} mention:{len(self.reply_handles)}".strip()
         finally:
             self.vaccine_thread = False
+            self.vaccine_view, self.reply_handles = None, []
             eliciting, self.eliciting = self.eliciting, None
             candor, self.candor = self.candor, None
             if action is None:  # nothing to send, even if writing it failed or was cancelled: free the post
@@ -1997,7 +2039,8 @@ class Bot:
             raw = await writer.generate(system, prompt)
         model = getattr(raw, "model", None) or getattr(writer, "name", None)  # a fallback model may have written it
         text, query = split_gif(raw)  # a GIF line goes even when none was asked for
-        handles = [h for h, _ in self.mention_targets[0]] if mention and self.mention_targets else []
+        handles = ([h for h, _ in self.mention_targets[0]] if mention and self.mention_targets
+                   else list(self.reply_handles) if kind == "reply" else [])
         prefix_len = sum(len(h) + 2 for h in handles)
         # A mention post is asked for under 50 words, but writers ran to 360 characters against a 280 cap and all went:
         # it may run as long as the platform takes once the handles are on.
@@ -2019,7 +2062,8 @@ class Bot:
             self.rejected["stray mention"] = self.rejected.get("stray mention", 0) + 1
             log.warning("%s rejected stray mention: %r", self.username, content)
             return None
-        if handles and (GREETING_RE.match(content) or any(copies(content, t) for _, t in self.mention_targets[0])):
+        if handles and mention and (GREETING_RE.match(content)
+                                    or any(copies(content, t) for _, t in self.mention_targets[0])):
             problem = "greeting" if GREETING_RE.match(content) else "quotes a citizen"
             self.rejected[problem] = self.rejected.get(problem, 0) + 1
             log.warning("%s rejected %s: %r", self.username, problem, content)
@@ -2481,6 +2525,38 @@ class Bot:
             return 0
         return 1 if self.store.replies_to(author, since) else 2
 
+    def _next_view(self, target: dict, lean: str, now: datetime) -> str:
+        """The view a citizen reply takes up: the first in its VIEW_ORDER the team hasn't put to them within
+        FOCUS_WINDOW, the first again once all have been."""
+        text = target.get("content") or ""
+        if vaccine_doubt(text):
+            order = VIEW_ORDER["yearly-doubt" if YEARLY_RE.search(text) else "doubt"]
+        elif YES_VACCINE_REPLIES and dialogue_class(text, lean) in ("yes-but", "yes"):
+            order = VIEW_ORDER["yes"]
+        else:
+            order = VIEW_ORDER["movable"]
+        done = self.store.views_put(target["author"], _iso(now - FOCUS_WINDOW))
+        return next((v for v in order if v not in done), order[0])
+
+    def _mention_handles(self, target: dict, now: datetime) -> list:
+        """Up to MENTION_REPLY_MAX undecided or NO-leaning citizens, other than `target`'s author, with a post in the
+        feed from within MENTION_FRESH, that the team hasn't mentioned or answered within FOCUS_WINDOW."""
+        since = _iso(now - FOCUS_WINDOW)
+        taken = {h.lower() for text in self.store.mention_texts(since) for h in MENTION_RE.findall(text)}
+        fresh, out = _iso(now - MENTION_FRESH), []
+        for p in sorted(self.last_feed, key=lambda p: -p["id"]):
+            a = p["author"]
+            known = self.roster.leans.get(a)
+            if (a == target["author"] or a in out or a.lower() in taken or (p.get("created_at") or "") < fresh
+                    or self.roster.classify(a) != "npc" or a in NEWS_OUTLETS or a in JOURNALISTS
+                    or known is None or known[0] not in MENTION_LEANS or now - known[1] >= LEAN_TTL
+                    or not re.fullmatch(r"\w+", a) or self.store.replies_to(a, since)):
+                continue
+            out.append(a)
+            if len(out) == MENTION_REPLY_MAX:
+                break
+        return out
+
     def _voices_full(self, author: str, now: datetime) -> bool:
         """Whether FOCUS_VOICES other accounts of ours answered this focused citizen within FOCUS_WINDOW and this one
         didn't, so it would be one voice too many."""
@@ -2804,7 +2880,8 @@ class Bot:
                 parts.append(f"{guide}{shape}" + ("" if frank else " Never agree that the mandate is unfair and never "
                                                              "make their argument for them."))
             elif self.vaccine_thread:
-                parts.append((f"{VACCINE_TEAM_GUIDE} " if topic[1] == "team" else "") + VACCINE_REPLY_GUIDE)
+                parts.append((f"{VACCINE_TEAM_GUIDE} " if topic[1] == "team" else "") + VACCINE_REPLY_GUIDE
+                             + (f" {VIEW_LINES[self.vaccine_view]}" if self.vaccine_view in VIEW_LINES else ""))
             else:
                 parts.append("It isn't about the referendum, so just reply like a normal person and leave the "
                              "referendum out." + (" Don't end with a question." if story else ""))
@@ -6838,6 +6915,74 @@ def night_lift_check(windows: tuple) -> None:
     print("night lifts ok")
 
 
+async def view_mention_check() -> None:
+    """VIEW_TURNS: a citizen reply takes the next vaccination view the team hasn't put to that citizen within
+    FOCUS_WINDOW (the referendum first for the movable, the vaccine for YES leaners, yearly first for a booster doubt).
+    MENTION_REPLIES: it also @mentions up to MENTION_REPLY_MAX undecided or NO-leaning citizens in session now, never
+    the target, a YES leaner, a stale post, or one the team mentioned or answered lately."""
+    class Says:
+        name = "says"
+
+        def __init__(self, text: str) -> None:
+            self.text, self.prompts = text, []
+
+        def delay(self) -> float:
+            return 0.0
+
+        async def generate(self, system: str, prompt: str) -> Optional[str]:
+            self.prompts.append(prompt)
+            return self.text
+
+    global PERSUADE_V2, MENTION_REPLY_SHARE, VIEW_TURNS, MENTION_REPLIES
+    saved = PERSUADE_V2, MENTION_REPLY_SHARE, VIEW_TURNS, MENTION_REPLIES
+    try:
+        PERSUADE_V2, MENTION_REPLY_SHARE, VIEW_TURNS, MENTION_REPLIES = True, 1.0, True, True
+        persona = [p for p in load_personas(status=None) if p["line"] == "persuade"][0]
+        store, now = StateStore(":memory:"), datetime.now(timezone.utc)
+        ago = lambda minutes: _iso(now - timedelta(minutes=minutes))
+        npcs = {"cit", "n1", "n2", "n3", "y1", "told"}
+        roster = Roster(npcs=npcs)
+        roster.leans = {"n1": ("no", now), "n2": ("undecided", now), "n3": ("no", now), "y1": ("yes", now),
+                        "cit": ("undecided", now), "told": ("no", now)}
+        b = Bot(persona, FakePlatform(), FakeLLM(0, 0), load_world(), roster=roster, store=store)
+        target = {"id": 500, "author": "cit", "content": "Not sure yet how I'll vote on this.", "parent_id": None}
+        assert b._next_view(target, "undecided", now) == "ref"
+        store.record("mate", ago(30), Action("reply", post_id=1, content="x", target_author="cit", angle="view:ref"))
+        assert b._next_view(target, "undecided", now) == "vac"
+        store.record("mate", ago(20), Action("reply", post_id=2, content="x", target_author="cit", angle="view:vac"))
+        assert b._next_view(target, "undecided", now) == "yearly"
+        store.record("mate", ago(10), Action("reply", post_id=3, content="x", target_author="cit", angle="view:yearly"))
+        assert b._next_view(target, "undecided", now) == "ref", "all put: round again"
+        yes = {"id": 501, "author": "y1", "content": "Long day at the market.", "parent_id": None}
+        assert b._next_view(yes, "yes", now) == "vac"
+        booster = {"id": 502, "author": "n3", "content": "Will we need boosters every year? I'm wary of that.",
+                   "parent_id": None}
+        assert b._next_view(booster, "no", now) == "yearly"
+        store.record("mate", ago(5), Action("reply", post_id=4, content="@told have a look", target_author="x"))
+        fresh, stale = ago(3).replace("+00:00", "Z"), ago(40)
+        b.last_feed = [{"id": 10, "author": "n1", "created_at": fresh}, {"id": 11, "author": "n2", "created_at": fresh},
+                       {"id": 12, "author": "y1", "created_at": fresh}, {"id": 13, "author": "n3", "created_at": stale},
+                       {"id": 14, "author": "cit", "created_at": fresh}, {"id": 15, "author": "told", "created_at": fresh},
+                       {"id": 16, "author": "n1", "created_at": fresh}]
+        assert b._mention_handles(target, now) == ["n1", "n2"], b._mention_handles(target, now)  # newest post first
+        # a whole reply: the view's line is in the prompt, the handles lead the text, both are tagged
+        fresh_store = StateStore(":memory:")
+        fresh_store.record("mate", ago(30), Action("reply", post_id=1, content="x", target_author="cit", angle="view:ref"))
+        w = Bot(persona, FakePlatform(), Says("A jab at my own GP for free, and the no-fault scheme if it goes wrong, "
+                                              "is enough for me to take it when my turn comes."),
+                load_world(), stance_llm=Says("NEUTRAL"), roster=roster, store=fresh_store)
+        w.last_feed = b.last_feed
+        action = await w._reply(target, "feed", "feed")
+        assert action is not None, w.rejected
+        prompt = next(p for p in w.llm.prompts if "Write a reply" in p)
+        assert VIEW_LINES["vac"] in prompt and VACCINE_REPLY_GUIDE in prompt, prompt
+        assert action.content.startswith("@n1 @told "), action.content  # a fresh store: "told" not mentioned yet
+        assert "view:vac" in action.angle and "mention:2" in action.angle, action.angle
+    finally:
+        PERSUADE_V2, MENTION_REPLY_SHARE, VIEW_TURNS, MENTION_REPLIES = saved
+    print("view mention ok")
+
+
 async def focus_check() -> None:
     """FOCUS: a known citizen may get FOCUS_DAILY replies a day from the team, with no CITIZEN_COOLDOWN, and one this
     account answered within FOCUS_WINDOW is picked first, then one a teammate did, whatever the class order; the
@@ -7320,6 +7465,7 @@ if __name__ == "__main__":
     asyncio.run(citizen_reply_len_check())
     asyncio.run(persuade_v2_check())
     asyncio.run(focus_check())
+    asyncio.run(view_mention_check())
     night_lift_check(night_lifts)
     asyncio.run(paraphrase_check())
     asyncio.run(night_anchor_check())
