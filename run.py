@@ -2131,6 +2131,8 @@ if __name__ == "__main__":
         bot_module.FOCUS = False  # one reply a day as these were written for; focus_feed_check sets it
         bot_module.NPC_ONLY_REPLIES, bot_module.PERSUADE_V2 = False, False  # an empty feed still writes a post
         bot_module.CITIZEN_DAILY_REPLIES = bot_module.MAX_REPLIES_PER_AUTHOR
+        checks = bot_module.SHARED_PHRASE_CHECK, bot_module.SIMILAR_CHECK
+        bot_module.SHARED_PHRASE_CHECK = bot_module.SIMILAR_CHECK = True  # shared_phrase_race_check tests them
         log_file_check()
         schedule_check()
         registered_check()
@@ -2152,6 +2154,7 @@ if __name__ == "__main__":
         asyncio.run(examples_check())
         (bot_module.CITIZEN_TARGETING, bot_module.STORY_REPLIES, bot_module.CITIZEN_DAILY_REPLIES,
          bot_module.NPC_ONLY_REPLIES, bot_module.PERSUADE_V2, bot_module.FOCUS) = pinned
+        bot_module.SHARED_PHRASE_CHECK, bot_module.SIMILAR_CHECK = checks
         asyncio.run(smoke())
     else:
         asyncio.run(rehearse(args.seconds, args.real))

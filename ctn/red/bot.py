@@ -392,6 +392,13 @@ SHARED_WINDOW = timedelta(days=1)  # a phrase SHARED_LIMIT teammates used this r
 PARAPHRASE_CHECK = False
 # 6 from 27 October (Forrest: looser checks; they will be reported regardless), was 4.
 SHARED_LIMIT = 6
+# Off from 29 October 01:00 (Forrest: dropped drafts are paid for): in the two hours to then the team-wide shared
+# phrase check sank 202 drafts and the closeness check (`_too_similar`) 27, against ~60 replies sent an hour. With these
+# off a draft is refused only as a near-repeat of the account's own post (REPEAT_LIMIT) or for a phrase a teammate
+# already used under the same post (`_sibling_phrase`: side by side in one thread, 11 in those two hours).
+SHARED_PHRASE_CHECK = False
+SIMILAR_CHECK = False
+REPEAT_LIMIT = 0.9
 COMMON_ACCOUNTS = 5  # a phrase this many other accounts used lately is how people here talk, not a tell of ours
 MAX_REPLIES_PER_AUTHOR = 4  # team-wide per 24h: no ping-pong with competitor bots, no crowding one citizen
 # Our first reply to a citizen drew agreement 29% of the time, later ones 12% (19-22 October), and citizens log in
@@ -2178,7 +2185,7 @@ class Bot:
                 if avoid:
                     self.last_shared = avoid.group(0)  # drafted again, told to leave it out
                 return None
-        if self._too_similar(content, examples):
+        if self._too_similar(content, examples) if SIMILAR_CHECK else self._repeat(content):
             self.rejected["too similar"] = self.rejected.get("too similar", 0) + 1
             log.info("%s rejected too similar: %r", self.username, content)
             return None
@@ -2315,7 +2322,7 @@ class Bot:
         examples, from_npcs = self._examples(text, reply=False)
         if len(text) > room:
             problem = "too long"
-        elif self._too_similar(text, examples):
+        elif self._too_similar(text, examples) if SIMILAR_CHECK else self._repeat(text):
             problem = "too similar"
         else:
             problem = await self._check(text, self._system_prompt(examples, from_npcs, case=True), takes_side=True,
@@ -3126,7 +3133,7 @@ class Bot:
             return "stock opener"
         if PARAPHRASE_CHECK and self.twins is not None and self.twins.closest(text)[1] >= TWIN:
             return "teammate paraphrase"  # several of our accounts saying one thing is a pattern Blue teams spot
-        shared = self._shared_phrase(text)
+        shared = self._shared_phrase(text) if SHARED_PHRASE_CHECK else None
         if shared:
             log.info("%s: %r is already in %d teammates' posts", self.username, shared, SHARED_LIMIT)
             self.last_shared = shared
@@ -3185,6 +3192,12 @@ class Bot:
                 if len(others) >= COMMON_ACCOUNTS:
                     return True
         return False
+
+    def _repeat(self, text: str) -> bool:
+        """A near-repeat (REPEAT_LIMIT) of one of this account's own posts."""
+        low = text.lower()
+        return any(SequenceMatcher(None, low, a.content.lower(), autojunk=False).ratio() > REPEAT_LIMIT
+                   for _, a in self.history if a.content)
 
     def _too_similar(self, text: str, examples: list) -> bool:
         """Reject near-copies of the examples shown or of this bot's own earlier posts, or a sentence lifted from one."""
@@ -3271,7 +3284,7 @@ class Bot:
                 return None
             # Again with nothing awaited between here and the journal: teammates may have sent the phrase while
             # this was being judged, or be sending it now, and every bot shares this loop and store.
-            shared = self._shared_phrase(action.content)
+            shared = self._shared_phrase(action.content) if SHARED_PHRASE_CHECK else None
             if shared:
                 self._drop(action, f"{shared!r} is already in {SHARED_LIMIT} teammates' posts")
                 return None
@@ -7018,6 +7031,29 @@ def night_lift_check(windows: tuple) -> None:
     print("night lifts ok")
 
 
+async def loose_check() -> None:
+    """With SHARED_PHRASE_CHECK and SIMILAR_CHECK off, a phrase SHARED_LIMIT teammates used and a draft close to the
+    examples go out; a near-repeat of the account's own post is still refused."""
+    global SHARED_PHRASE_CHECK, SIMILAR_CHECK
+    saved = SHARED_PHRASE_CHECK, SIMILAR_CHECK
+    try:
+        SHARED_PHRASE_CHECK = SIMILAR_CHECK = False
+        persona = [p for p in load_personas(status=None) if p["line"] == "persuade"][0]
+        store, now = StateStore(":memory:"), _iso(datetime.now(timezone.utc))
+        phrase = "free at my own clinic or a pop-up"
+        for i in range(SHARED_LIMIT + 1):
+            store.record(f"mate_{i}", now, Action("post", content=f"Day {i}: it's {phrase}, which settles it."))
+        b = Bot(persona, FakePlatform(), FakeLLM(0, 0), load_world(), store=store)
+        assert b._shared_phrase(f"For me it's {phrase} and that's that.") is not None, "the phrase is shared"
+        assert await b._check(f"For me it's {phrase} and that's that.", "", judge=False) is None
+        own = "Had my flu jab at the clinic this morning, then sat on the wharf with Eli watching the boats."
+        b.history.append((now, Action("post", content=own)))
+        assert b._repeat(own.replace("Eli", "Ana")) and not b._repeat("A quiet morning at the market today.")
+    finally:
+        SHARED_PHRASE_CHECK, SIMILAR_CHECK = saved
+    print("loose ok")
+
+
 async def sharp_check() -> None:
     """SHARP_REPLIES: a referendum reply to an undecided citizen may press the SHARP_LINES point the team
     used least in the last day, bluntly, tagged sharp:N; never to a YES leaner."""
@@ -7634,6 +7670,8 @@ if __name__ == "__main__":
     ARM_FIXED = "granted"  # the checks below were written for the granted arm's shapes and guides
     dialogue, DIALOGUE_MODE = DIALOGUE_MODE, False  # and before dialogue mode, which dialogue_check sets itself
     shared_limit, SHARED_LIMIT = SHARED_LIMIT, 4  # the fixtures give a phrase to four teammates
+    phrase_checks = SHARED_PHRASE_CHECK, SIMILAR_CHECK
+    SHARED_PHRASE_CHECK = SIMILAR_CHECK = True  # the checks below were written with them; loose_check turns them off
     rush_first, RUSH_FIRST = RUSH_FIRST, False  # and RUSH_FIRST, which rush_first_check sets itself
     targeting, CITIZEN_TARGETING = CITIZEN_TARGETING, False  # and CITIZEN_TARGETING: citizen_targeting_check
     story, STORY_REPLIES = STORY_REPLIES, False  # and STORY_REPLIES: story_reply_check
@@ -7673,6 +7711,7 @@ if __name__ == "__main__":
     asyncio.run(view_mention_check())
     asyncio.run(column_answer_check())
     asyncio.run(sharp_check())
+    asyncio.run(loose_check())
     night_lift_check(night_lifts)
     asyncio.run(paraphrase_check())
     asyncio.run(night_anchor_check())
@@ -7729,6 +7768,7 @@ if __name__ == "__main__":
     ANCHOR_SINGLE = anchor_single
     VACCINE_ANCHORS = vaccine_anchors
     SHARED_LIMIT = shared_limit
+    SHARED_PHRASE_CHECK, SIMILAR_CHECK = phrase_checks
     NPC_ONLY_REPLIES = npc_only
     PERSUADE_V2 = persuade_v2
     FOCUS = focus
