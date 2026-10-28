@@ -305,6 +305,11 @@ PERSUADE_V2 = True
 # NO citizens are answered too (PERSUADE_HARD_NO); after our replies, NO leaners turned further NO no more than average.
 PERSUADE_ORDER = {"undecided": 1, "soft-no": 2, "hard-no": 3, "unknown": 4, "yes-but": 5}
 PERSUADE_HARD_NO = True
+# A citizen leaning YES on the referendum is answered about the vaccine itself (VACCINE_REPLY_GUIDE), from the feed, from
+# 28 October (Forrest): of the three views worth 160, a "yes but" citizen can hardly move further on the referendum
+# (1.2% of their stance readings), but may still on vaccination in general and on yearly shots; 56% of our citizen
+# replies went to them, arguing the referendum.
+YES_VACCINE_REPLIES = True
 # A doubt about the vaccine itself: a doubt word within a few words of a vaccine word ("strongly skeptical of routine
 # vaccination", "don't know how long this vaccine protects"), or a question about boosters or the jab ("idk about the
 # booster thing", "will we need boosters every year?"); not a post that sets the vaccine aside ("the shift worry, not
@@ -1813,7 +1818,9 @@ class Bot:
                            if STORY_REPLIES and self._story_reply("reply", target, (source, lean))
                            and self.roster.classify(target["author"]) == "npc" else None)
             doubter = (PERSUADE_V2 and route != "team" and self._citizen_reply("reply", target)
-                       and vaccine_doubt(target.get("content") or ""))
+                       and (vaccine_doubt(target.get("content") or "")
+                            or YES_VACCINE_REPLIES and source != "conversation"
+                            and dialogue_class(target.get("content") or "", lean) in ("yes-but", "yes")))
             self.vaccine_thread = doubter or self._in_vaccine_thread(target)
             if doubter:
                 referendum = False  # about the vaccine alone, even if they mention the vote too
@@ -7016,12 +7023,25 @@ async def persuade_v2_check() -> None:
                 roster=Roster(npcs=set(texts)), store=StateStore(":memory:"))
         assert await e._reply(voter, "feed", "feed") is None and e.rejected.get("vote in vaccine post"), e.rejected
         assert VACCINE_REPLY_GUIDE in next(p for p in e.llm.prompts if "Write a reply" in p)
-        d = Bot(persona, FakePlatform(), Says(reply), load_world(), stance_llm=Says("SUPPORT"),
-                roster=Roster(npcs=set(texts)), store=StateStore(":memory:"))
-        await d._reply(posts[1], "feed", "feed")
-        prompt = next(p for p in d.llm.prompts if "Write a reply" in p)
-        assert VACCINE_REPLY_GUIDE not in prompt and ELICIT_GUIDE not in prompt, "a yes-but reply argues the referendum"
-        assert "under 40 words" in d.llm.systems[-1], "a citizen reply is asked to be short"
+        global YES_VACCINE_REPLIES
+        kept_yes = YES_VACCINE_REPLIES
+        try:
+            for on in (False, True):
+                YES_VACCINE_REPLIES = on
+                d = Bot(persona, FakePlatform(), Says(reply), load_world(), stance_llm=Says("SUPPORT"),
+                        roster=Roster(npcs=set(texts)), store=StateStore(":memory:"))
+                await d._reply(posts[1], "feed", "feed")
+                prompt = next(p for p in d.llm.prompts if "Write a reply" in p)
+                assert (VACCINE_REPLY_GUIDE in prompt) == on, "a yes-but citizen is answered about the vaccine"
+                assert ELICIT_GUIDE not in prompt
+                assert "under 40 words" in d.llm.systems[-1], "a citizen reply is asked to be short"
+            undecided = Bot(persona, FakePlatform(), Says(reply), load_world(), stance_llm=Says("NEUTRAL"),
+                            roster=Roster(npcs=set(texts)), store=StateStore(":memory:"))
+            await undecided._reply(posts[2], "feed", "feed")
+            assert VACCINE_REPLY_GUIDE not in next(p for p in undecided.llm.prompts if "Write a reply" in p), \
+                "the undecided are argued with on the referendum"
+        finally:
+            YES_VACCINE_REPLIES = kept_yes
         PERSUADE_V2 = False
         order = [p["author"] for p, _ in await b._rank_citizens(posts, ())]
         assert "firm_yes" in order and "hard_no" not in order
