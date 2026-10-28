@@ -298,7 +298,13 @@ NPC_ONLY_REPLIES = True
 # referendum lean, answered about the vaccine alone (VACCINE_REPLY_GUIDE): vaccination in general and yearly
 # vaccination are two of the three views that score 160, and 206 citizens had voiced such doubts.
 PERSUADE_V2 = True
-PERSUADE_ORDER = {"yes-but": 1, "undecided": 2, "unknown": 3, "soft-no": 4}
+# Order reversed on 28 October (Forrest): only a change towards YES scores, and citizens leaning YES with conditions
+# almost never move further (1.2% of 1,643 stance readings, LLM-judged, 26-28 October) while the undecided moved to
+# YES at 44%, leaning NO at 37% and firm NO at 49% by their next post; 74% of the citizens we touched leaned YES and we
+# made 11.5 moves to YES per 100 touches, against 22.9 for the fleet spending 39% of its touches on NO leaners. Firm
+# NO citizens are answered too (PERSUADE_HARD_NO); after our replies, NO leaners turned further NO no more than average.
+PERSUADE_ORDER = {"undecided": 1, "soft-no": 2, "hard-no": 3, "unknown": 4, "yes-but": 5}
+PERSUADE_HARD_NO = True
 # A doubt about the vaccine itself: a doubt word within a few words of a vaccine word ("strongly skeptical of routine
 # vaccination", "don't know how long this vaccine protects"), or a question about boosters or the jab ("idk about the
 # booster thing", "will we need boosters every year?"); not a post that sets the vaccine aside ("the shift worry, not
@@ -2571,8 +2577,8 @@ class Bot:
             focus = self._focus_rank(p["author"], now)  # a citizen we're following through a session first
             if PERSUADE_V2:
                 doubt = vaccine_doubt(p.get("content") or "")
-                if cls in ("hard-no", "yes") and not doubt:
-                    continue  # a firm YES can only reword its view; a hard NO isn't answered
+                if (cls == "yes" or cls == "hard-no" and not PERSUADE_HARD_NO) and not doubt:
+                    continue  # a firm YES can only reword its view
                 rank = 0 if doubt else PERSUADE_ORDER.get(cls, len(PERSUADE_ORDER))
                 ranked.append(((focus, rank, lean not in wanted, order), p, lean))
             elif cls != "hard-no":
@@ -6917,7 +6923,7 @@ async def focus_check() -> None:
         assert open_ == {"fresh", "stranger"}, open_  # one a day: "earlier" had theirs
         order = [p["author"] for p, _ in await b._rank_citizens([p for p in posts if p["author"] in npcs - {"full", "DailyKingstonia"}],
                                                                ())]
-        assert order == ["fresh", "earlier", "mine", "theirs"], order  # no focus first: the class order alone
+        assert order == ["fresh", "mine", "theirs", "earlier"], order  # no focus first: the class order alone
     finally:
         FOCUS, PERSUADE_V2, CITIZEN_TARGETING, TOPICAL_REPLY_PROB, CITIZEN_DAILY_REPLIES = saved
     print("focus ok")
@@ -6958,7 +6964,8 @@ async def persuade_v2_check() -> None:
                 store=StateStore(":memory:"))
         for _ in range(5):
             order = [p["author"] for p, _ in await b._rank_citizens(posts, ())]
-            assert order == ["doubter", "yes_but", "undecided", "soft_no"], order
+            # "soft_no" reads as unknown without a judged lean, so after a firm NO; "yes but" last
+            assert order == ["doubter", "undecided", "hard_no", "soft_no", "yes_but"], order
         assert vaccine_doubt(texts["doubter"]) and not vaccine_doubt(texts["yes_but"])
         assert not vaccine_doubt("Regatta every year is the best") and not vaccine_doubt("I rushed to the ferry")
         assert not vaccine_doubt("I keep up with the flu shot and boosters every winter. Vote YES.")
