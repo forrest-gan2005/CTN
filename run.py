@@ -42,6 +42,9 @@ REFRESH_EVERY = 900.0  # seconds between whitelist, example, hashtag and activit
 CITIZEN_FEED = 30  # newest citizen posts each bot reads; competitor bots will far outnumber citizens in Latest
 OTHER_FEED = 10  # plus the newest posts from anyone, so unknown accounts still get some attention
 FOCUS_READ = timedelta(seconds=30)  # how stale the list of citizens we're following may be
+STANCE_FILE = DATA / "citizen_stance.json"  # tools.stance_map: each citizen's newest judged referendum stance
+STANCE_WINDOW = timedelta(hours=48)
+STANCE_LEANS = {2: "yes", 1: "yes-but", 0: "undecided", -1: "no", -2: "no"}
 EXAMPLE_POSTS = 20_000  # newest citizen posts the style retriever indexes
 CURVE_POSTS = 100_000  # newest citizen posts the activity curve is measured on
 HASHTAG_WINDOW = timedelta(hours=6)
@@ -191,6 +194,7 @@ class Team:
                 log.exception("labelling citizens who registered after the start failed; the last labels stand")
         self.roster.npcs = set(self.npc_store.whitelist(self.cutoff))
         self.roster.newcomers = self.npc_store.newcomers()
+        self.seed_leans()
         rows = self.npc_store.npc_posts(self.cutoff, limit=CURVE_POSTS, badged=False)  # how citizens write
         examples = NpcExamples(((author, content, parent is not None)
                                 for author, content, _, parent in rows[-EXAMPLE_POSTS:]), self.embedder)
@@ -210,6 +214,32 @@ class Team:
         log.info("refreshed: %d citizens, %d example posts (%s), hashtags %s, NO worries %s, GIFs %s",
                  len(self.roster.npcs), len(examples.posts), examples.mode or "too few", hashtags, worries,
                  "off" if self.gifs is None else self.gifs.off or len(self.gifs.gifs))
+
+    def seed_leans(self, now: Optional[datetime] = None) -> int:
+        """Citizens' leans from tools.stance_map (the judge's score of their newest referendum post, within
+        STANCE_WINDOW), so reply targeting knows who leans NO without profiling each in the moment (28 October: 48 of
+        53 citizens we replied to in an hour had no judged lean). A lean the team judged since is kept. Returns how
+        many were seeded."""
+        now = now or datetime.now(timezone.utc)
+        try:
+            stances = json.loads(STANCE_FILE.read_text())
+        except (OSError, ValueError):
+            return 0
+        seeded = 0
+        for author, rec in stances.items():
+            try:
+                at = datetime.fromisoformat(rec["at"].replace("Z", "+00:00"))
+                if at.tzinfo is None:
+                    at = at.replace(tzinfo=timezone.utc)
+                lean = STANCE_LEANS[int(rec["s"])]
+            except (KeyError, TypeError, ValueError):
+                continue
+            known = self.roster.leans.get(author)
+            if now - at > STANCE_WINDOW or known is not None and known[1] > at and known[0] != "unknown":
+                continue
+            self.roster.leans[author] = (lean, now)
+            seeded += 1
+        return seeded
 
     def reconcile(self) -> None:
         """Settle posts and replies that may or may not have been published, from what the collector saw since:
@@ -872,6 +902,35 @@ async def adopt_check() -> None:
             task.cancel()
         await asyncio.gather(*team.running.values(), return_exceptions=True)
     print("adopt ok")
+
+
+def seed_leans_check() -> None:
+    """tools.stance_map's file seeds the roster's leans: 2 yes, 1 yes-but, 0 undecided, -1/-2 no; a stance older than
+    STANCE_WINDOW or a lean the team judged since is left alone; no file, nothing."""
+    import tempfile
+    global STANCE_FILE
+    saved = STANCE_FILE
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            STANCE_FILE = Path(tmp) / "citizen_stance.json"
+            team = Team(FakePlatform(), FakeLLM(0, 0), None, NpcStore(":memory:"), StateStore(":memory:"),
+                        personas=load_personas()[:1])
+            now = datetime.now(timezone.utc)
+            assert team.seed_leans(now) == 0
+            at = lambda h: (now - timedelta(hours=h)).isoformat()
+            STANCE_FILE.write_text(json.dumps({"ann": {"s": -2, "at": at(5)}, "bob": {"s": 1, "at": at(5)},
+                                               "cat": {"s": 0, "at": at(5)}, "dan": {"s": 2, "at": at(60)},
+                                               "eve": {"s": -1, "at": at(5)}, "fay": {"s": "x", "at": at(1)}}))
+            team.roster.leans["eve"] = ("yes", now - timedelta(hours=1))  # judged after her post: kept
+            assert team.seed_leans(now) == 3
+            assert {a: l for a, (l, _) in team.roster.leans.items()} == {"ann": "no", "bob": "yes-but", "cat": "undecided",
+                                                                       "eve": "yes"}
+            from ctn.red.bot import dialogue_class
+            assert dialogue_class("Long day at the market.", "yes-but") == "yes-but"
+            assert dialogue_class("Long day at the market.", "no") == "soft-no"
+    finally:
+        STANCE_FILE = saved
+    print("seed leans ok")
 
 
 def focus_feed_check() -> None:
@@ -2058,6 +2117,7 @@ if __name__ == "__main__":
         registered_check()
         gif_restart_check()
         focus_feed_check()
+        seed_leans_check()
         asyncio.run(adopt_check())
         asyncio.run(unresolved_check())
         asyncio.run(interrupted_check())

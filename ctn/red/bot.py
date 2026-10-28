@@ -1072,8 +1072,8 @@ def dialogue_class(text: str, lean: Optional[str] = None) -> str:
     yes, undecided = says_yes(text) and not FIRST_NO_RE.search(text), bool(UNDECIDED_RE.search(text))
     if not yes and HARD_NO_RE.search(text) and not undecided and not DOUBT_RE.search(text):
         return "hard-no"
-    if yes or lean == "yes" and not leans_no(text) and not undecided:
-        return "yes-but" if yes_but(text, leans_yes=True) else "yes"
+    if yes or lean in ("yes", "yes-but") and not leans_no(text) and not undecided:
+        return "yes-but" if lean == "yes-but" or yes_but(text, leans_yes=True) else "yes"
     if undecided:
         return "undecided"
     if leans_no(text) or HARD_NO_RE.search(text) or lean == "no":
