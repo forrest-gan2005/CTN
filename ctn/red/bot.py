@@ -472,10 +472,11 @@ COLUMN_GUIDE = ("They write the paper's opinion pieces and have argued that a YE
 # drop the patient tone and press one of SHARP_LINES, that a NO harms everyone and puts one's own convenience above
 # other people's safety; the line the team used least in the last day, tagged sharp:N. Only the hourly away count can
 # judge it (the activity log doesn't say which reply moved whom); the rude NO foil of 22 October came with 5 away
-# contributions in its hour against 1 the hour before.
+# contributions in its hour against 1 the hour before. NO-leaning citizens dropped from 28 October 22:4x (Forrest): in
+# its first 5 hours away came to 1 primary and 4 contributions against 0 and 1 in the 5 hours before, toward unchanged.
 SHARP_REPLIES = True
 SHARP_SHARE = 0.3
-SHARP_LEANS = {"no", "undecided", "unknown"}
+SHARP_LEANS = {"undecided", "unknown"}
 SHARP_LINES = (
     "a NO doesn't just affect the people who vote for it: when H2D2 fills Kingstonia's 30 or so intensive-care beds, "
     "there's no bed for anyone's heart attack or car crash either, so a NO harms everyone",
@@ -7004,7 +7005,7 @@ def night_lift_check(windows: tuple) -> None:
 
 
 async def sharp_check() -> None:
-    """SHARP_REPLIES: a referendum reply to an undecided or NO-leaning citizen may press the SHARP_LINES point the team
+    """SHARP_REPLIES: a referendum reply to an undecided citizen may press the SHARP_LINES point the team
     used least in the last day, bluntly, tagged sharp:N; never to a YES leaner."""
     class Says:
         name = "says"
@@ -7045,6 +7046,7 @@ async def sharp_check() -> None:
         await y._reply({"id": 901, "author": "y1", "content": "Voting YES in the referendum.", "parent_id": None},
                        "feed", "feed", referendum=True)
         assert not any("be blunt" in p for p in y.llm.prompts), "never sharp to a YES leaner"
+        assert "no" not in SHARP_LEANS, "nor to a NO leaner"
     finally:
         SHARP_REPLIES, SHARP_SHARE, VIEW_TURNS, MENTION_REPLIES, PERSUADE_V2 = saved
     print("sharp ok")
