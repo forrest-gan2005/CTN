@@ -3339,7 +3339,7 @@
     "job": "work as a site foreman for a building company in Kingstonia City",
     "home": "Kingstonia City",
     "line": "bridge",
-    "status": "reserve",
+    "status": "active",
     "covid": "the site kept stopping and starting through 2021, and you went months without seeing your nan, who has diabetes, because the family kept her away from everyone",
     "why_yes": "you leaned NO because you don't like being told what to do and plenty of your whanau don't trust the government, but the months without your nan in 2021 stuck with you, and this time it's the people deciding",
     "style": "straight up, fair to both sides, Maori words now and then, asks people what they think",
@@ -6300,7 +6300,7 @@
     "job": "work as a librarian in Crown Harbour",
     "home": "Crown Harbour",
     "line": "bridge",
-    "status": "active",
+    "status": "banned",
     "covid": "the library shut for months in 2021 and people without a computer at home had nowhere to go",
     "why_yes": "you understand the worry about a two-tier town, and you'd still rather the library and the schools stay open",
     "style": "friendly, storytelling",
@@ -6319,7 +6319,8 @@
       "you want the old harbour buildings restored",
       "you think the library should open on Sundays"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "rewipaewai"
   },
   {
     "username": "vaea_taufa",
