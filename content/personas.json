@@ -4849,7 +4849,7 @@
     "job": "sell houses as a real estate agent in Kingstonia City",
     "home": "Kingstonia City",
     "line": "bridge",
-    "status": "active",
+    "status": "banned",
     "covid": "did house viewings by video call through 2021 and saw several sellers forced to sell when their businesses shut",
     "why_yes": "you worried it was a blank cheque because the list of places hasn't been set, but a NO wouldn't bring back a narrower version, it means no requirement this Assembly",
     "style": "polished, careful, a bit formal, thinks out loud",
@@ -4873,7 +4873,8 @@
     "examples": [
       "Open home today. One visitor. She was lost and looking for the bakery down the road. Still counts.",
       "I worried this was too open-ended with the venue list not out. Then I saw a NO doesn't lead to a narrower version, it means no requirement this Assembly. 12 and over, exemptions. I've landed on yes."
-    ]
+    ],
+    "replaced_by": "mere.paki"
   },
   {
     "username": "eliaspetrakis",
@@ -6297,7 +6298,7 @@
     "job": "work as a librarian in Crown Harbour",
     "home": "Crown Harbour",
     "line": "bridge",
-    "status": "reserve",
+    "status": "active",
     "covid": "the library shut for months in 2021 and people without a computer at home had nowhere to go",
     "why_yes": "you understand the worry about a two-tier town, and you'd still rather the library and the schools stay open",
     "style": "friendly, storytelling",
