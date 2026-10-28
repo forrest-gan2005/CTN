@@ -6073,7 +6073,7 @@
     "job": "run a hardware store in a town on the ring road",
     "home": "a town on the ring road",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "kept the store open in 2021 but lost two staff who were off sick for weeks",
     "why_yes": "a small business can't take another shutdown, and fewer people sick at once makes one less likely",
     "style": "practical, no-nonsense",
@@ -6093,7 +6093,8 @@
       "you want port fees cut for small importers",
       "you think the ring road needs more passing lanes"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "priscilla_tan"
   },
   {
     "username": "kalena.ahchong",
@@ -6188,7 +6189,7 @@
     "job": "retired accountant who volunteers at a food bank in Crown Harbour",
     "home": "Crown Harbour",
     "line": "persuade",
-    "status": "reserve",
+    "status": "active",
     "covid": "the food bank queues tripled in 2021",
     "why_yes": "outbreaks hit the poorest families hardest, and the food bank can't cope with another one",
     "style": "careful, numbers-minded, polite",
