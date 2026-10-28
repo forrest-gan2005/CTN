@@ -45,6 +45,8 @@ FOCUS_READ = timedelta(seconds=30)  # how stale the list of citizens we're follo
 STANCE_FILE = DATA / "citizen_stance.json"  # tools.stance_map: each citizen's newest judged referendum stance
 STANCE_WINDOW = timedelta(hours=48)
 STANCE_LEANS = {2: "yes", 1: "yes-but", 0: "undecided", -1: "no", -2: "no"}
+TARGET_LEANS = {"undecided", "no"}
+TARGET_FRESH = timedelta(minutes=30)
 EXAMPLE_POSTS = 20_000  # newest citizen posts the style retriever indexes
 CURVE_POSTS = 100_000  # newest citizen posts the activity curve is measured on
 HASHTAG_WINDOW = timedelta(hours=6)
@@ -150,6 +152,7 @@ class Team:
                          if WITHDRAW else [])  # anchors, and the lift replies under deleted ones
         self._logins = {}  # username -> the one login task its users share
         self._focus = None  # (when read, the posts of citizens we're following)
+        self._targets = None  # (when read, the undecided and NO-leaning citizens' newest posts)
         self.set_quiet(self.health.quiet())
         self.refresh()
 
@@ -162,7 +165,18 @@ class Team:
         posts += self.npc_store.recent_from(COLUMNISTS, now - COLUMN_WINDOW)  # answered hours later
         if red_bot.FOCUS:  # the newest posts of citizens we're following through a session
             posts += self._focus_posts(now)
+        posts += self._target_posts(now)  # and of the undecided and NO-leaning, however busy Latest is
         return list({p["id"]: p for p in posts}.values())
+
+    def _target_posts(self, now: datetime) -> list:
+        """Posts of the last TARGET_FRESH by citizens whose lean is undecided or NO (the stance map's or the team's),
+        read again at most every FOCUS_READ: on 28 October, with replies ordered undecided and NO first, 63% still
+        went to 'yes but' citizens, who post the most and so fill the newest citizen posts every bot reads."""
+        if self._targets is None or now - self._targets[0] >= FOCUS_READ:
+            wanted = {a for a, (lean, at) in self.roster.leans.items()
+                      if lean in TARGET_LEANS and now - at < red_bot.LEAN_TTL}
+            self._targets = now, self.npc_store.recent_among(wanted, now - TARGET_FRESH)
+        return self._targets[1]
 
     def _focused(self, now: datetime) -> set:
         """Citizens the team replied to within FOCUS_WINDOW (the press aside)."""
@@ -926,6 +940,11 @@ def seed_leans_check() -> None:
             assert {a: l for a, (l, _) in team.roster.leans.items()} == {"ann": "no", "bob": "yes-but", "cat": "undecided",
                                                                        "eve": "yes"}
             from ctn.red.bot import dialogue_class
+            team.npc_store.add_posts([{"id": 1, "author": "ann", "content": "hm", "created_at": at(0.2)},
+                                      {"id": 2, "author": "bob", "content": "hm", "created_at": at(0.2)},
+                                      {"id": 3, "author": "cat", "content": "hm", "created_at": at(1)}])
+            assert [p["id"] for p in team._target_posts(now)] == [1], "undecided/NO leaners' fresh posts only"
+            assert 1 in {p["id"] for p in team.feed()}
             assert dialogue_class("Long day at the market.", "yes-but") == "yes-but"
             assert dialogue_class("Long day at the market.", "no") == "soft-no"
     finally:
