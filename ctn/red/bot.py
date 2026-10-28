@@ -318,12 +318,26 @@ YES_VACCINE_REPLIES = True
 VIEW_TURNS = True
 VIEW_ORDER = {"movable": ("ref", "vac", "yearly"), "yes": ("vac", "yearly"), "yearly-doubt": ("yearly", "vac"),
               "doubt": ("vac", "yearly")}
+# One line for every writer was paraphrased alike: on 28 October 23:43-00:43, 137 drafts were dropped for sharing
+# "when my turn comes", "at my own GP", "GP or a pop-up" or "no-fault scheme if something" with teammates. Each vac
+# reply now gets one of VIEW_VAC_REASONS at random, and the yearly line asks for the writer's own words.
+VIEW_VAC_REASONS = (
+    "the trial results: a strong immune response and no major safety problems so far",
+    "it costing nothing and being offered close to home",
+    "the compensation scheme that exists in case something rare goes wrong",
+    "who you'd be protecting by having it: someone in your family or at work",
+    "what the last bad flu season was like for you or people around you",
+)
 VIEW_LINES = {
-    "vac": "Speak to the vaccine in general: why you'll take it when your turn comes and what reassures you, such as "
-           "it being free at your own GP or a pop-up and the no-fault scheme if something goes wrong.",
-    "yearly": "Speak to yearly shots: nobody knows yet whether H2D2 will need a booster every year, and if it does, it "
-              "would be no bigger a thing than the flu shot many people already get.",
+    "vac": "Speak to the vaccine in general: why you'd have it, mainly because of {reason}, said your own way.",
+    "yearly": "Speak to yearly shots, in your own words: nobody knows yet whether H2D2 will need a booster every year, "
+              "and if it does, it would be no bigger a thing than the flu shot many people already get.",
 }
+
+
+def view_line(view: str) -> str:
+    """The writer's line for a vaccination view, the "vac" one with a reason drawn from VIEW_VAC_REASONS."""
+    return VIEW_LINES[view].format(reason=random.choice(VIEW_VAC_REASONS)) if view in VIEW_LINES else ""
 YEARLY_RE = re.compile(r"\b(?:boosters?|yearly|every year|annual(?:ly)?|top[- ]?ups?)\b", re.IGNORECASE)
 # Mentions (28 October, from the scoring guide: "Mentioned citizens see the post in their notifications", up to three
 # in a reply): MENTION_REPLY_SHARE of citizen replies also @mention up to MENTION_REPLY_MAX other undecided or
@@ -2970,7 +2984,7 @@ class Bot:
                 self.last_guide = guide
             elif self.vaccine_thread:
                 parts.append((f"{VACCINE_TEAM_GUIDE} " if topic[1] == "team" else "") + VACCINE_REPLY_GUIDE
-                             + (f" {VIEW_LINES[self.vaccine_view]}" if self.vaccine_view in VIEW_LINES else ""))
+                             + (f" {view_line(self.vaccine_view)}" if self.vaccine_view in VIEW_LINES else ""))
             else:
                 parts.append("It isn't about the referendum, so just reply like a normal person and leave the "
                              "referendum out." + (" Don't end with a question." if story else ""))
@@ -7163,7 +7177,8 @@ async def view_mention_check() -> None:
         action = await w._reply(target, "feed", "feed")
         assert action is not None, w.rejected
         prompt = next(p for p in w.llm.prompts if "Write a reply" in p)
-        assert VIEW_LINES["vac"] in prompt and VACCINE_REPLY_GUIDE in prompt, prompt
+        assert ("Speak to the vaccine in general" in prompt and any(r in prompt for r in VIEW_VAC_REASONS)
+                and VACCINE_REPLY_GUIDE in prompt), prompt
         assert action.content.startswith("@n1 @told "), action.content  # a fresh store: "told" not mentioned yet
         assert "view:vac" in action.angle and "mention:2" in action.angle, action.angle
     finally:
