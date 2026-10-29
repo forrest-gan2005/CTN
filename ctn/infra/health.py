@@ -39,8 +39,9 @@ WITHDRAW = True
 # 12% of citizen likes on rival anchors came 2-4 hours after posting. On again: the anchor account was suspended at
 # 01:05 for its third hidden post, one an anchor kept up past two hours; at two anchors an hour an anchor account
 # would last about five hours, for some 30 points an anchor. Off, the loops only settle deletes already sent and take
-# lift replies down under anchors deleted before.
-WITHDRAW_ANCHORS = True
+# lift replies down under anchors deleted before. Off again from 29 October 19:4x to the end (Forrest, the all-out push:
+# rivals' anchors from 25 October were still on Trending four days on, at 400-500 likes and 1,200-1,500 views).
+WITHDRAW_ANCHORS = False
 WITHDRAW_AFTER = timedelta(hours=2)
 WITHDRAW_EVERY = 300.0
 REPLIES_KEY = "withdraw_replies"  # meta: whether our replies survive a deleted post ("survive" | "vanish")
