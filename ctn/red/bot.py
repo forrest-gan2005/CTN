@@ -366,6 +366,10 @@ LIFT_MENTION_MAX = 3
 LIFT_MENTION_FRESH = timedelta(minutes=30)
 LIFT_MENTION_SPAN = 6  # hours
 LIFT_MENTION_ORDER = {"no": 0, "undecided": 0, "yes-but": 2, "yes": 2}
+# Read by citizens now, a lift may not leave a doubt hanging: of the first six mentioned lifts, two under vaccine
+# anchors ended on one ("the bit still bugging me is how long the protection actually holds").
+LIFT_MENTION_GUIDE = ("Citizens will read this reply too. If you raise a doubt or an open question, don't leave it "
+                      "hanging: end on why you're still having the vaccine when your turn comes, or voting YES.")
 # A doubt about the vaccine itself: a doubt word within a few words of a vaccine word ("strongly skeptical of routine
 # vaccination", "don't know how long this vaccine protects"), or a question about boosters or the jab ("idk about the
 # booster thing", "will we need boosters every year?"); not a post that sets the vaccine aside ("the shift worry, not
@@ -3045,6 +3049,8 @@ class Bot:
             else:
                 parts.append("It isn't about the referendum, so just reply like a normal person and leave the "
                              "referendum out." + (" Don't end with a question." if story else ""))
+            if topic[1] == "team" and self.reply_handles:
+                parts.append(LIFT_MENTION_GUIDE)
             if earlier is not None:
                 parts.append(
                     "They are replying to you. Carry the conversation on naturally; if they are only agreeing "
