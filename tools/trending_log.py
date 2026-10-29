@@ -16,7 +16,9 @@ from ctn import paths
 
 API = "https://social.legitreal.com/api"
 OUT = paths.DATA / "trending-history.jsonl"
+COUNTERS = paths.DATA / "anchor-counters.jsonl"  # our anchors' likes, replies, reposts and views over their life
 TOP = 50
+ANCHOR_HOURS = 12
 
 
 def our_ids() -> set:
@@ -41,6 +43,22 @@ def snapshot(client: httpx.Client, names: dict, ours: set) -> dict:
     return {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "items": rows}
 
 
+def anchor_counters(client: httpx.Client) -> dict:
+    """Each of our anchors of the last ANCHOR_HOURS: its counters now (public /posts/{id}/counters)."""
+    db = sqlite3.connect(f"file:{paths.DATA / 'bots.db'}?mode=ro", uri=True)
+    since = (datetime.now(timezone.utc) - timedelta(hours=ANCHOR_HOURS)).isoformat()
+    rows = db.execute("SELECT made_id, ts FROM history WHERE topic_kind = 'anchor' AND type = 'post' AND ts >= ? "
+                      "AND made_id IS NOT NULL", (since,)).fetchall()
+    db.close()
+    out = []
+    for pid, ts in rows:
+        r = client.get(f"{API}/posts/{pid}/counters")
+        c = r.json() if r.status_code == 200 else {}
+        out.append({"id": pid, "posted": ts, "gone": r.status_code == 404, "likes": c.get("like_count"),
+                    "replies": c.get("reply_count"), "reposts": c.get("repost_count"), "views": c.get("view_count")})
+    return {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "anchors": out}
+
+
 def run(every: float) -> None:
     names, ours, refreshed = {}, our_ids(), time.monotonic()
     with httpx.Client(timeout=30) as client:
@@ -51,6 +69,8 @@ def run(every: float) -> None:
                 snap = snapshot(client, names, ours)
                 with open(OUT, "a") as f:
                     f.write(json.dumps(snap) + "\n")
+                with open(COUNTERS, "a") as f:
+                    f.write(json.dumps(anchor_counters(client)) + "\n")
                 mine = [(r["rank"], r["id"]) for r in snap["items"] if r["ours"]]
                 print(snap["at"], f"ours on Trending: {mine}", flush=True)
             except (httpx.HTTPError, ValueError) as e:
