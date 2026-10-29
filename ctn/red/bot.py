@@ -95,6 +95,15 @@ FEED_REPLIES = False
 # citizens, got 10-30 and slid from 3rd to 22nd as the afternoon went on. With this on, citizens who reply to us aren't
 # answered and no other posts are written, besides FEED_REPLIES off.
 ALL_TO_ANCHORS = True
+# But citizens who reply to us are answered again from 29 October 19:40 (Forrest): 2 of the first 8 mentioned lifts drew
+# a citizen's reply within minutes, both asking for an end date, a published scope and oversight. A reply naming those
+# (BLANK_CHEQUE_RE) is answered with one of COLUMN_ANSWERS (BLANK_CHEQUE_GUIDE).
+ANSWER_CITIZENS = True
+BLANK_CHEQUE_RE = re.compile(r"sunset|end[- ]date|expir|scope|oversight|blank cheque|blank check|venue (?:list|map)"
+                             r"|written down|in writing|safeguard|mission creep|review", re.IGNORECASE)
+BLANK_CHEQUE_GUIDE = ("They want limits on the rule written down (an end date, a published scope, oversight). Don't "
+                      "claim the Act has an end date or a sunset clause: it has none. Answer with this one point, in "
+                      "your own words: {answer}. Then say briefly why you're still voting YES.")
 # Share of replies that go to posts on the referendum or vaccines when the feed has any: chat about someone's rabbit
 # earns a like and moves no one. The rest keeps the accounts talking like people.
 TOPICAL_REPLY_PROB = 0.9
@@ -1475,7 +1484,7 @@ class Bot:
         citizen_conv = conv is not None and self.roster.classify(conv["author"]) == "npc"
         answering, self.answering = self.answering, False
         if (answering and citizen_conv and (not self.quiet or self._quiet_may_answer(conv["author"])) and not talker
-                and not ALL_TO_ANCHORS):
+                and (ANSWER_CITIZENS or not ALL_TO_ANCHORS)):
             self.conv_tries[conv["id"]] = self.conv_tries.get(conv["id"], 0) + 1
             reply = await self._reply(conv, "conversation", "conversation")
             if reply is not None:
@@ -1535,7 +1544,7 @@ class Bot:
         # came from known citizens, and we had answered barely a third of them. Accounts that joined after the
         # opening are answered as before, when the feed has no citizen to reply to.
         if (citizen_conv and (not self.quiet or self._quiet_may_answer(conv["author"])) and not saving()
-                and not ALL_TO_ANCHORS):
+                and (ANSWER_CITIZENS or not ALL_TO_ANCHORS)):
             kind = "reply"
         elif kind == "reply" and (not FEED_REPLIES or saving() or ALL_TO_ANCHORS) or kind == "post" and ALL_TO_ANCHORS:
             kind = "like"
@@ -3051,6 +3060,9 @@ class Bot:
                              "referendum out." + (" Don't end with a question." if story else ""))
             if topic[1] == "team" and self.reply_handles:
                 parts.append(LIFT_MENTION_GUIDE)
+            if (earlier is not None and ANSWER_CITIZENS and on_referendum
+                    and BLANK_CHEQUE_RE.search(target.get("content") or "")):
+                parts.append(BLANK_CHEQUE_GUIDE.format(answer=random.choice(COLUMN_ANSWERS)))
             if earlier is not None:
                 parts.append(
                     "They are replying to you. Carry the conversation on naturally; if they are only agreeing "
