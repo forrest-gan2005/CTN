@@ -128,6 +128,9 @@ FEED_GAP = 7.0
 # Posts, replies and reposts share a route the platform allows a team 3 times a minute: spaced out ahead, so that
 # accounts writing at once queue instead of running into 429s and losing drafts (live, 12 in 19 minutes).
 WRITE_GAP = 20.5
+# Deletes leave outside the write lane from 30 October (lift replies deleted at three hours, ~75 an hour, would take
+# 40% of the lane's three writes a minute): the platform's limit is on POST /posts; a 429 on a delete is waited out.
+DELETES_IN_WRITE_LANE = False
 
 
 class PriorityLock:
@@ -522,7 +525,7 @@ class RealPlatform:
         them, which may count as writes), retries included, also leave one at a time,
         their lane's gap after the last one actually went."""
         lane = "feed" if method == "GET" and path == "/posts" else "write" if (method == "POST" and path == "/posts") \
-            or (method == "DELETE" and POST_PATH_RE.fullmatch(path)) else None
+            or (DELETES_IN_WRITE_LANE and method == "DELETE" and POST_PATH_RE.fullmatch(path)) else None
         if lane is None or not self.lane_gap[lane]:
             return await self._dispatch_when(scope, method, path, None, **kwargs)
         if lane not in self._lane_locks:

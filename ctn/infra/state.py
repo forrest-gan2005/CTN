@@ -270,6 +270,16 @@ class StateStore:
             "AND NOT EXISTS (SELECT 1 FROM moderation m WHERE m.post_id = h.made_id AND m.status != 'restored') "
             "ORDER BY h.ts DESC", (since,)).fetchall()
 
+    def lifts_aged(self, since: str, before: str) -> list:
+        """(username, reply id) of our replies to our anchors posted between `since` and `before`, newest first,
+        not deleted yet and not known to be taken down."""
+        return self.db.execute(
+            "SELECT h.username, h.made_id FROM history h JOIN history a ON a.made_id = h.post_id AND a.type = 'post' "
+            "AND a.topic_kind = 'anchor' WHERE h.type = 'reply' AND h.made_id IS NOT NULL AND h.ts >= ? AND h.ts < ? "
+            "AND NOT EXISTS (SELECT 1 FROM withdrawn w WHERE w.post_id = h.made_id AND w.status = 'deleted') "
+            "AND NOT EXISTS (SELECT 1 FROM moderation m WHERE m.post_id = h.made_id AND m.status != 'restored') "
+            "ORDER BY h.ts DESC", (since, before)).fetchall()
+
     def anchor_deletes_unsettled(self) -> list:
         """(username, platform post id) of our anchor deletes sent whose outcome isn't known yet, newest first."""
         return self.db.execute(

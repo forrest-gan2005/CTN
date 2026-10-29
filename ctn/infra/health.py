@@ -53,6 +53,12 @@ WITHDRAW_BATCH = 5  # a look and a delete each; the looks share Health's pace, t
 # ahead of ordinary writes), and only those under LIFTS_MAX_AGE: every reply hidden to 24 October went within 12 hours.
 WITHDRAW_LIFTS = True
 LIFTS_MAX_AGE = timedelta(hours=24)
+# With anchors kept up (WITHDRAW_ANCHORS off), lift replies go LIFTS_DELETE_AFTER posting instead (Forrest, 30 October
+# 09:5x): between 09:07 and 09:38 that morning twelve lift replies about six hours old were hidden, and 30 of 50
+# accounts then carried a hidden post, each one account report from suspension. A lift has done its work on Trending
+# within half an hour, and its mentions reached their citizens when sent. Up to LIFTS_DELETE_BATCH a round.
+LIFTS_DELETE_AFTER = timedelta(hours=3)
+LIFTS_DELETE_BATCH = 40
 
 
 def outcome(post: dict) -> str:
@@ -237,7 +243,8 @@ class Withdraw:
         whose reply is looked at again, one at a time."""
         if self.stopped or self.locked():
             return 0
-        if self.lifts and (not WITHDRAW_LIFTS or self.state.get_meta(REPLIES_KEY) != "survive"):
+        aged = self.lifts and not WITHDRAW_ANCHORS and LIFTS_DELETE_AFTER is not None
+        if self.lifts and not aged and (not WITHDRAW_LIFTS or self.state.get_meta(REPLIES_KEY) != "survive"):
             return 0
         if self.probe is not None and self.state.withdrawn_status(self.probe[0]) == "deleted":
             await self._look_under()
@@ -245,12 +252,14 @@ class Withdraw:
                 return 0
         now = datetime.now(timezone.utc)
         online = set(self.online())
-        due = ([(u, p, False) for u, p in self.state.lifts_due(_iso(now - LIFTS_MAX_AGE))] if self.lifts
+        due = ([(u, p, False) for u, p in self.state.lifts_aged(_iso(now - LIFTS_MAX_AGE),
+                                                                _iso(now - LIFTS_DELETE_AFTER))] if aged
+               else [(u, p, False) for u, p in self.state.lifts_due(_iso(now - LIFTS_MAX_AGE))] if self.lifts
                else [(u, p, True) for u, p in self.state.anchors_due(_iso(now - WITHDRAW_AFTER))]
                if WITHDRAW_ANCHORS else [(u, p, True) for u, p in self.state.anchor_deletes_unsettled()])
         due = [(u, p, a) for u, p, a in due if u in online and u not in self.refused and p not in self.skipped]
         deleted = 0
-        for username, post_id, is_anchor in due[:self.batch]:
+        for username, post_id, is_anchor in due[:LIFTS_DELETE_BATCH if aged else self.batch]:
             kind = "anchor" if is_anchor else "lift reply"
             if username in self.refused or self.stopped or self.locked():
                 continue
