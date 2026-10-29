@@ -670,9 +670,11 @@ ANCHOR_PAUSE = (datetime(2026, 10, 25, 16, 0, tzinfo=TIMEZONE), datetime(2026, 1
 # 27 October one an hour (below), two again in the x4 days. The cost is accounts: a squad account is suspended by its
 # third hidden post (it stays under 100 actions), and about half our anchors were hidden on 24-25 October.
 FAST_ANCHOR_GAP = timedelta(minutes=30)
-# One an hour from 27 October (Forrest): the write lane goes to replies to citizens (FEED_REPLIES); two an hour
-# again only from the x4 days.
-FAST_ANCHORS_FROM = datetime(2026, 11, 1, 0, 0, tzinfo=TIMEZONE)
+# One an hour from 27 October (Forrest): the write lane goes to replies to citizens (FEED_REPLIES). Two an hour to the
+# end from 29 October 13:30 (Forrest: an all-out Trending push, accounts no object). On 24-25 October, at x1, anchors
+# on Trending brought 135-188 likes an hour and about one primary change of mind towards YES an hour; replies to
+# citizens since 27 October, at x2, 25-60 likes and one primary in ten hours, while Yeah's rate doubled with x2.
+FAST_ANCHORS_FROM = datetime(2026, 10, 29, 13, 30, tzinfo=TIMEZONE)
 # All of 26 October (Forrest, 10:50 that morning): we were the slowest of the top seven at x2, 7,411 ahead of 4th.
 # The night of 28 October 00:45-08:00 (Forrest): citizens post a third as much at night, so replies leave the write
 # lane half idle, while rival anchors keep Trending busy all night.
@@ -883,12 +885,14 @@ BOOST_DELAY = timedelta(minutes=1)
 # 45 reposts and 15 replies from 26 October 16:30 (Forrest): a hidden anchor took the lift replies under it down
 # too, and two accounts past 100 actions were suspended within the hour on the next account report; likes and
 # reposts can't be reported. Reposts also lift a post more (4.4 against 2.8 a log unit in the Trending fit).
-BOOST_LIMITS = {"like": 50, "repost": 45, "reply": 15}
+BOOST_LIMITS = {"like": 50, "repost": 49, "reply": 15}  # reposts 49 (every other account) from 29 October 13:30
 # More lift replies in these windows (Forrest, night of 28 October): the anchors ahead of ours on Trending had 30-45
 # replies against our 15-20, with reposts at 45 on both sides; at night the write lane is half idle. Two anchors an
 # hour with 30 replies each take about 150 of its 175 writes.
 NIGHT_LIFT_REPLIES = 30
-NIGHT_LIFT_WINDOWS = ((datetime(2026, 10, 28, 0, 45, tzinfo=TIMEZONE), datetime(2026, 10, 28, 8, 0, tzinfo=TIMEZONE)),)
+# And from 29 October 13:30 to the end (Forrest: the all-out push, FAST_ANCHORS_FROM).
+NIGHT_LIFT_WINDOWS = ((datetime(2026, 10, 28, 0, 45, tzinfo=TIMEZONE), datetime(2026, 10, 28, 8, 0, tzinfo=TIMEZONE)),
+                      (datetime(2026, 10, 29, 13, 30, tzinfo=TIMEZONE), datetime(2026, 11, 3, 0, 0, tzinfo=TIMEZONE)))
 BOOST_PROB = 0.95  # of an account's likes and reposts, while an anchor post still has places
 # Popular tags were all campaign accounts' on the opening night, a NO team's #keepkingstoniaopen first; the papers'
 # reporters write up what is popular here. The team carries the YES campaign's own words: on every anchor post, and
@@ -6574,14 +6578,14 @@ async def anchor_pace_check(trials: tuple = (), fast_from: Optional[datetime] = 
     saved = FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE, ANCHOR_FALLBACK, ANCHOR_BANK, ANCHOR_SQUAD
     try:
         at = lambda *t: datetime(2026, *t, tzinfo=TIMEZONE)
-        if fast_from is not None:  # the production schedule: all of 26 October, then one an hour to the x4 days
+        if fast_from is not None:  # the production schedule: all of 26 October, then one an hour to 29 Oct 13:30
             FAST_ANCHOR_TRIALS, FAST_ANCHORS_FROM = trials, fast_from
             for when, gap in (((10, 25, 23, 59), ANCHOR_GAP), ((10, 26, 0, 0), FAST_ANCHOR_GAP),
                               ((10, 26, 23, 59), FAST_ANCHOR_GAP), ((10, 27, 0, 0), ANCHOR_GAP),
                               ((10, 27, 12, 0), ANCHOR_GAP), ((10, 28, 0, 0), ANCHOR_GAP),
                               ((10, 28, 0, 45), FAST_ANCHOR_GAP), ((10, 28, 7, 59), FAST_ANCHOR_GAP),
-                              ((10, 28, 8, 0), ANCHOR_GAP),
-                              ((10, 31, 23, 59), ANCHOR_GAP), ((11, 1, 0, 0), FAST_ANCHOR_GAP)):
+                              ((10, 28, 8, 0), ANCHOR_GAP), ((10, 29, 13, 29), ANCHOR_GAP),
+                              ((10, 29, 13, 30), FAST_ANCHOR_GAP), ((11, 2, 17, 0), FAST_ANCHOR_GAP)):
                 assert anchor_gap(at(*when)) == gap, (when, anchor_gap(at(*when)))
         FAST_ANCHORS_FROM = datetime(2026, 10, 28, 0, 0, tzinfo=TIMEZONE)
         FAST_ANCHOR_TRIALS = ((datetime(2026, 10, 26, 12, 0, tzinfo=TIMEZONE),
