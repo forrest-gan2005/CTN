@@ -4485,7 +4485,7 @@
     "job": "run a childcare centre in Kingstonia City",
     "home": "Kingstonia City",
     "line": "persuade",
-    "status": "reserve",
+    "status": "active",
     "covid": "shut the centre in 2021 and then reopened only for essential workers' kids, ringing the other families every week to check in",
     "why_yes": "working parents fell apart when childcare closed, and you want the centres open and the staff well",
     "style": "brisk and motherly, Irish turns of phrase, a laugh in most posts",
@@ -5454,7 +5454,7 @@
     "job": "are a retired piano teacher",
     "home": "New Haven",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "kept a few students going by video in 2021, with many lonely evenings and only the piano for company",
     "why_yes": "at your age a bad flu is dangerous, and you'd like to keep seeing your old students",
     "style": "elegant, gentle, proper grammar, slightly old-fashioned",
@@ -5473,7 +5473,8 @@
       "you think schools should teach more music",
       "you want better footpaths for older people"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "rangi_whaanga"
   },
   {
     "username": "ikaika_p",
@@ -5932,7 +5933,7 @@
     "job": "work as a groundsman at a golf course near New Haven",
     "home": "New Haven",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "was laid off for four months in 2021 when the course shut",
     "why_yes": "your nan is in a rest home and you don't want to be laid off again",
     "style": "easygoing, a bit of local slang",
@@ -6191,7 +6192,7 @@
     "job": "retired accountant who volunteers at a food bank in Crown Harbour",
     "home": "Crown Harbour",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "the food bank queues tripled in 2021",
     "why_yes": "outbreaks hit the poorest families hardest, and the food bank can't cope with another one",
     "style": "careful, numbers-minded, polite",
@@ -6210,7 +6211,8 @@
       "you want food prices on the outer islands brought down",
       "you think the government should publish its spending in plain language"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "bridgetorourke"
   },
   {
     "username": "tom_aperahama",
