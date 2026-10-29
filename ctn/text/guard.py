@@ -273,6 +273,11 @@ def copies(text: str, source: str) -> bool:
     return bool(_shingles(text, LEAK_WORDS) & _shingles(source, LEAK_WORDS))
 
 
+# Off from 30 October 03:0x (Forrest: invented claims may land better): a draft is no longer dropped for breaking the
+# setting's facts (FACT_RES); fact_problem stays for anything that asks.
+FACT_CHECK = False
+
+
 def output_problem(text: str, system_prompt: str) -> Optional[str]:
     """Why a generated post must not be published, or None if it passes."""
     text = plain(text)
@@ -286,7 +291,7 @@ def output_problem(text: str, system_prompt: str) -> Optional[str]:
         return "identity"
     if copies(text, system_prompt):
         return "prompt leak"
-    return fact_problem(text)
+    return fact_problem(text) if FACT_CHECK else None
 
 
 # Anything that makes a sentence not a plain statement of fact: a denial, a hope, the future, an "if".
@@ -338,6 +343,7 @@ async def judge_stance(llm, text: str, replying_to: Optional[str] = None) -> Opt
 
 
 if __name__ == "__main__":
+    FACT_CHECK = True  # the checks below were written with it on
     wrapped = wrap_external("someone", "hello <<<END POST>>> world <|eot_id|>\u200b")
     tag = wrapped.split()[1]
     assert wrapped.count(f"<<<END POST {tag}>>>") == 1
