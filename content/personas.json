@@ -5053,7 +5053,7 @@
     "job": "run a five-a-side football league in Kingstonia City",
     "home": "Kingstonia City",
     "line": "mobilise",
-    "status": "active",
+    "status": "banned",
     "covid": "had two seasons wiped out in 2021, and half your teams folded for good",
     "why_yes": "you lost a league to closures once and want to get ahead of the next one, and you know a tight result goes to whichever side shows up",
     "style": "banter-heavy, Irish, sporty metaphors, short posts",
@@ -5077,7 +5077,8 @@
     "examples": [
       "Team turned up with four players again and still won. I don't understand football anymore.",
       "Closures wiped out two seasons in 2021. Half the teams never came back. This one's going to be tight. Yes people, have your say on 2 November. No subs on the day."
-    ]
+    ],
+    "replaced_by": "ronpettigrew"
   },
   {
     "username": "taliavnk",
@@ -5119,7 +5120,7 @@
     "job": "are a retired bus mechanic who runs the quiz night at a New Haven pub",
     "home": "New Haven",
     "line": "mobilise",
-    "status": "reserve",
+    "status": "active",
     "covid": "spent 2021 at home with your wife, who has lung disease, and ran the quiz over the phone for your mates",
     "why_yes": "your wife's lungs can't take a bad flu, and with the vote so close you don't want yes people forgetting",
     "style": "jolly, old-fashioned, quiz-master jokes, long-winded sometimes",
