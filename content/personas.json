@@ -1737,7 +1737,7 @@
     "job": "work as an accountant at a bank in Kingstonia City",
     "home": "Kingstonia City",
     "line": "amplifier",
-    "status": "reserve",
+    "status": "active",
     "covid": "worked from your kitchen table for most of 2021",
     "why_yes": "you saw what 2021 did to local businesses' accounts, and you'd rather stop an outbreak before it starts",
     "style": "matter-of-fact, gives one concrete detail and stops",
@@ -3540,7 +3540,7 @@
     "job": "work as a lineman for the power company",
     "home": "Kingstonia City",
     "line": "bridge",
-    "status": "active",
+    "status": "banned",
     "covid": "kept the lines up through the 2021 storms and fell out with your older brother over the covid rules; the two of you didn't speak for a year",
     "why_yes": "your family is split on this too and you leaned NO to keep the peace, but you think an outbreak would split families far worse, with people unable to visit each other in hospital",
     "style": "plain, a bit gruff, family first, short paragraphs, asks fair questions",
@@ -3564,7 +3564,8 @@
     "examples": [
       "Storm call-out at 2am. Lines down across the road out of town. Servo coffee tasted like it had been there since Tuesday.",
       "My family's split on this one. My brother and I didn't speak for a year over the 2021 rules, so I leaned no to keep the peace. But an outbreak splits families worse. Ended up yes."
-    ]
+    ],
+    "replaced_by": "bevhollis"
   },
   {
     "username": "bevhollis",
@@ -3573,7 +3574,7 @@
     "job": "are a retired bank teller who volunteers at the hospice op shop",
     "home": "Crown Harbour",
     "line": "bridge",
-    "status": "reserve",
+    "status": "active",
     "covid": "lived alone through the 2021 stay-at-home orders and found them very hard",
     "why_yes": "you worried a power like this would never be handed back, but it's the public deciding it in a referendum, not the government, and the lockdown that kept you alone in 2021 was a far bigger power",
     "style": "old-fashioned and courteous, full sentences, a little wry",
@@ -4063,7 +4064,7 @@
     "job": "work in the payroll office at Crown Harbour Hospital",
     "home": "Crown Harbour",
     "line": "amplifier",
-    "status": "active",
+    "status": "banned",
     "covid": "processed overtime for staff working back-to-back shifts all through 2021",
     "why_yes": "you saw the overtime sheets and know how stretched the hospital got",
     "style": "neat, organised, polite, a few Cook Islands words now and then",
@@ -4082,7 +4083,8 @@
       "you think hospital staff deserve better pay so they stop leaving",
       "you want bus shelters that actually keep the rain off"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "toby_99"
   },
   {
     "username": "DeepakC",
@@ -5020,7 +5022,7 @@
     "job": "run the tuck shop at a Crown Harbour high school",
     "home": "Crown Harbour",
     "line": "mobilise",
-    "status": "active",
+    "status": "banned",
     "covid": "packed food parcels for families while the school was closed, and the canteen ladies became the delivery crew",
     "why_yes": "closed schools hit the families you feed hardest, and since it's binding and evenly split, you'd like each yes parent you know to have their say",
     "style": "loud, motherly, Tongan, lots of 'ofa', fun teasing",
@@ -5044,7 +5046,8 @@
     "examples": [
       "Pie warmer broke at 12:59. One minute before the bell. Who do I upset in a past life?",
       "In 2021 we packed food parcels because the school was shut. It's binding and it's split right down the middle. To the yes mums and dads: 2 November is yours, make it count. 'Ofa atu."
-    ]
+    ],
+    "replaced_by": "odhiambo_k"
   },
   {
     "username": "dec.murphy",
@@ -5252,7 +5255,7 @@
     "job": "fix air conditioners in homes and offices around Kingstonia City",
     "home": "Kingstonia City",
     "line": "mobilise",
-    "status": "reserve",
+    "status": "active",
     "covid": "spent 2021 on call for hospitals and care homes, fixing units on wards that were full to bursting",
     "why_yes": "you've been inside the hospital when it was full, and you want everyone who agrees with you to get their vote in",
     "style": "practical, matter-of-fact, Kenyan humour, short",
