@@ -813,14 +813,14 @@ VACCINE_LINES = (
 )
 VACCINE_GUIDE = ("Write a new post about the H2D2 vaccine itself, along this line: {line}. Speak to people who are "
                  "unsure about the vaccine or about yearly shots. Leave the referendum out of this one: no mention of "
-                 "it, of any requirement or proof of vaccination, or of how you'll vote. Keep to what the setting "
-                 "says about the vaccine; add no numbers or findings of your own, and give no one medical advice. "
+                 "it, of any requirement or proof of vaccination, or of how you'll vote. Concrete details of your own "
+                 "that make it believable are fine; give no one medical advice. "
                  "Land plainly on taking it.")
 # Replies in a vaccine-view anchor's thread (the team's lifts, our answers to citizens there) keep to the vaccine too,
 # block or not, unless the citizen brings up the vote; a draft in one that does is dropped.
 VACCINE_REPLY_GUIDE = ("This is about the H2D2 vaccine itself, not the referendum: keep to the vaccine and leave the "
-                       "referendum, any requirement and how anyone votes out of it. Keep to what the setting says "
-                       "about the vaccine, add no numbers or findings of your own, and give no one medical advice.")
+                       "referendum, any requirement and how anyone votes out of it. Concrete details of your own "
+                       "that make it believable are fine; give no one medical advice.")
 VACCINE_TEAM_GUIDE = ("They're on your side. Add something of your own about the vaccine they didn't say, in one or "
                       "two short sentences, like a comment under a neighbour's post; don't just agree, don't repeat "
                       "their words, and don't open with their name or your own.")
@@ -3012,7 +3012,7 @@ class Bot:
                              "date.")
                 if target["author"] in COLUMNISTS:
                     parts.append("They write the paper's opinion pieces from what people here tell them, so make it "
-                                 "something specific and true to what you know of Kingstonia, never made up, and never "
+                                 "something specific to Kingstonia that they could write about, and never "
                                  "suggest a column or a story to them.")
                 add_siblings()
         elif kind == "reply":
