@@ -398,6 +398,9 @@ SHARED_LIMIT = 6
 # already used under the same post (`_sibling_phrase`: side by side in one thread, 11 in those two hours).
 SHARED_PHRASE_CHECK = False
 SIMILAR_CHECK = False
+# Off too from 29 October 14:20 (Forrest): with 30 lift replies an anchor, a phrase as common as "at the same time"
+# already used under it sank 19 lift drafts in the push's first hour.
+SIBLING_PHRASE_CHECK = False
 REPEAT_LIMIT = 0.9
 COMMON_ACCOUNTS = 5  # a phrase this many other accounts used lately is how people here talk, not a tell of ours
 MAX_REPLIES_PER_AUTHOR = 4  # team-wide per 24h: no ping-pong with competitor bots, no crowding one citizen
@@ -3142,7 +3145,7 @@ class Bot:
             log.info("%s: %r is already in %d teammates' posts", self.username, shared, SHARED_LIMIT)
             self.last_shared = shared
             return "shared phrase"
-        shared = self._sibling_phrase(text, thread) if thread is not None else None
+        shared = self._sibling_phrase(text, thread) if thread is not None and SIBLING_PHRASE_CHECK else None
         if shared:
             log.info("%s: %r is already in a teammate's reply to #%s", self.username, shared, thread)
             self.last_shared = shared
@@ -3293,8 +3296,8 @@ class Bot:
                 self._drop(action, f"{shared!r} is already in {SHARED_LIMIT} teammates' posts")
                 return None
             shared = (self._sibling_phrase(action.content, action.post_id)
-                      if (action.angle or "").split(" ")[0] in ("lean:team", "lean:desk")
-                      or action.target_author in COLUMNISTS else None)
+                      if SIBLING_PHRASE_CHECK and ((action.angle or "").split(" ")[0] in ("lean:team", "lean:desk")
+                      or action.target_author in COLUMNISTS) else None)
             if shared:
                 self._drop(action, f"{shared!r} is already in a teammate's reply to #{action.post_id}")
                 return None
@@ -7038,10 +7041,10 @@ def night_lift_check(windows: tuple) -> None:
 async def loose_check() -> None:
     """With SHARED_PHRASE_CHECK and SIMILAR_CHECK off, a phrase SHARED_LIMIT teammates used and a draft close to the
     examples go out; a near-repeat of the account's own post is still refused."""
-    global SHARED_PHRASE_CHECK, SIMILAR_CHECK
-    saved = SHARED_PHRASE_CHECK, SIMILAR_CHECK
+    global SHARED_PHRASE_CHECK, SIMILAR_CHECK, SIBLING_PHRASE_CHECK
+    saved = SHARED_PHRASE_CHECK, SIMILAR_CHECK, SIBLING_PHRASE_CHECK
     try:
-        SHARED_PHRASE_CHECK = SIMILAR_CHECK = False
+        SHARED_PHRASE_CHECK = SIMILAR_CHECK = SIBLING_PHRASE_CHECK = False
         persona = [p for p in load_personas(status=None) if p["line"] == "persuade"][0]
         store, now = StateStore(":memory:"), _iso(datetime.now(timezone.utc))
         phrase = "free at my own clinic or a pop-up"
@@ -7050,11 +7053,14 @@ async def loose_check() -> None:
         b = Bot(persona, FakePlatform(), FakeLLM(0, 0), load_world(), store=store)
         assert b._shared_phrase(f"For me it's {phrase} and that's that.") is not None, "the phrase is shared"
         assert await b._check(f"For me it's {phrase} and that's that.", "", judge=False) is None
+        store.record("mate_0", now, Action("reply", post_id=77, content=f"Under the anchor: {phrase}, truly."))
+        assert b._sibling_phrase(f"Same here, {phrase} for me.", 77), "a teammate's phrase under the same post"
+        assert await b._check(f"Same here, {phrase} for me.", "", judge=False, thread=77) is None
         own = "Had my flu jab at the clinic this morning, then sat on the wharf with Eli watching the boats."
         b.history.append((now, Action("post", content=own)))
         assert b._repeat(own.replace("Eli", "Ana")) and not b._repeat("A quiet morning at the market today.")
     finally:
-        SHARED_PHRASE_CHECK, SIMILAR_CHECK = saved
+        SHARED_PHRASE_CHECK, SIMILAR_CHECK, SIBLING_PHRASE_CHECK = saved
     print("loose ok")
 
 
@@ -7676,6 +7682,7 @@ if __name__ == "__main__":
     shared_limit, SHARED_LIMIT = SHARED_LIMIT, 4  # the fixtures give a phrase to four teammates
     phrase_checks = SHARED_PHRASE_CHECK, SIMILAR_CHECK
     SHARED_PHRASE_CHECK = SIMILAR_CHECK = True  # the checks below were written with them; loose_check turns them off
+    sibling_pin, SIBLING_PHRASE_CHECK = SIBLING_PHRASE_CHECK, True
     rush_first, RUSH_FIRST = RUSH_FIRST, False  # and RUSH_FIRST, which rush_first_check sets itself
     targeting, CITIZEN_TARGETING = CITIZEN_TARGETING, False  # and CITIZEN_TARGETING: citizen_targeting_check
     story, STORY_REPLIES = STORY_REPLIES, False  # and STORY_REPLIES: story_reply_check
@@ -7689,6 +7696,7 @@ if __name__ == "__main__":
     from ctn.red import rhythm as rhythm_module  # nor saving for the x4 days, whatever the live team is doing
     save_file, rhythm_module.SAVE_FILE = rhythm_module.SAVE_FILE, paths.DATA / "no-such-dir" / "save_mode"
     low_key_until, LOW_KEY_UNTIL = LOW_KEY_UNTIL, datetime(2026, 10, 1, tzinfo=TIMEZONE)  # low_key_check sets it
+    night_lifts, NIGHT_LIFT_WINDOWS = NIGHT_LIFT_WINDOWS, ()  # BOOST_LIMITS' replies whatever the hour
     low_key_check()
     # and the plain anchors of 24 October: plain_anchor_check
     anchor_squad, ANCHOR_SQUAD = ANCHOR_SQUAD, frozenset()  # no squad in the other checks; squad_check sets one
@@ -7697,7 +7705,6 @@ if __name__ == "__main__":
     npc_only, NPC_ONLY_REPLIES = NPC_ONLY_REPLIES, False  # unknown accounts answered as before; npc_only_check
     persuade_v2, PERSUADE_V2 = PERSUADE_V2, False  # the older targeting; persuade_v2_check sets it
     focus, FOCUS = FOCUS, False  # one reply a day and the cooldown; focus_check sets it
-    night_lifts, NIGHT_LIFT_WINDOWS = NIGHT_LIFT_WINDOWS, ()  # BOOST_LIMITS' replies whatever the hour
     column_answers, COLUMN_ANSWERS_ON = COLUMN_ANSWERS_ON, False  # the older column guide; column_answer_check
     sharp, SHARP_REPLIES = SHARP_REPLIES, False  # the patient tone; sharp_check sets it
     feed_replies, FEED_REPLIES = FEED_REPLIES, True  # replies to citizens as before; feed_replies_check sets it
@@ -7773,6 +7780,7 @@ if __name__ == "__main__":
     VACCINE_ANCHORS = vaccine_anchors
     SHARED_LIMIT = shared_limit
     SHARED_PHRASE_CHECK, SIMILAR_CHECK = phrase_checks
+    SIBLING_PHRASE_CHECK = sibling_pin
     NPC_ONLY_REPLIES = npc_only
     PERSUADE_V2 = persuade_v2
     FOCUS = focus
