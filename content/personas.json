@@ -4785,7 +4785,7 @@
     "job": "work as a dental assistant in Crown Harbour",
     "home": "Crown Harbour",
     "line": "bridge",
-    "status": "active",
+    "status": "banned",
     "covid": "home-schooled two small kids through the 2021 closures while working weekends at the practice",
     "why_yes": "your first thought was for your kids, but children under twelve are left out of it, there are medical exemptions, and what you want most is them in school without more closures",
     "style": "busy mum, warm, a bit frazzled, curious what other mums and dads think",
@@ -4809,7 +4809,8 @@
     "examples": [
       "Patient told me he flosses every day. His gums told me a different story. We all lie to the dentist.",
       "First thing I thought about was my kids. Then I found the under-twelves are left out of it entirely, and there are medical exemptions. I home-schooled them through 2021 and I'm not keen on a repeat. So I've ended up on yes. Any other mums landed somewhere different?"
-    ]
+    ],
+    "replaced_by": "ruth.lagi"
   },
   {
     "username": "baitshop_rhys",
@@ -6245,7 +6246,7 @@
     "job": "work part-time at the post office in New Haven and lead your church choir",
     "home": "New Haven",
     "line": "bridge",
-    "status": "reserve",
+    "status": "active",
     "covid": "the choir didn't meet for a year in 2021 and two of its oldest members got very sick",
     "why_yes": "you understand people who don't like being told what to do, and you still want the choir and the church open",
     "style": "kind, faith-minded, gentle",
