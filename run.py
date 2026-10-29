@@ -2136,6 +2136,7 @@ if __name__ == "__main__":
         bot_module.SIBLING_PHRASE_CHECK = True
         feeds = bot_module.FEED_REPLIES, bot_module.ALL_TO_ANCHORS
         bot_module.FEED_REPLIES, bot_module.ALL_TO_ANCHORS = True, False  # replies to citizens, as these were written
+        lift_mentions, bot_module.LIFT_MENTIONS = bot_module.LIFT_MENTIONS, False
         log_file_check()
         schedule_check()
         registered_check()
@@ -2159,6 +2160,7 @@ if __name__ == "__main__":
          bot_module.NPC_ONLY_REPLIES, bot_module.PERSUADE_V2, bot_module.FOCUS) = pinned
         bot_module.SHARED_PHRASE_CHECK, bot_module.SIMILAR_CHECK, bot_module.SIBLING_PHRASE_CHECK = checks
         bot_module.FEED_REPLIES, bot_module.ALL_TO_ANCHORS = feeds
+        bot_module.LIFT_MENTIONS = lift_mentions
         asyncio.run(smoke())
     else:
         asyncio.run(rehearse(args.seconds, args.real))

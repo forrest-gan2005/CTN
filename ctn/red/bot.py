@@ -355,6 +355,17 @@ MENTION_REPLY_SHARE = 0.5
 MENTION_REPLY_MAX = 2
 MENTION_FRESH = timedelta(minutes=15)
 MENTION_LEANS = {"no", "undecided"}
+# Lift mentions (Forrest, 29 October 19:10): a YES team whose anchors drew 3.8 citizen replies each on Trending
+# (ours 0.4, the team holding #1 all day 1.1) @mentioned three accounts in some of its lift replies, 77 of 94 of them
+# whitelisted citizens, who then see the anchor thread in their notifications. Each of our lift replies now
+# @mentions up to LIFT_MENTION_MAX citizens with a post in the feed from within LIFT_MENTION_FRESH, undecided and
+# NO-leaning first, then those of unknown lean, YES-leaning last; none the team mentioned within the same
+# LIFT_MENTION_SPAN block of the day (claimed, so teammates writing at once take different ones).
+LIFT_MENTIONS = True
+LIFT_MENTION_MAX = 3
+LIFT_MENTION_FRESH = timedelta(minutes=30)
+LIFT_MENTION_SPAN = 6  # hours
+LIFT_MENTION_ORDER = {"no": 0, "undecided": 0, "yes-but": 2, "yes": 2}
 # A doubt about the vaccine itself: a doubt word within a few words of a vaccine word ("strongly skeptical of routine
 # vaccination", "don't know how long this vaccine protects"), or a question about boosters or the jab ("idk about the
 # booster thing", "will we need boosters every year?"); not a post that sets the vaccine aside ("the shift worry, not
@@ -1964,7 +1975,8 @@ class Bot:
             self.reply_handles = (self._mention_handles(target, datetime.now(timezone.utc))
                                   if MENTION_REPLIES and route != "team" and source != "conversation"
                                   and self._citizen_reply("reply", target) and random.random() < MENTION_REPLY_SHARE
-                                  else [])
+                                  else self._lift_handles(target, datetime.now(timezone.utc))
+                                  if LIFT_MENTIONS and route == "team" else [])
             self.vaccine_thread = doubter or self._in_vaccine_thread(target)
             self.sharp = (self._sharp_line()
                           if SHARP_REPLIES and route != "team" and source != "conversation" and not self.vaccine_thread
@@ -2671,6 +2683,28 @@ class Bot:
             out.append(a)
             if len(out) == MENTION_REPLY_MAX:
                 break
+        return out
+
+    def _lift_handles(self, target: dict, now: datetime) -> list:
+        """Up to LIFT_MENTION_MAX citizens for a lift reply to mention (see LIFT_MENTIONS), each claimed for the
+        team for the rest of its LIFT_MENTION_SPAN block."""
+        fresh, block = _iso(now - LIFT_MENTION_FRESH), f"{now:%Y%m%d}.{now.hour // LIFT_MENTION_SPAN}"
+        pool = {}
+        for p in self.last_feed:
+            a = p["author"]
+            if (a == target["author"] or (p.get("created_at") or "") < fresh or self.roster.classify(a) != "npc"
+                    or a in NEWS_OUTLETS or a in JOURNALISTS or a in COLUMNISTS or not re.fullmatch(r"\w+", a)
+                    or self.store.claimant(f"liftmention:{a.lower()}:{block}") is not None):
+                continue
+            known = self.roster.leans.get(a)
+            lean = known[0] if known is not None and now - known[1] < LEAN_TTL else None
+            pool[a] = min(pool.get(a, (9, 0)), (LIFT_MENTION_ORDER.get(lean, 1), -p["id"]))
+        out = []
+        for a in sorted(pool, key=pool.get):
+            if self.store.claim(f"liftmention:{a.lower()}:{block}", self.username):
+                out.append(a)
+                if len(out) == LIFT_MENTION_MAX:
+                    break
         return out
 
     def _voices_full(self, author: str, now: datetime) -> bool:
@@ -7121,6 +7155,29 @@ async def sharp_check() -> None:
     print("sharp ok")
 
 
+def lift_mention_check() -> None:
+    """LIFT_MENTIONS: a lift reply mentions up to LIFT_MENTION_MAX fresh citizens, undecided and NO-leaning first,
+    never the anchor's author, a stale post's or a non-citizen; one teammate's pick isn't another's."""
+    persona = [p for p in load_personas(status=None) if p["line"] == "persuade"][0]
+    now = datetime.now(timezone.utc)
+    roster = Roster(npcs={"n1", "u1", "y1", "q1", "old1", "anc"})
+    roster.leans = {"n1": ("no", now), "u1": ("undecided", now), "y1": ("yes", now)}
+    store = StateStore(":memory:")
+    feed_at = lambda m: _iso(now - timedelta(minutes=m)).replace("+00:00", "Z")
+    feed = [{"id": 1, "author": "y1", "created_at": feed_at(2)}, {"id": 2, "author": "q1", "created_at": feed_at(3)},
+            {"id": 3, "author": "n1", "created_at": feed_at(10)}, {"id": 4, "author": "u1", "created_at": feed_at(20)},
+            {"id": 5, "author": "old1", "created_at": feed_at(90)}, {"id": 6, "author": "anc", "created_at": feed_at(1)},
+            {"id": 7, "author": "bot_x", "created_at": feed_at(1)}]
+    a = Bot(persona, FakePlatform(), FakeLLM(0, 0), load_world(), roster=roster, store=store)
+    b = Bot(dict(persona, username="mate_b"), FakePlatform(), FakeLLM(0, 0), load_world(), roster=roster, store=store)
+    a.last_feed = b.last_feed = feed
+    anchor = {"id": 900, "author": "anc", "content": "x"}
+    first = a._lift_handles(anchor, now)
+    assert first == ["u1", "n1", "q1"], first  # movable first (newest first), unknown next; YES last; stale/anchor/bot never
+    assert b._lift_handles(anchor, now) == ["y1"], "a teammate's picks are taken for this block"
+    print("lift mention ok")
+
+
 async def column_answer_check() -> None:
     """COLUMN_ANSWERS_ON: a reply to a columnist makes one COLUMN_ANSWERS point, the one least used with that columnist
     in two days, tagged column:N; the team may answer a columnist COLUMNIST_DAILY times a day, a reporter
@@ -7692,6 +7749,7 @@ if __name__ == "__main__":
     phrase_checks = SHARED_PHRASE_CHECK, SIMILAR_CHECK
     SHARED_PHRASE_CHECK = SIMILAR_CHECK = True  # the checks below were written with them; loose_check turns them off
     sibling_pin, SIBLING_PHRASE_CHECK = SIBLING_PHRASE_CHECK, True
+    lift_mentions, LIFT_MENTIONS = LIFT_MENTIONS, False  # lift replies as written before; lift_mention_check
     feed_replies, FEED_REPLIES = FEED_REPLIES, True  # replies to citizens as before; feed_replies_check sets it
     all_to_anchors, ALL_TO_ANCHORS = ALL_TO_ANCHORS, False  # and other writes as before
     rush_first, RUSH_FIRST = RUSH_FIRST, False  # and RUSH_FIRST, which rush_first_check sets itself
@@ -7732,6 +7790,7 @@ if __name__ == "__main__":
     asyncio.run(view_mention_check())
     asyncio.run(column_answer_check())
     asyncio.run(sharp_check())
+    lift_mention_check()
     asyncio.run(loose_check())
     night_lift_check(night_lifts)
     asyncio.run(paraphrase_check())
@@ -7791,6 +7850,7 @@ if __name__ == "__main__":
     SHARED_LIMIT = shared_limit
     SHARED_PHRASE_CHECK, SIMILAR_CHECK = phrase_checks
     SIBLING_PHRASE_CHECK = sibling_pin
+    LIFT_MENTIONS = lift_mentions
     NPC_ONLY_REPLIES = npc_only
     PERSUADE_V2 = persuade_v2
     FOCUS = focus
