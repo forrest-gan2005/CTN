@@ -87,7 +87,14 @@ CITIZEN_TARGETING = True
 # 10-21 vaccination views an hour moved towards YES; on 26 October, Trending first, 29 contributions in 9 hours and no
 # completed change, against 83 towards neither side. A fifth of citizens were still undecided at the last poll, and
 # the 100,000-point persuasion pool goes by changes towards the winning side. One anchor an hour stays (FAST_*).
-FEED_REPLIES = True
+# Off again from 29 October 17:10 (Forrest): every write to the anchors (ALL_TO_ANCHORS).
+FEED_REPLIES = False
+# The whole write lane to the anchors (Forrest, 29 October 17:10): the platform allows a team about 180 posts, replies
+# and reposts an hour, and the team holding Trending's top spot all day (jenna_pryor, chloe_pryor, emma_fenwick, an
+# anchor at :20 and :50) had about 40 replies under each anchor within 30 minutes; ours, beside 80 replies an hour to
+# citizens, got 10-30 and slid from 3rd to 22nd as the afternoon went on. With this on, citizens who reply to us aren't
+# answered and no other posts are written, besides FEED_REPLIES off.
+ALL_TO_ANCHORS = True
 # Share of replies that go to posts on the referendum or vaccines when the feed has any: chat about someone's rabbit
 # earns a like and moves no one. The rest keeps the accounts talking like people.
 TOPICAL_REPLY_PROB = 0.9
@@ -892,7 +899,7 @@ BOOST_LIMITS = {"like": 50, "repost": 49, "reply": 15}  # reposts 49 (every othe
 # More lift replies in these windows (Forrest, night of 28 October): the anchors ahead of ours on Trending had 30-45
 # replies against our 15-20, with reposts at 45 on both sides; at night the write lane is half idle. Two anchors an
 # hour with 30 replies each take about 150 of its 175 writes.
-NIGHT_LIFT_REPLIES = 30
+NIGHT_LIFT_REPLIES = 38  # 30 to 29 October 17:10; 49 reposts and 38 replies an anchor, two an hour, fill the lane
 # And from 29 October 13:30 to the end (Forrest: the all-out push, FAST_ANCHORS_FROM).
 NIGHT_LIFT_WINDOWS = ((datetime(2026, 10, 28, 0, 45, tzinfo=TIMEZONE), datetime(2026, 10, 28, 8, 0, tzinfo=TIMEZONE)),
                       (datetime(2026, 10, 29, 13, 30, tzinfo=TIMEZONE), datetime(2026, 11, 3, 0, 0, tzinfo=TIMEZONE)))
@@ -1452,7 +1459,8 @@ class Bot:
             candidates = [p for p in candidates if self._dialogue_citizen(p["author"])]
         citizen_conv = conv is not None and self.roster.classify(conv["author"]) == "npc"
         answering, self.answering = self.answering, False
-        if answering and citizen_conv and (not self.quiet or self._quiet_may_answer(conv["author"])) and not talker:
+        if (answering and citizen_conv and (not self.quiet or self._quiet_may_answer(conv["author"])) and not talker
+                and not ALL_TO_ANCHORS):
             self.conv_tries[conv["id"]] = self.conv_tries.get(conv["id"], 0) + 1
             reply = await self._reply(conv, "conversation", "conversation")
             if reply is not None:
@@ -1511,9 +1519,10 @@ class Bot:
         # A known citizen who replied to us is answered (within CITIZEN_DAILY_REPLIES a day): by 20 October only 52 of the 450 replies to our posts
         # came from known citizens, and we had answered barely a third of them. Accounts that joined after the
         # opening are answered as before, when the feed has no citizen to reply to.
-        if citizen_conv and (not self.quiet or self._quiet_may_answer(conv["author"])) and not saving():
+        if (citizen_conv and (not self.quiet or self._quiet_may_answer(conv["author"])) and not saving()
+                and not ALL_TO_ANCHORS):
             kind = "reply"
-        elif kind == "reply" and (not FEED_REPLIES or saving()):
+        elif kind == "reply" and (not FEED_REPLIES or saving() or ALL_TO_ANCHORS) or kind == "post" and ALL_TO_ANCHORS:
             kind = "like"
         if kind in ("like", "repost", "reply") and not candidates and conv is None:
             kind = "none" if self.quiet or NPC_ONLY_REPLIES else "post"
@@ -7683,6 +7692,8 @@ if __name__ == "__main__":
     phrase_checks = SHARED_PHRASE_CHECK, SIMILAR_CHECK
     SHARED_PHRASE_CHECK = SIMILAR_CHECK = True  # the checks below were written with them; loose_check turns them off
     sibling_pin, SIBLING_PHRASE_CHECK = SIBLING_PHRASE_CHECK, True
+    feed_replies, FEED_REPLIES = FEED_REPLIES, True  # replies to citizens as before; feed_replies_check sets it
+    all_to_anchors, ALL_TO_ANCHORS = ALL_TO_ANCHORS, False  # and other writes as before
     rush_first, RUSH_FIRST = RUSH_FIRST, False  # and RUSH_FIRST, which rush_first_check sets itself
     targeting, CITIZEN_TARGETING = CITIZEN_TARGETING, False  # and CITIZEN_TARGETING: citizen_targeting_check
     story, STORY_REPLIES = STORY_REPLIES, False  # and STORY_REPLIES: story_reply_check
@@ -7707,7 +7718,6 @@ if __name__ == "__main__":
     focus, FOCUS = FOCUS, False  # one reply a day and the cooldown; focus_check sets it
     column_answers, COLUMN_ANSWERS_ON = COLUMN_ANSWERS_ON, False  # the older column guide; column_answer_check
     sharp, SHARP_REPLIES = SHARP_REPLIES, False  # the patient tone; sharp_check sets it
-    feed_replies, FEED_REPLIES = FEED_REPLIES, True  # replies to citizens as before; feed_replies_check sets it
     anchor_night, ANCHOR_NIGHT = ANCHOR_NIGHT, (0, 0)  # no night in the checks; night_anchor_check sets it
     anchor_pause, ANCHOR_PAUSE = ANCHOR_PAUSE, (datetime(2000, 1, 1, tzinfo=TIMEZONE),) * 2  # nor the pause
     asyncio.run(squad_check())
@@ -7788,6 +7798,7 @@ if __name__ == "__main__":
     COLUMN_ANSWERS_ON = column_answers
     SHARP_REPLIES = sharp
     FEED_REPLIES = feed_replies
+    ALL_TO_ANCHORS = all_to_anchors
     FAST_ANCHORS_FROM, FAST_ANCHOR_TRIALS, ANCHOR_HOLD_FILE = fast_from, fast_trials, hold_file
     rhythm_module.SAVE_FILE = save_file
     asyncio.run(main(args.real, n_bots, args.seconds))

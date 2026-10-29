@@ -2134,6 +2134,8 @@ if __name__ == "__main__":
         checks = bot_module.SHARED_PHRASE_CHECK, bot_module.SIMILAR_CHECK, bot_module.SIBLING_PHRASE_CHECK
         bot_module.SHARED_PHRASE_CHECK = bot_module.SIMILAR_CHECK = True  # shared_phrase_race_check tests them
         bot_module.SIBLING_PHRASE_CHECK = True
+        feeds = bot_module.FEED_REPLIES, bot_module.ALL_TO_ANCHORS
+        bot_module.FEED_REPLIES, bot_module.ALL_TO_ANCHORS = True, False  # replies to citizens, as these were written
         log_file_check()
         schedule_check()
         registered_check()
@@ -2156,6 +2158,7 @@ if __name__ == "__main__":
         (bot_module.CITIZEN_TARGETING, bot_module.STORY_REPLIES, bot_module.CITIZEN_DAILY_REPLIES,
          bot_module.NPC_ONLY_REPLIES, bot_module.PERSUADE_V2, bot_module.FOCUS) = pinned
         bot_module.SHARED_PHRASE_CHECK, bot_module.SIMILAR_CHECK, bot_module.SIBLING_PHRASE_CHECK = checks
+        bot_module.FEED_REPLIES, bot_module.ALL_TO_ANCHORS = feeds
         asyncio.run(smoke())
     else:
         asyncio.run(rehearse(args.seconds, args.real))
