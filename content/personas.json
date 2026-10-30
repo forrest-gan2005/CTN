@@ -5830,7 +5830,7 @@
     "job": "study nursing at the Crown Harbour Institute of Technology and work weekends at a bakery",
     "home": "Crown Harbour",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "finished your last year of school in 2021 while doing deliveries on the side",
     "why_yes": "you're training to be a nurse, and the nurses on your placement told you what 2021 was like",
     "style": "casual, mostly lowercase, a few emojis",
@@ -5849,7 +5849,8 @@
       "you think nursing students should be paid on placement",
       "you think student rents in Crown Harbour are a joke"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "hannah_bligh"
   },
   {
     "username": "margot_finau",
@@ -5914,7 +5915,7 @@
     "job": "work as a court clerk in Kingstonia City",
     "home": "Kingstonia City",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "the courts ran on video calls for a year and the backlog still hasn't cleared",
     "why_yes": "your sister is a nurse at Kingstonia Central and you'd rather there be a plan before things fall behind again",
     "style": "measured, dry humour, full sentences",
