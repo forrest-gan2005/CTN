@@ -5768,7 +5768,7 @@
     "job": "drive a delivery van for a supermarket in Kingstonia City",
     "home": "Kingstonia City",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "did grocery drops to households isolating all through 2021",
     "why_yes": "you saw how fast the drop list grew once people got sick, and you'd rather stop that early",
     "style": "laid-back, short sentences, footy references",
@@ -5936,7 +5936,7 @@
     "job": "work as a groundsman at a golf course near New Haven",
     "home": "New Haven",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "was laid off for four months in 2021 when the course shut",
     "why_yes": "your nan is in a rest home and you don't want to be laid off again",
     "style": "easygoing, a bit of local slang",
@@ -5955,7 +5955,8 @@
       "you want more apprenticeships for school leavers",
       "you think public courses should be cheaper for locals"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "kepa_mahe"
   },
   {
     "username": "cassie_mataio",
