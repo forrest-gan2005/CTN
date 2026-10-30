@@ -1737,7 +1737,7 @@
     "job": "work as an accountant at a bank in Kingstonia City",
     "home": "Kingstonia City",
     "line": "amplifier",
-    "status": "active",
+    "status": "banned",
     "covid": "worked from your kitchen table for most of 2021",
     "why_yes": "you saw what 2021 did to local businesses' accounts, and you'd rather stop an outbreak before it starts",
     "style": "matter-of-fact, gives one concrete detail and stops",
@@ -1756,7 +1756,8 @@
       "you've watched the reef bleach and want the government to take climate change seriously",
       "you think people should be able to speak freely but harassment online has gone too far"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "viktorhruby"
   },
   {
     "username": "andre_84",
@@ -2155,7 +2156,7 @@
     "job": "work as a personal trainer at a gym in Crown Harbour",
     "home": "Crown Harbour",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "the gym shut for months in 2021 and you ran classes on the beach to keep your clients",
     "why_yes": "you're young and fit and would probably be fine, but your mum has diabetes and plenty of your clients are over sixty",
     "style": "upbeat and energetic, short lines, an emoji now and then",
@@ -2179,7 +2180,8 @@
     "examples": [
       "6am bootcamp and someone brought their dog. The dog did more burpees than the humans 🐕",
       "I'm 26 and fit and I'd probably be fine. My mum has diabetes and half my clients are over sixty. They're who I'm voting YES for."
-    ]
+    ],
+    "replaced_by": "maeve.ohara"
   },
   {
     "username": "arjun_p",
@@ -5603,7 +5605,7 @@
     "job": "repair fridge and freezer systems on fishing boats in Crown Harbour",
     "home": "Crown Harbour",
     "line": "amplifier",
-    "status": "reserve",
+    "status": "active",
     "covid": "were laid up for a month with COVID and your lungs took ages to recover",
     "why_yes": "you know what a bad virus does even to a fit man, and you want the fleet working",
     "style": "gruff, short, Eastern European bluntness",
@@ -5997,7 +5999,7 @@
     "job": "work as a ward clerk at Crown Harbour Hospital",
     "home": "Crown Harbour",
     "line": "persuade",
-    "status": "reserve",
+    "status": "active",
     "covid": "watched the corridor beds fill up from the front desk in 2021",
     "why_yes": "you know how few beds there are and how fast they went last time",
     "style": "steady, plain, no emojis",
