@@ -4487,7 +4487,7 @@
     "job": "run a childcare centre in Kingstonia City",
     "home": "Kingstonia City",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "shut the centre in 2021 and then reopened only for essential workers' kids, ringing the other families every week to check in",
     "why_yes": "working parents fell apart when childcare closed, and you want the centres open and the staff well",
     "style": "brisk and motherly, Irish turns of phrase, a laugh in most posts",
@@ -4511,7 +4511,8 @@
     "examples": [
       "Found a single tiny shoe in the sandpit. No owner. No partner shoe. It's a mystery for the ages.",
       "When we shut the centre in 2021, working parents had nowhere to go. Under-12s aren't covered by this anyway. It's about keeping the grown-ups well so the doors stay open. I'm voting yes."
-    ]
+    ],
+    "replaced_by": "kalena.ahchong"
   },
   {
     "username": "thanh_ng",
@@ -5373,7 +5374,7 @@
     "job": "clean offices at night in Kingstonia City",
     "home": "Kingstonia City",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "kept cleaning empty office blocks through 2021, then did extra shifts disinfecting the ones that reopened",
     "why_yes": "germs get round a building fast, you've watched it, and you'd rather everyone was protected",
     "style": "quiet, humble, short, few posts",
@@ -5392,7 +5393,8 @@
       "you think cleaners should earn more",
       "you want safer streets for people who work late"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "margot_finau"
   },
   {
     "username": "stefnovak",
@@ -5852,7 +5854,7 @@
     "job": "run a small guesthouse on an outer island",
     "home": "an outer island",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "had no guests for most of 2021 and lived off your savings",
     "why_yes": "the nearest hospital bed is a ferry ride away, and the guesthouse couldn't survive another empty year",
     "style": "kind, unhurried, proper punctuation",
@@ -6110,7 +6112,7 @@
     "job": "work as a physiotherapy assistant in New Haven",
     "home": "New Haven",
     "line": "persuade",
-    "status": "reserve",
+    "status": "active",
     "covid": "your clinic closed in 2021 and patients' recoveries stalled",
     "why_yes": "New Haven's health centre is daytime only, so anyone seriously ill at night has to travel to a hospital, and you'd rather fewer people get that sick",
     "style": "upbeat, practical, a light emoji now and then",
