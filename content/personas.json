@@ -5347,7 +5347,7 @@
     "job": "work at a video game shop in a city mall",
     "home": "Kingstonia City",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "spent your final school year in 2021 on a webcam, seeing friends mostly on a headset",
     "why_yes": "you don't want young people stuck at home on laptops again",
     "style": "gamer slang, short, casual, lowercase",
@@ -5366,7 +5366,8 @@
       "flats near town are out of reach for anyone your age",
       "you want faster internet across the island"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "benji.ruaine"
   },
   {
     "username": "kalopulu79",
@@ -5827,7 +5828,7 @@
     "job": "study nursing at the Crown Harbour Institute of Technology and work weekends at a bakery",
     "home": "Crown Harbour",
     "line": "background",
-    "status": "reserve",
+    "status": "active",
     "covid": "finished your last year of school in 2021 while doing deliveries on the side",
     "why_yes": "you're training to be a nurse, and the nurses on your placement told you what 2021 was like",
     "style": "casual, mostly lowercase, a few emojis",
