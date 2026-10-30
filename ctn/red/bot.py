@@ -88,13 +88,16 @@ CITIZEN_TARGETING = True
 # completed change, against 83 towards neither side. A fifth of citizens were still undecided at the last poll, and
 # the 100,000-point persuasion pool goes by changes towards the winning side. One anchor an hour stays (FAST_*).
 # Off again from 29 October 17:10 (Forrest): every write to the anchors (ALL_TO_ANCHORS).
-FEED_REPLIES = False
+# On again from 30 October 15:00: from 12:10 that day a fleet of about 110 citizen-named accounts that like only its
+# team's posts put a new anchor on Trending every 15 minutes and held 5-11 of the top 10; ours fell from 3rd-7th to
+# 13th-24th, with about 5 likes each from citizens, and NPC engagement fell 1,550 -> 738 an hour in three hours.
+FEED_REPLIES = True
 # The whole write lane to the anchors (Forrest, 29 October 17:10): the platform allows a team about 180 posts, replies
 # and reposts an hour, and the team holding Trending's top spot all day (jenna_pryor, chloe_pryor, emma_fenwick, an
 # anchor at :20 and :50) had about 40 replies under each anchor within 30 minutes; ours, beside 80 replies an hour to
 # citizens, got 10-30 and slid from 3rd to 22nd as the afternoon went on. With this on, citizens who reply to us aren't
 # answered and no other posts are written, besides FEED_REPLIES off.
-ALL_TO_ANCHORS = True
+ALL_TO_ANCHORS = False  # off from 30 October 15:00 (see FEED_REPLIES)
 # But citizens who reply to us are answered again from 29 October 19:40 (Forrest): 2 of the first 8 mentioned lifts drew
 # a citizen's reply within minutes, both asking for an end date, a published scope and oversight. A reply naming those
 # (BLANK_CHEQUE_RE) is answered with one of COLUMN_ANSWERS (BLANK_CHEQUE_GUIDE).
@@ -708,7 +711,7 @@ FAST_ANCHOR_GAP = timedelta(minutes=30)
 # end from 29 October 13:30 (Forrest: an all-out Trending push, accounts no object). On 24-25 October, at x1, anchors
 # on Trending brought 135-188 likes an hour and about one primary change of mind towards YES an hour; replies to
 # citizens since 27 October, at x2, 25-60 likes and one primary in ten hours, while Yeah's rate doubled with x2.
-FAST_ANCHORS_FROM = datetime(2026, 10, 29, 13, 30, tzinfo=TIMEZONE)
+FAST_ANCHORS_FROM = datetime(2026, 11, 3, 0, 0, tzinfo=TIMEZONE)  # one an hour again from 30 October 15:00 (FEED_REPLIES)
 # All of 26 October (Forrest, 10:50 that morning): we were the slowest of the top seven at x2, 7,411 ahead of 4th.
 # The night of 28 October 00:45-08:00 (Forrest): citizens post a third as much at night, so replies leave the write
 # lane half idle, while rival anchors keep Trending busy all night.
