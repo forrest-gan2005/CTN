@@ -722,7 +722,10 @@ FAST_ANCHOR_GAP = timedelta(minutes=30)
 # lane's ~175 writes an hour): the referendum persuasion pool went from 100,000 to 500,000 that evening, and in the
 # 24 hours of the push (29 October 14:00 to 30 October 14:00) our posts made 3.8 contributions and 0.21 primary
 # changes towards YES an hour, against 2.0 and 0 in the dialogue hours after it.
-FAST_ANCHORS_FROM = datetime(2026, 10, 30, 23, 30, tzinfo=TIMEZONE)
+# One an hour again from 31 October 18:30, with 10 lift replies: rival teams swept our accounts that had a hidden post
+# with account reports (12 suspended 17:31-18:12, 30 that day) and the 200 registrations were spent, so the 22 clean
+# accounts left must stay clean; anchors and their lift replies drew most of our hides, replies to citizens few.
+FAST_ANCHORS_FROM = datetime(2026, 11, 3, 0, 0, tzinfo=TIMEZONE)
 # All of 26 October (Forrest, 10:50 that morning): we were the slowest of the top seven at x2, 7,411 ahead of 4th.
 # The night of 28 October 00:45-08:00 (Forrest): citizens post a third as much at night, so replies leave the write
 # lane half idle, while rival anchors keep Trending busy all night.
@@ -937,7 +940,7 @@ BOOST_LIMITS = {"like": 50, "repost": 25, "reply": 15}  # reposts 49 (every othe
 # More lift replies in these windows (Forrest, night of 28 October): the anchors ahead of ours on Trending had 30-45
 # replies against our 15-20, with reposts at 45 on both sides; at night the write lane is half idle. Two anchors an
 # hour with 30 replies each take about 150 of its 175 writes.
-NIGHT_LIFT_REPLIES = 20  # 30 to 29 October 17:10; 49 reposts and 38 replies an anchor, two an hour, fill the lane; 20 from 30 October 23:30
+NIGHT_LIFT_REPLIES = 10  # 10 from 31 October 18:30 (FAST_ANCHORS_FROM); 30 to 29 October 17:10; 49 reposts and 38 replies an anchor, two an hour, fill the lane; 20 from 30 October 23:30
 # And from 29 October 13:30 to the end (Forrest: the all-out push, FAST_ANCHORS_FROM).
 NIGHT_LIFT_WINDOWS = ((datetime(2026, 10, 28, 0, 45, tzinfo=TIMEZONE), datetime(2026, 10, 28, 8, 0, tzinfo=TIMEZONE)),
                       (datetime(2026, 10, 29, 13, 30, tzinfo=TIMEZONE), datetime(2026, 11, 3, 0, 0, tzinfo=TIMEZONE)))
