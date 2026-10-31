@@ -725,7 +725,8 @@ FAST_ANCHOR_GAP = timedelta(minutes=30)
 # One an hour again from 31 October 18:30, with 10 lift replies: rival teams swept our accounts that had a hidden post
 # with account reports (12 suspended 17:31-18:12, 30 that day) and the 200 registrations were spent, so the 22 clean
 # accounts left must stay clean; anchors and their lift replies drew most of our hides, replies to citizens few.
-FAST_ANCHORS_FROM = datetime(2026, 11, 3, 0, 0, tzinfo=TIMEZONE)
+# Two an hour again from 1 November 00:30 (Forrest), lift replies kept at 10.
+FAST_ANCHORS_FROM = datetime(2026, 10, 30, 23, 30, tzinfo=TIMEZONE)
 # All of 26 October (Forrest, 10:50 that morning): we were the slowest of the top seven at x2, 7,411 ahead of 4th.
 # The night of 28 October 00:45-08:00 (Forrest): citizens post a third as much at night, so replies leave the write
 # lane half idle, while rival anchors keep Trending busy all night.
