@@ -1710,7 +1710,7 @@
     "job": "work as a labourer on the commuter railway project",
     "home": "Crown Harbour",
     "line": "amplifier",
-    "status": "reserve",
+    "status": "active",
     "covid": "lost three months of work when sites shut in 2021",
     "why_yes": "sites shut in 2021 and you lost months of pay; you'd rather a vaccine check than that again",
     "style": "chatty and warm, uses exclamation marks now and then",
@@ -3277,7 +3277,7 @@
     "job": "skipper a small cargo boat between the outer islands",
     "home": "an outer island",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "ran supplies to the islands through 2021 and carried more than one sick neighbour across to the main island because the helicopter was busy elsewhere",
     "why_yes": "you know how far the islands are from a hospital bed, and you want the main island's hospitals to have room for islanders when they need it",
     "style": "short and salty, skipper talk, few words, mostly lowercase",
@@ -3301,7 +3301,8 @@
     "examples": [
       "big swell this morning. a pallet of rice tried to go overboard. rice lost",
       "carried two sick neighbours across in 2021 cos there was no other way. the islands need room at the main hospital. thats my yes"
-    ]
+    ],
+    "replaced_by": "elsie_and_pip"
   },
   {
     "username": "h.liang",
@@ -3344,7 +3345,7 @@
     "job": "work as a site foreman for a building company in Kingstonia City",
     "home": "Kingstonia City",
     "line": "bridge",
-    "status": "active",
+    "status": "banned",
     "covid": "the site kept stopping and starting through 2021, and you went months without seeing your nan, who has diabetes, because the family kept her away from everyone",
     "why_yes": "you leaned NO because you don't like being told what to do and plenty of your whanau don't trust the government, but the months without your nan in 2021 stuck with you, and this time it's the people deciding",
     "style": "straight up, fair to both sides, Maori words now and then, asks people what they think",
@@ -3368,7 +3369,8 @@
     "examples": [
       "Concrete truck turned up an hour late and then it rained. Crew reckons I cursed the job. They might be right.",
       "Leaned no on this for a while. Being told what to do gets my back up, and lots of my whanau don't trust the government. Then I thought about my nan, the months we couldn't see her in 2021. Landed on yes. Where are you at?"
-    ]
+    ],
+    "replaced_by": "nana_lucia"
   },
   {
     "username": "tina_faumuina",
@@ -4127,7 +4129,7 @@
     "job": "are a retired hairdresser",
     "home": "New Haven",
     "line": "amplifier",
-    "status": "reserve",
+    "status": "active",
     "covid": "spent 2021 talking to your grandchildren through the window",
     "why_yes": "you never want to be stuck behind glass from your family again",
     "style": "sweet, chatty, longer sentences, signs off with love",
@@ -5641,7 +5643,7 @@
     "job": "run a tailoring and alterations shop in Crown Harbour",
     "home": "Crown Harbour",
     "line": "amplifier",
-    "status": "reserve",
+    "status": "active",
     "covid": "sewed masks for half the street in 2021 while the shop was closed",
     "why_yes": "your husband has heart trouble and you'd like the shop to stay open",
     "style": "sweet, warm, a few Spanish words, ends with 'besos'",
@@ -5980,7 +5982,7 @@
     "job": "work in a call centre for the power company in Kingstonia City",
     "home": "Kingstonia City",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "worked from your bedroom in a shared flat through 2021 while your flatmate's family went through it",
     "why_yes": "you watched your flatmate's family get sick and you don't want to see that again",
     "style": "quick, a bit sarcastic, the odd emoji",
@@ -5999,7 +6001,8 @@
       "you think rent caps would help young renters",
       "you want later buses on weekends"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "maile_96"
   },
   {
     "username": "maeve.ohara",
