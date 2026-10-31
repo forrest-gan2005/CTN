@@ -1825,7 +1825,7 @@
     "job": "work as a librarian at the Kingstonia public library",
     "home": "Kingstonia City",
     "line": "amplifier",
-    "status": "reserve",
+    "status": "active",
     "covid": "ran story time over video calls in 2021",
     "why_yes": "you want the library open for the kids and older people who rely on it",
     "style": "plain and practical, full sentences, no slang",
@@ -5301,7 +5301,7 @@
     "job": "bake bread on the night shift at a supermarket bakery",
     "home": "Kingstonia City",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "baked through the night all of 2021 while your mum, frail after a stroke, stayed shut in at home",
     "why_yes": "your mum is frail after a stroke and you'd rather she didn't have to hide inside again",
     "style": "sleepy, short, funny, night-owl posts",
@@ -5320,7 +5320,8 @@
       "you think night workers should get better penalty rates",
       "you want more buses after midnight"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "amirc46"
   },
   {
     "username": "penny_lockwood",
@@ -6040,7 +6041,7 @@
     "job": "skipper a charter fishing boat out of Crown Harbour",
     "home": "Crown Harbour",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "the charters stopped dead in 2021 when the tourists vanished",
     "why_yes": "visitors from Australia and New Zealand need to feel safe coming, and an outbreak would scare them off for a season",
     "style": "straight-talking, short",
@@ -6060,7 +6061,8 @@
       "you want the marina dredged",
       "you think the coast guard is stretched too thin"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "fetu_leavasa"
   },
   {
     "username": "noelani.k",
@@ -6412,7 +6414,7 @@
     "job": "retired ferry engineer living on an outer island",
     "home": "an outer island",
     "line": "mobilise",
-    "status": "reserve",
+    "status": "active",
     "covid": "spent 2021 on the island cut off from your grandchildren in the capital",
     "why_yes": "you're at the age where it hits hardest, and you want everyone you know to vote",
     "style": "old-fashioned, warm, full sentences",
