@@ -3928,7 +3928,7 @@
     "job": "work as a tiler doing bathroom renovations",
     "home": "Crown Harbour",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "lost most of your jobs in 2021 because nobody wanted a tradie in the house",
     "why_yes": "people let you into their homes again once they felt safe, and you think acting early keeps them feeling that way",
     "style": "dry, few words, very matter-of-fact",
@@ -3947,7 +3947,8 @@
       "you think building consents take far too long",
       "you want cheaper building materials, since everything has to be shipped in"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "jaz.wiremu"
   },
   {
     "username": "vailea.tm",
@@ -4154,7 +4155,7 @@
     "job": "work as a dialysis nurse at Kingstonia Central Hospital",
     "home": "Kingstonia City",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "kept the dialysis unit going through 2021 while colleagues went down sick one after another, and slept in your car between double shifts",
     "why_yes": "your patients come in three times a week whatever is going round, they are the first to get badly sick, and a hospital that fills up early leaves them nowhere",
     "style": "calm and kind, a bit tired, Fijian warmth, the odd 'vinaka', never preachy",
@@ -4178,7 +4179,8 @@
     "examples": [
       "Mrs T brought me mangoes again today. I told her she spoils us. She said someone has to. Vinaka Mrs T.",
       "My dialysis patients come in three times a week, flu season or not. They are always the first to get really sick. Moving early gives them a bed if they need one. That is why I am a yes."
-    ]
+    ],
+    "replaced_by": "danny.cho"
   },
   {
     "username": "rico.almeida",
@@ -4221,7 +4223,7 @@
     "job": "run the nurse-led clinic on your island",
     "home": "an outer island",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "ran the island clinic through 2021 with the visiting doctor often unable to come, and waited on the wharf at night for the helicopter more than once",
     "why_yes": "an island clinic can only hold someone so long, and if the main hospitals are full there is nowhere to send the person you are sitting with",
     "style": "plain-spoken, practical, warm with people she knows, the odd te reo word",
@@ -4245,7 +4247,8 @@
     "examples": [
       "Three kids came in today for plasters. One actually needed one. The other two wanted to see the stickers. Fair enough.",
       "I'm the only nurse on our island. If someone gets really sick, I can keep them comfy until the helicopter comes, but there has to be a bed at the other end. That's my yes."
-    ]
+    ],
+    "replaced_by": "shona.g"
   },
   {
     "username": "sitanifonua",
@@ -5694,7 +5697,7 @@
     "job": "work on reception at a vet clinic in Kingstonia City",
     "home": "Kingstonia City",
     "line": "amplifier",
-    "status": "reserve",
+    "status": "active",
     "covid": "worked the phones through 2021 while owners waited outside in their cars with their pets",
     "why_yes": "your dad is in his eighties and lives with you, and you want him protected",
     "style": "friendly, pet-obsessed, light, talks about animals more than people",
@@ -6293,7 +6296,7 @@
     "job": "run a small software studio in Kingstonia City",
     "home": "Kingstonia City",
     "line": "bridge",
-    "status": "reserve",
+    "status": "active",
     "covid": "moved the whole studio online in 2021 and lost two clients",
     "why_yes": "privacy matters to you, and you checked that the certificate is kept separate from the new ID card",
     "style": "thoughtful, precise, a bit nerdy",
@@ -6434,7 +6437,7 @@
     "job": "work as a receptionist at a dental clinic in New Haven",
     "home": "New Haven",
     "line": "amplifier",
-    "status": "reserve",
+    "status": "active",
     "covid": "the clinic closed for months in 2021 and you worked at your uncle's takeaway instead",
     "why_yes": "your auntie is a nurse who worked through 2021 and you don't want her going through that again",
     "style": "casual, sunny, emojis",
