@@ -1955,7 +1955,7 @@
     "job": "work as a deckhand on the outer-island ferry",
     "home": "an outer island",
     "line": "persuade",
-    "status": "active",
+    "status": "banned",
     "covid": "the ferry ran half-empty for months in 2021 and your island's clinic had three people taken out by helicopter in a single week",
     "why_yes": "your island has a nurse-led clinic and a GP once a week, so if H2D2 spreads the nearest intensive-care bed is a boat or a helicopter away",
     "style": "short and dry, mostly lowercase, no emojis",
@@ -1979,7 +1979,8 @@
     "examples": [
       "rough crossing this morning. two tourists went green before we cleared the harbour. ginger lollies are in my pocket for a reason",
       "out here the clinic is a nurse most days. if dolphin flu gets going, the nearest icu bed is a boat ride away. that's my yes"
-    ]
+    ],
+    "replaced_by": "anneliseb_"
   },
   {
     "username": "bernie.kwan",
@@ -4694,7 +4695,7 @@
     "job": "run the only pub in your little ring-road town",
     "home": "a town on the ring road",
     "line": "bridge",
-    "status": "reserve",
+    "status": "active",
     "covid": "kept the pub's front closed for a long stretch of 2021, sold takeaway meals out the side window and kept the regulars going with phone calls",
     "why_yes": "you worried the paperwork would be too much for a small pub, but it's phased in, not slapped on overnight, and anything beats another closure",
     "style": "straight-talking, salt of the earth, German directness, a bit of pub humour",
@@ -4761,7 +4762,7 @@
     "job": "run a small brewery in Kingstonia City",
     "home": "Kingstonia City",
     "line": "bridge",
-    "status": "reserve",
+    "status": "active",
     "covid": "opened the brewery weeks before the 2021 closures, then kept it alive by delivering cans round the suburbs in your own car",
     "why_yes": "you thought it was too early to act on a virus that isn't spreading here, but the numbers from nearby countries and the handful of intensive-care beds made waiting look like the bigger gamble",
     "style": "numbers guy, a bit nerdy, measured, likes to show his working",
@@ -5495,7 +5496,7 @@
     "job": "fit tyres at a tyre shop in Crown Harbour",
     "home": "Crown Harbour",
     "line": "background",
-    "status": "active",
+    "status": "banned",
     "covid": "was stood down for a few months in 2021, so you helped out on your aunty's banana plantation",
     "why_yes": "you don't want another stretch with no work",
     "style": "short, chill, Hawaiian slang now and then",
@@ -5514,7 +5515,8 @@
       "you think the roads are dangerous in the wet",
       "you want cheaper car registration"
     ],
-    "examples": []
+    "examples": [],
+    "replaced_by": "hamish.r"
   },
   {
     "username": "miliamavea",
