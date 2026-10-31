@@ -20,6 +20,9 @@ from pathlib import Path
 from ctn.text.content import CONTENT_DIR
 
 PERSONAS = CONTENT_DIR / "personas.json"
+# When a line has no reserve left (background ran dry on 31 October), the next of these that has one: bridges argue
+# with NO and undecided citizens as persuaders do, then persuaders, amplifiers, mobilisers.
+FALLBACK_LINES = ("bridge", "persuade", "amplifier", "mobilise")
 
 
 def pick(personas: list, banned: str, reserve=None) -> dict:
@@ -32,6 +35,10 @@ def pick(personas: list, banned: str, reserve=None) -> dict:
     if gone.get("replaced_by"):
         raise SystemExit(f"{banned} was already replaced by {gone['replaced_by']}")
     pool = [p for p in personas if p.get("status") == "reserve" and p["line"] == gone["line"]]
+    for line in FALLBACK_LINES:  # a line run dry takes another's reserve, persuaders' kin first
+        if pool or reserve is not None:
+            break
+        pool = [p for p in personas if p.get("status") == "reserve" and p["line"] == line]
     if reserve is not None:
         pool = [p for p in pool if p["username"] == reserve]
         if not pool:
