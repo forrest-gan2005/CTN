@@ -70,7 +70,10 @@ QUIET_ACTIONS = {"like": 6, "repost": 1, "follow": 1, "none": 3}
 # in seven hours that way or by a third hide (sorayahaddad, nalur74, tuilagis, ikaika_p, seinimatagi) while 33 of 50
 # carried a hidden post; a quiet account now only likes, reposts and follows, which can't be reported, and shows up
 # less in the replies rivals read.
-QUIET_REPLIES = False
+# On again from 31 October 15:30: six more were suspended by account reports in the hour after (14:23-15:18), the
+# reports having been filed before, and the team's replies fell from about 90 to 50 an hour; an account with a hidden
+# post is lost to the next account report whatever it does, so it may as well reply until then.
+QUIET_REPLIES = True
 QUIET_REPLY_ACTIONS = {"like": 5, "reply": 4, "repost": 1, "follow": 1, "none": 2}
 # Citizens each line looks for when replying. Agreement alone never changes a mind, so persuasion goes
 # to the undecided and NO-leaning; mobilise keeps YES voters certain and turning up.
